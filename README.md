@@ -20,15 +20,32 @@ Initial target device:
 - A click-through Key Stack overlay shows recent remote inputs and hold progress
   in the top-right corner. It can be disabled from the XP[d] menu-bar menu.
 
-The wheel-center button is detected from its special empty keyboard report and
-can be mapped from the same inspector as every other control. XPPen's driver
-continues to cycle the wheel function group when the button is pressed.
+The wheel-center button remains unresolved because the remote has not exposed a
+unique HID report for it.
 
 ## HID learning
 
 Select a control in the remote drawing, choose **Learn selected control**, then press the matching physical control. XP[d] stores the raw report signature locally and highlights the matching visual control when that report is received again.
 
 The dial is captured through its relative HID Wheel/AC Pan value rather than the button report path. Learn clockwise and counter-clockwise separately by selecting each visual wheel direction and turning the physical dial once.
+
+## Application actions
+
+Select a control, choose **Open application** or **Toggle application**, and enter
+an app name such as `ChatGPT` in **Command**. Open application launches or focuses
+the app. Toggle application opens a closed app, restores a background or minimized
+app, and minimizes it when it is already frontmost.
+
+Restoring and minimizing another app's windows requires XP[d] to be enabled once
+in **System Settings › Privacy & Security › Accessibility**. No AppleScript or
+shell command is required.
+
+## Configuration files
+
+Use **Import** and **Export** in the mapping inspector to move or back up the
+complete XP[d] setup as readable JSON. The file contains every control's Tap,
+Hold, and Double mapping, HID bindings, the current profile name, and the overlay
+preference. Imports are validated completely before the current setup is replaced.
 
 ## Development relaunches
 

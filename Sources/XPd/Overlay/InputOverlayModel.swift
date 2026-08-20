@@ -2,26 +2,36 @@ import Foundation
 import Observation
 
 struct InputOverlayPresentation: Equatable {
-    let tokens: [String]
-    let detail: String
+    let shortcutTokens: [String]
+    let title: String
+    let isConfigured: Bool
 
-    init(control: RemoteControl, mapping: Mapping) {
+    init(mapping: Mapping) {
         let command = mapping.command.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if mapping.action == .keyboardShortcut, !command.isEmpty {
-            tokens = Self.shortcutTokens(from: command)
-            detail = control.rawValue
+            shortcutTokens = Self.shortcutTokens(from: command)
+            title = command
+            isConfigured = true
+        } else if mapping.action == .noAction {
+            shortcutTokens = []
+            title = "No action"
+            isConfigured = true
+        } else if !command.isEmpty {
+            shortcutTokens = []
+            if mapping.action == .openApplication {
+                title = URL(fileURLWithPath: command)
+                    .deletingPathExtension()
+                    .lastPathComponent
+            } else {
+                title = command
+            }
+            isConfigured = true
         } else {
-            tokens = [control.overlayLabel]
-            detail = command.isEmpty ? mapping.action.rawValue : command
+            shortcutTokens = []
+            title = "Not set"
+            isConfigured = false
         }
-    }
-
-    static func configured(control: RemoteControl, mapping: Mapping) -> InputOverlayPresentation? {
-        let command = mapping.command.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard mapping.action != .noAction else { return nil }
-        guard mapping.action != .keyboardShortcut || !command.isEmpty else { return nil }
-        return InputOverlayPresentation(control: control, mapping: mapping)
     }
 
     private static func shortcutTokens(from command: String) -> [String] {
@@ -46,7 +56,7 @@ struct InputOverlayPresentation: Equatable {
     }
 }
 
-private extension RemoteControl {
+extension RemoteControl {
     var overlayLabel: String {
         switch self {
         case .wheelCCW: "↶"
@@ -61,7 +71,8 @@ struct InputOverlayEntry: Identifiable, Equatable {
     let id = UUID()
     let control: RemoteControl
     let tap: InputOverlayPresentation
-    let hold: InputOverlayPresentation?
+    let hold: InputOverlayPresentation
+    let doubleTap: InputOverlayPresentation
     let pressedAt: Date
     var releasedAt: Date?
 
@@ -81,7 +92,8 @@ final class InputOverlayModel {
     func press(
         control: RemoteControl,
         tap: InputOverlayPresentation,
-        hold: InputOverlayPresentation?
+        hold: InputOverlayPresentation,
+        doubleTap: InputOverlayPresentation
     ) {
         guard isEnabled else { return }
         guard !entries.contains(where: { $0.control == control && $0.isPressed }) else { return }
@@ -90,6 +102,7 @@ final class InputOverlayModel {
             control: control,
             tap: tap,
             hold: hold,
+            doubleTap: doubleTap,
             pressedAt: Date()
         ))
         if entries.count > 12 {

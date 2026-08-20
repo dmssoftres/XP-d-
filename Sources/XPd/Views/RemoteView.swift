@@ -245,7 +245,10 @@ struct RemoteView: View {
         let gestures: [GestureKind] = [.tap, .hold, .doubleTap]
         guard let mapping = gestures
             .map({ store.mapping(for: control, gesture: $0) })
-            .first(where: { $0.action == .openApplication && !$0.command.isEmpty })
+            .first(where: {
+                ($0.action == .openApplication || $0.action == .toggleApplication)
+                    && !$0.command.isEmpty
+            })
         else { return nil }
 
         let command = mapping.command.trimmingCharacters(in: .whitespacesAndNewlines)

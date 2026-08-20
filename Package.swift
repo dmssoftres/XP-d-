@@ -11,6 +11,10 @@ let package = Package(
         .executableTarget(
             name: "XPd",
             path: "Sources/XPd"
+        ),
+        .testTarget(
+            name: "XPdTests",
+            dependencies: ["XPd"]
         )
     ]
 )

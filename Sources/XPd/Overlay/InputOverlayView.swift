@@ -4,31 +4,30 @@ struct InputOverlayView: View {
     let model: InputOverlayModel
 
     var body: some View {
-        VStack(alignment: .trailing, spacing: 8) {
+        VStack(alignment: .trailing, spacing: 9) {
             ForEach(Array(model.visibleEntries.enumerated()), id: \.element.id) { index, entry in
                 TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
-                    InputOverlayRow(
-                        entry: entry,
-                        now: context.date,
-                        isPrimary: index == 0
-                    )
+                    if index == 0 {
+                        SoftSlateCard(entry: entry, now: context.date)
+                    } else {
+                        SoftSlateHistoryCard(entry: entry, now: context.date)
+                    }
                 }
                 .transition(.asymmetric(
                     insertion: .move(edge: .top).combined(with: .opacity),
-                    removal: .opacity.combined(with: .scale(scale: 0.97))
+                    removal: .opacity.combined(with: .scale(scale: 0.98))
                 ))
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-        .padding(10)
-        .animation(.spring(response: 0.32, dampingFraction: 0.84), value: model.visibleEntries.map(\.id))
+        .padding(12)
+        .animation(.spring(response: 0.34, dampingFraction: 0.86), value: model.visibleEntries.map(\.id))
     }
 }
 
-private struct InputOverlayRow: View {
+private struct SoftSlateCard: View {
     let entry: InputOverlayEntry
     let now: Date
-    let isPrimary: Bool
 
     private let holdThreshold: TimeInterval = 0.72
     private let visibleDuration: TimeInterval = 1.35
@@ -45,110 +44,227 @@ private struct InputOverlayRow: View {
         entry.isPressed && elapsed >= holdThreshold
     }
 
-    private var presentation: InputOverlayPresentation {
-        if isHolding, let hold = entry.hold { return hold }
-        return entry.tap
-    }
-
-    private var rowOpacity: Double {
-        guard let releasedAt = entry.releasedAt else { return isPrimary ? 1 : 0.84 }
-        let releaseAge = now.timeIntervalSince(releasedAt)
-        return max(0, 1 - releaseAge / visibleDuration) * (isPrimary ? 1 : 0.84)
+    private var cardOpacity: Double {
+        guard let releasedAt = entry.releasedAt else { return 1 }
+        return max(0, 1 - now.timeIntervalSince(releasedAt) / visibleDuration)
     }
 
     var body: some View {
-        HStack(spacing: 8) {
-            HStack(spacing: 5) {
-                ForEach(Array(presentation.tokens.prefix(4).enumerated()), id: \.offset) { index, token in
-                    if index > 0 {
-                        Text("+")
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.42))
-                    }
-                    InputKeyCap(label: token)
-                }
-            }
-
-            Spacer(minLength: 6)
-
-            VStack(alignment: .trailing, spacing: 2) {
-                Text(isHolding ? "HOLD" : presentation.detail)
-                    .font(.system(size: isHolding ? 8 : 9, weight: .semibold, design: .rounded))
-                    .tracking(isHolding ? 0.7 : 0)
-                    .foregroundStyle(isHolding ? Color.cyan.opacity(0.9) : .white.opacity(0.45))
+        VStack(alignment: .leading, spacing: 0) {
+            ZStack(alignment: .topTrailing) {
+                Text(entry.control.overlayLabel)
+                    .font(.system(size: 92, weight: .bold, design: .rounded))
+                    .foregroundStyle(Color.white.opacity(0.055))
                     .lineLimit(1)
-                if !entry.isPressed {
-                    Text(String(format: "%.1fs", min(elapsed, 9.9)))
-                        .font(.system(size: 9, weight: .medium, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundStyle(.white.opacity(0.3))
-                }
-            }
-            .frame(maxWidth: 64, alignment: .trailing)
+                    .minimumScaleFactor(0.55)
+                    .frame(width: 150, height: 86, alignment: .trailing)
+                    .offset(x: 5, y: -13)
 
-            InputHoldMeter(progress: holdProgress)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("PHYSICAL CONTROL")
+                        .font(.system(size: 9, weight: .semibold, design: .rounded))
+                        .tracking(1.15)
+                        .foregroundStyle(Color.white.opacity(0.38))
+
+                    Text(entry.control.overlayLabel)
+                        .font(.system(size: 31, weight: .medium, design: .rounded))
+                        .foregroundStyle(Color.white.opacity(0.96))
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(height: 76)
+
+            Rectangle()
+                .fill(Color.white.opacity(0.11))
+                .frame(height: 0.7)
+                .padding(.bottom, 12)
+
+            VStack(spacing: 7) {
+                SoftSlateActionLine(label: "TAP", presentation: entry.tap, isActive: !isHolding)
+                SoftSlateActionLine(label: "HOLD", presentation: entry.hold, isActive: isHolding)
+                SoftSlateActionLine(label: "DOUBLE", presentation: entry.doubleTap, isActive: false)
+            }
+
+            Spacer(minLength: 12)
+
+            HorizontalHoldMeter(progress: holdProgress)
         }
-        .padding(.leading, 10)
-        .padding(.trailing, 7)
-        .frame(width: 246, height: isPrimary ? 54 : 48)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-        .background(
-            RoundedRectangle(cornerRadius: 15, style: .continuous)
-                .fill(Color.black.opacity(isPrimary ? 0.25 : 0.17))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 15, style: .continuous)
-                .strokeBorder(Color.white.opacity(isPrimary ? 0.14 : 0.08), lineWidth: 0.7)
-        )
-        .shadow(color: .black.opacity(0.2), radius: 16, y: 7)
-        .opacity(rowOpacity)
+        .padding(.horizontal, 18)
+        .padding(.top, 15)
+        .padding(.bottom, 14)
+        .frame(width: 350, height: 226)
+        .background {
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .opacity(0.72)
+        }
+        .background {
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            Color(red: 0.10, green: 0.12, blue: 0.16).opacity(0.58),
+                            Color(red: 0.07, green: 0.09, blue: 0.13).opacity(0.42)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .strokeBorder(
+                    LinearGradient(
+                        colors: [Color.white.opacity(0.22), Color.white.opacity(0.075)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 0.8
+                )
+        }
+        .overlay(alignment: .top) {
+            LinearGradient(
+                colors: [Color.white.opacity(0.08), Color.clear],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .frame(height: 54)
+            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        }
+        .shadow(color: Color.black.opacity(0.30), radius: 24, y: 12)
+        .opacity(cardOpacity)
     }
 }
 
-private struct InputKeyCap: View {
+private struct SoftSlateActionLine: View {
     let label: String
+    let presentation: InputOverlayPresentation
+    let isActive: Bool
 
     var body: some View {
-        Text(label)
-            .font(.system(size: 13, weight: .semibold, design: .rounded))
-            .foregroundStyle(.white.opacity(0.94))
-            .lineLimit(1)
-            .padding(.horizontal, label.count > 2 ? 9 : 8)
-            .frame(minWidth: 33, minHeight: 31)
-            .background(
-                LinearGradient(
-                    colors: [Color.white.opacity(0.13), Color.white.opacity(0.05)],
-                    startPoint: .top,
-                    endPoint: .bottom
-                ),
-                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder(Color.white.opacity(0.13), lineWidth: 0.6)
-            )
+        HStack(spacing: 12) {
+            Text(label)
+                .font(.system(size: 11, weight: .medium, design: .rounded))
+                .tracking(0.55)
+                .foregroundStyle(isActive ? Color.cyan.opacity(0.84) : Color.white.opacity(0.48))
+                .frame(width: 66, alignment: .leading)
+
+            ActionValue(presentation: presentation, isActive: isActive, compact: false)
+        }
+        .frame(height: 24)
     }
 }
 
-private struct InputHoldMeter: View {
+private struct SoftSlateHistoryCard: View {
+    let entry: InputOverlayEntry
+    let now: Date
+
+    private var cardOpacity: Double {
+        guard let releasedAt = entry.releasedAt else { return 0.68 }
+        return max(0, 1 - now.timeIntervalSince(releasedAt) / 1.35) * 0.68
+    }
+
+    var body: some View {
+        HStack(spacing: 13) {
+            Text(entry.control.overlayLabel)
+                .font(.system(size: 16, weight: .semibold, design: .rounded))
+                .foregroundStyle(Color.white.opacity(0.78))
+                .frame(width: 48, alignment: .leading)
+
+            Rectangle()
+                .fill(Color.white.opacity(0.10))
+                .frame(width: 0.7, height: 30)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("TAP")
+                    .font(.system(size: 8, weight: .semibold, design: .rounded))
+                    .tracking(0.7)
+                    .foregroundStyle(Color.white.opacity(0.30))
+                ActionValue(presentation: entry.tap, isActive: false, compact: true)
+            }
+        }
+        .padding(.horizontal, 16)
+        .frame(width: 350, height: 62, alignment: .leading)
+        .background {
+            RoundedRectangle(cornerRadius: 17, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .opacity(0.48)
+        }
+        .background {
+            RoundedRectangle(cornerRadius: 17, style: .continuous)
+                .fill(Color(red: 0.08, green: 0.10, blue: 0.14).opacity(0.31))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 17, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.10), lineWidth: 0.7)
+        }
+        .shadow(color: Color.black.opacity(0.18), radius: 14, y: 7)
+        .opacity(cardOpacity)
+    }
+}
+
+private struct ActionValue: View {
+    let presentation: InputOverlayPresentation
+    let isActive: Bool
+    let compact: Bool
+
+    var body: some View {
+        Group {
+            if presentation.shortcutTokens.isEmpty {
+                Text(presentation.title)
+                    .font(.system(size: compact ? 11 : 14, weight: isActive ? .medium : .regular, design: .rounded))
+                    .foregroundStyle(
+                        presentation.isConfigured
+                            ? Color.white.opacity(isActive ? 0.94 : 0.70)
+                            : Color.white.opacity(0.28)
+                    )
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            } else {
+                HStack(spacing: compact ? 3 : 5) {
+                    ForEach(Array(presentation.shortcutTokens.prefix(4).enumerated()), id: \.offset) { index, token in
+                        if index > 0 {
+                            Text("+")
+                                .font(.system(size: compact ? 8 : 10, weight: .regular))
+                                .foregroundStyle(Color.white.opacity(0.30))
+                        }
+                        Text(token)
+                            .font(.system(size: compact ? 10 : 13, weight: .medium, design: .rounded))
+                            .foregroundStyle(Color.white.opacity(isActive ? 0.92 : 0.68))
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct HorizontalHoldMeter: View {
     let progress: Double
 
     var body: some View {
         GeometryReader { proxy in
-            ZStack(alignment: .bottom) {
-                Capsule().fill(.white.opacity(0.10))
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.white.opacity(0.10))
+
                 Capsule()
                     .fill(
                         LinearGradient(
-                            colors: [.cyan.opacity(0.7), .cyan],
-                            startPoint: .bottom,
-                            endPoint: .top
+                            colors: [
+                                Color(red: 0.38, green: 0.82, blue: 1.0),
+                                Color(red: 0.32, green: 0.94, blue: 0.88)
+                            ],
+                            startPoint: .leading,
+                            endPoint: .trailing
                         )
                     )
-                    .frame(height: max(3, proxy.size.height * progress))
-                    .shadow(color: .cyan.opacity(progress > 0.85 ? 0.7 : 0.2), radius: 5)
+                    .frame(width: proxy.size.width * progress)
+                    .shadow(color: Color.cyan.opacity(progress > 0 ? 0.55 : 0), radius: 8)
             }
         }
-        .frame(width: 5, height: 35)
+        .frame(height: 7)
+        .animation(.linear(duration: 0.06), value: progress)
     }
 }

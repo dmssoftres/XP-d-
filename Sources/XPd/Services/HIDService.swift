@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import IOKit.hid
 import IOKit.hidsystem
@@ -35,6 +36,14 @@ final class HIDService {
 
     init() {
         start()
+    }
+
+    func openInputMonitoringSettings() {
+        guard let url = URL(
+            string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
+        ) else { return }
+
+        NSWorkspace.shared.open(url)
     }
 
     private func start() {

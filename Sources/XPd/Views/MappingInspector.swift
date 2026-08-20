@@ -2,6 +2,9 @@ import SwiftUI
 
 struct MappingInspector: View {
     let store: MappingStore
+    @State private var isImportingConfiguration = false
+    @State private var isExportingConfiguration = false
+    @State private var exportDocument = XPdConfigurationDocument()
 
     private var binding: Binding<Mapping> {
         Binding(
@@ -43,7 +46,13 @@ struct MappingInspector: View {
                         }
                     }
 
-                    TextField("Command", text: binding.command)
+                    TextField(commandPlaceholder, text: binding.command)
+
+                    if isApplicationAction {
+                        Text("Use an app name, bundle ID, or .app path. Toggle application requires Accessibility permission.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
 
                     if let result = store.lastActionResult {
                         Label(
@@ -69,6 +78,17 @@ struct MappingInspector: View {
                         .labelsHidden()
                         .pickerStyle(.segmented)
                     }
+
+                    if let message = store.lastPersistenceResult.message {
+                        Label(
+                            message,
+                            systemImage: store.lastPersistenceResult.succeeded
+                                ? "checkmark.circle.fill"
+                                : "exclamationmark.triangle.fill"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(store.lastPersistenceResult.succeeded ? Color.green : Color.orange)
+                    }
                 }
                 .padding(4)
             }
@@ -77,6 +97,8 @@ struct MappingInspector: View {
                 statusCard(title: "Current profile", value: store.profileName, detail: "local mappings")
                 statusCard(title: "Device", value: store.hid.isConnected ? "Connected" : "Offline", detail: "VID 10429 · PID 514")
             }
+
+            configurationControls
 
             GroupBox("Live HID") {
                 VStack(alignment: .leading, spacing: 10) {
@@ -99,6 +121,13 @@ struct MappingInspector: View {
                                 store.clearHIDBinding(for: store.selectedControl)
                             }
                         }
+
+                        Button {
+                            store.hid.openInputMonitoringSettings()
+                        } label: {
+                            Label("Input Monitoring", systemImage: "gear")
+                        }
+                        .help("Open Privacy & Security → Input Monitoring in System Settings")
                     }
 
                     if store.learningControl != nil {
@@ -129,6 +158,93 @@ struct MappingInspector: View {
 
             Spacer()
         }
+        .fileImporter(
+            isPresented: $isImportingConfiguration,
+            allowedContentTypes: XPdConfigurationDocument.readableContentTypes,
+            allowsMultipleSelection: false,
+            onCompletion: importConfiguration
+        )
+        .fileExporter(
+            isPresented: $isExportingConfiguration,
+            document: exportDocument,
+            contentType: .json,
+            defaultFilename: exportFilename,
+            onCompletion: exportConfigurationCompleted
+        )
+    }
+
+    private var configurationControls: some View {
+        HStack(spacing: 10) {
+            Button {
+                isImportingConfiguration = true
+            } label: {
+                Label("Import", systemImage: "square.and.arrow.down")
+            }
+
+            Button {
+                guard let data = store.exportConfiguration() else { return }
+                exportDocument = XPdConfigurationDocument(data: data)
+                isExportingConfiguration = true
+            } label: {
+                Label("Export", systemImage: "square.and.arrow.up")
+            }
+
+            Spacer()
+
+            if let message = store.lastConfigurationResult.message {
+                Label(
+                    message,
+                    systemImage: store.lastConfigurationResult.isSuccess
+                        ? "checkmark.circle.fill"
+                        : "exclamationmark.triangle.fill"
+                )
+                .font(.caption)
+                .foregroundStyle(store.lastConfigurationResult.isSuccess ? Color.green : Color.orange)
+                .lineLimit(2)
+            }
+        }
+    }
+
+    private func importConfiguration(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            guard let url = urls.first else { return }
+            let hasScopedAccess = url.startAccessingSecurityScopedResource()
+            defer {
+                if hasScopedAccess { url.stopAccessingSecurityScopedResource() }
+            }
+
+            do {
+                let data = try Data(contentsOf: url)
+                store.importConfiguration(data)
+            } catch {
+                store.configurationFileOperationFailed(.import, error: error)
+            }
+        case .failure(let error):
+            guard !isUserCancellation(error) else { return }
+            store.configurationFileOperationFailed(.import, error: error)
+        }
+    }
+
+    private func exportConfigurationCompleted(_ result: Result<URL, Error>) {
+        switch result {
+        case .success:
+            store.configurationExportCompleted()
+        case .failure(let error):
+            guard !isUserCancellation(error) else { return }
+            store.configurationFileOperationFailed(.export, error: error)
+        }
+    }
+
+    private func isUserCancellation(_ error: Error) -> Bool {
+        (error as? CocoaError)?.code == .userCancelled
+    }
+
+    private var exportFilename: String {
+        let safeProfileName = store.profileName
+            .replacingOccurrences(of: "/", with: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return safeProfileName.isEmpty ? "XPd-Configuration" : "XPd-\(safeProfileName)"
     }
 
     private func statusCard(title: String, value: String, detail: String) -> some View {
@@ -140,5 +256,17 @@ struct MappingInspector: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
         .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var selectedAction: ActionKind {
+        store.mapping(for: store.selectedControl, gesture: store.selectedGesture).action
+    }
+
+    private var isApplicationAction: Bool {
+        selectedAction == .openApplication || selectedAction == .toggleApplication
+    }
+
+    private var commandPlaceholder: String {
+        isApplicationAction ? "Application name (for example, ChatGPT)" : "Command"
     }
 }

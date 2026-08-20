@@ -4,24 +4,55 @@ import Observation
 @Observable
 @MainActor
 final class MappingStore {
+    enum PersistenceResult: Equatable {
+        case idle
+        case saved
+        case failed(String)
+
+        var message: String? {
+            switch self {
+            case .idle:
+                return nil
+            case .saved:
+                return "Saved automatically"
+            case let .failed(message):
+                return message
+            }
+        }
+
+        var succeeded: Bool {
+            if case .saved = self { return true }
+            return false
+        }
+    }
+
     var selectedControl: RemoteControl = .k1
     var selectedGesture: GestureKind = .tap
-    var profileName = "Global"
-    var mappings: [MappingKey: Mapping] = [:]
+    var profileName = "Global" {
+        didSet {
+            UserDefaults.standard.set(profileName, forKey: profileNameDefaultsKey)
+            lastPersistenceResult = .saved
+        }
+    }
+    private(set) var mappings: [MappingKey: Mapping] = [:]
     private(set) var hidBindings: [RemoteControl: String] = [:]
     private(set) var learningControl: RemoteControl?
     private(set) var liveControl: RemoteControl?
     private(set) var lastActionResult: ActionExecutionResult?
+    private(set) var lastConfigurationResult: ConfigurationOperationResult = .idle
+    private(set) var lastPersistenceResult: PersistenceResult = .idle
     var showsInputOverlay: Bool {
         didSet {
             UserDefaults.standard.set(showsInputOverlay, forKey: inputOverlayDefaultsKey)
             inputOverlay.setEnabled(showsInputOverlay)
+            lastPersistenceResult = .saved
         }
     }
     let hid = HIDService()
 
     private let defaultsKey = "XPd.mappings.v1"
     private let hidBindingsKey = "XPd.hidBindings.v1"
+    private let profileNameDefaultsKey = "XPd.profileName.v1"
     private let inputOverlayDefaultsKey = "XPd.showsInputOverlay.v1"
     private var liveInputGeneration = 0
     private var actionPressesInFlight: Set<RemoteControl> = []
@@ -29,6 +60,7 @@ final class MappingStore {
     @ObservationIgnored private lazy var inputOverlay = InputOverlayController()
 
     init() {
+        profileName = UserDefaults.standard.string(forKey: profileNameDefaultsKey) ?? "Global"
         showsInputOverlay = UserDefaults.standard.object(forKey: inputOverlayDefaultsKey) as? Bool ?? true
         load()
         loadHIDBindings()
@@ -43,6 +75,7 @@ final class MappingStore {
         }
         if mappings.isEmpty {
             mappings[MappingKey(control: .k1, gesture: .tap)] = Mapping(action: .openApplication, command: "ChatGPT")
+            save()
         }
     }
 
@@ -73,12 +106,106 @@ final class MappingStore {
         hidBindings[control]
     }
 
+    /// Returns the current configuration as deterministic, pretty-printed
+    /// JSON data. File panels and filesystem access belong to the UI layer.
+    func exportConfiguration() -> Data? {
+        let configuration = XPdConfiguration(
+            mappings: RemoteControl.allCases.flatMap { control in
+                GestureKind.allCases.map { gesture in
+                    XPdConfiguration.MappingEntry(
+                        control: control,
+                        gesture: gesture,
+                        mapping: mapping(for: control, gesture: gesture)
+                    )
+                }
+            },
+            hidBindings: hidBindings.map { control, signature in
+                XPdConfiguration.HIDBindingEntry(control: control, signature: signature)
+            },
+            profileName: profileName,
+            showsInputOverlay: showsInputOverlay
+        )
+
+        do {
+            let data = try configuration.encodedData()
+            lastConfigurationResult = .idle
+            return data
+        } catch {
+            lastConfigurationResult = .failed(
+                operation: .export,
+                message: Self.configurationErrorMessage(for: error)
+            )
+            return nil
+        }
+    }
+
+    /// Validates a complete document before changing any live or persisted
+    /// state. The replacement is synchronous on the main actor, so observers
+    /// cannot observe a partially imported configuration.
+    @discardableResult
+    func importConfiguration(_ data: Data) -> Bool {
+        let configuration: XPdConfiguration
+        do {
+            configuration = try XPdConfiguration.decode(data)
+        } catch {
+            lastConfigurationResult = .failed(
+                operation: .import,
+                message: Self.configurationErrorMessage(for: error)
+            )
+            return false
+        }
+
+        var importedMappings: [MappingKey: Mapping] = [:]
+        for entry in configuration.mappings {
+            importedMappings[MappingKey(control: entry.control, gesture: entry.gesture)] = entry.mapping
+        }
+
+        var importedHIDBindings: [RemoteControl: String] = [:]
+        for entry in configuration.hidBindings {
+            importedHIDBindings[entry.control] = entry.signature
+        }
+
+        learningControl = nil
+        liveControl = nil
+        actionPressesInFlight.removeAll()
+        mappings = importedMappings
+        hidBindings = importedHIDBindings
+        profileName = configuration.profileName
+        showsInputOverlay = configuration.showsInputOverlay
+        save()
+        saveHIDBindings()
+
+        lastConfigurationResult = .succeeded(
+            operation: .import,
+            detail: "Imported \(configuration.mappings.count) mappings and \(configuration.hidBindings.count) HID bindings."
+        )
+        return true
+    }
+
+    func configurationExportCompleted() {
+        lastConfigurationResult = .succeeded(
+            operation: .export,
+            detail: "Configuration exported."
+        )
+    }
+
+    func configurationFileOperationFailed(
+        _ operation: ConfigurationOperation,
+        error: Error
+    ) {
+        lastConfigurationResult = .failed(
+            operation: operation,
+            message: error.localizedDescription
+        )
+    }
+
     func previewInputOverlay() {
         guard showsInputOverlay else { return }
         inputOverlay.pulse(
             control: selectedControl,
             tap: mapping(for: selectedControl, gesture: .tap),
-            hold: mapping(for: selectedControl, gesture: .hold)
+            hold: mapping(for: selectedControl, gesture: .hold),
+            doubleTap: mapping(for: selectedControl, gesture: .doubleTap)
         )
     }
 
@@ -151,13 +278,19 @@ final class MappingStore {
         inputOverlay.press(
             control: control,
             tap: mapping(for: control, gesture: .tap),
-            hold: mapping(for: control, gesture: .hold)
+            hold: mapping(for: control, gesture: .hold),
+            doubleTap: mapping(for: control, gesture: .doubleTap)
         )
     }
 
     private func save() {
-        guard let data = try? JSONEncoder().encode(mappings) else { return }
-        UserDefaults.standard.set(data, forKey: defaultsKey)
+        do {
+            let data = try JSONEncoder().encode(mappings)
+            UserDefaults.standard.set(data, forKey: defaultsKey)
+            lastPersistenceResult = .saved
+        } catch {
+            lastPersistenceResult = .failed("Could not save mappings: \(error.localizedDescription)")
+        }
     }
 
     private func load() {
@@ -166,9 +299,22 @@ final class MappingStore {
         mappings = decoded
     }
 
+    private static func configurationErrorMessage(for error: Error) -> String {
+        if let localizedError = error as? LocalizedError,
+           let description = localizedError.errorDescription {
+            return description
+        }
+        return "Configuration could not be read."
+    }
+
     private func saveHIDBindings() {
-        guard let data = try? JSONEncoder().encode(hidBindings) else { return }
-        UserDefaults.standard.set(data, forKey: hidBindingsKey)
+        do {
+            let data = try JSONEncoder().encode(hidBindings)
+            UserDefaults.standard.set(data, forKey: hidBindingsKey)
+            lastPersistenceResult = .saved
+        } catch {
+            lastPersistenceResult = .failed("Could not save HID bindings: \(error.localizedDescription)")
+        }
     }
 
     private func loadHIDBindings() {

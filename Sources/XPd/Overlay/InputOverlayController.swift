@@ -7,7 +7,7 @@ final class InputOverlayController {
     private let panel: NSPanel
 
     init() {
-        let size = NSSize(width: 280, height: 210)
+        let size = NSSize(width: 378, height: 404)
         panel = NSPanel(
             contentRect: NSRect(origin: .zero, size: size),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -43,13 +43,14 @@ final class InputOverlayController {
         }
     }
 
-    func press(control: RemoteControl, tap: Mapping, hold: Mapping) {
+    func press(control: RemoteControl, tap: Mapping, hold: Mapping, doubleTap: Mapping) {
         guard model.isEnabled else { return }
         ensureVisible()
         model.press(
             control: control,
-            tap: InputOverlayPresentation(control: control, mapping: tap),
-            hold: InputOverlayPresentation.configured(control: control, mapping: hold)
+            tap: InputOverlayPresentation(mapping: tap),
+            hold: InputOverlayPresentation(mapping: hold),
+            doubleTap: InputOverlayPresentation(mapping: doubleTap)
         )
     }
 
@@ -57,10 +58,11 @@ final class InputOverlayController {
         model.release(control: control)
     }
 
-    func pulse(control: RemoteControl, tap: Mapping, hold: Mapping) {
-        press(control: control, tap: tap, hold: hold)
+    func pulse(control: RemoteControl, tap: Mapping, hold: Mapping, doubleTap: Mapping) {
+        press(control: control, tap: tap, hold: hold, doubleTap: doubleTap)
         Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .milliseconds(180))
+            // Keep previews alive long enough to demonstrate the hold state.
+            try? await Task.sleep(for: .milliseconds(1_050))
             self?.release(control: control)
         }
     }

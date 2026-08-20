@@ -21,6 +21,7 @@ enum GestureKind: String, CaseIterable, Codable, Identifiable {
 enum ActionKind: String, CaseIterable, Codable, Identifiable {
     case keyboardShortcut = "Keyboard shortcut"
     case openApplication = "Open application"
+    case toggleApplication = "Toggle application"
     case macOSShortcut = "Run macOS Shortcut"
     case appleScript = "Run AppleScript"
     case shellCommand = "Run shell command"
