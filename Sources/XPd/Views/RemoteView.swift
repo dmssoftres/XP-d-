@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct RemoteView: View {
@@ -111,20 +112,40 @@ struct RemoteView: View {
             Button {
                 store.selectedControl = .wheelCenter
             } label: {
-                Circle()
-                    .fill(
-                        LinearGradient(
-                            colors: [Color(white: 0.25), Color(white: 0.15)],
-                            startPoint: .top,
-                            endPoint: .bottom
+                ZStack {
+                    Circle()
+                        .fill(
+                            RadialGradient(
+                                colors: [
+                                    .white,
+                                    Color(red: 1.0, green: 0.10, blue: 0.06),
+                                    Color(red: 0.48, green: 0.0, blue: 0.02),
+                                    Color(white: 0.035)
+                                ],
+                                center: .center,
+                                startRadius: 0,
+                                endRadius: 27
+                            )
                         )
-                    )
-                    .overlay {
+
+                    ForEach(0..<4, id: \.self) { index in
                         Circle()
-                            .stroke(centerStroke, lineWidth: store.liveControl == .wheelCenter ? 2 : 1)
+                            .stroke(.red.opacity(0.34 - Double(index) * 0.06), lineWidth: 1)
+                            .padding(CGFloat(index * 5 + 7))
                     }
-                    .shadow(color: .black.opacity(0.72), radius: 3, y: 2)
-                    .frame(width: 54, height: 54)
+
+                    Circle()
+                        .fill(.white)
+                        .frame(width: 6, height: 6)
+                        .shadow(color: .red, radius: 8)
+                }
+                .overlay {
+                    Circle()
+                        .stroke(centerStroke, lineWidth: store.liveControl == .wheelCenter ? 2 : 1)
+                }
+                .shadow(color: .black.opacity(0.72), radius: 3, y: 2)
+                .shadow(color: .red.opacity(0.28), radius: 6)
+                .frame(width: 54, height: 54)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Wheel center")
@@ -162,7 +183,7 @@ struct RemoteView: View {
             VStack(spacing: 8) {
                 keyButton(.k8)
                 keyButton(.k9, height: 132)
-                keyButton(.k7)
+                keyButton(.k10)
             }
             .frame(width: 62)
 
@@ -179,7 +200,7 @@ struct RemoteView: View {
                     keyButton(.k6)
                     keyButton(.k3)
                 }
-                keyButton(.k10)
+                keyButton(.k7)
             }
             .frame(width: 134)
         }
@@ -189,11 +210,23 @@ struct RemoteView: View {
         Button {
             store.selectedControl = control
         } label: {
-            Text(control.rawValue)
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(keyLabelColor(control))
-                .frame(maxWidth: .infinity, minHeight: height, maxHeight: height)
-                .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+            ZStack(alignment: .bottom) {
+                Text(control.rawValue)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(keyLabelColor(control))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                if let appIcon = loadedApplicationIcon(for: control) {
+                    Image(nsImage: appIcon)
+                        .resizable()
+                        .interpolation(.high)
+                        .scaledToFit()
+                        .frame(width: 16, height: 16)
+                        .padding(.bottom, 5)
+                }
+            }
+            .frame(maxWidth: .infinity, minHeight: height, maxHeight: height)
+            .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
         }
         .buttonStyle(HardwareKeyStyle(
             selected: store.selectedControl == control,
@@ -206,6 +239,38 @@ struct RemoteView: View {
         if store.liveControl == control { return .green }
         if store.selectedControl == control { return .white.opacity(0.86) }
         return .white.opacity(0.30)
+    }
+
+    private func loadedApplicationIcon(for control: RemoteControl) -> NSImage? {
+        let gestures: [GestureKind] = [.tap, .hold, .doubleTap]
+        guard let mapping = gestures
+            .map({ store.mapping(for: control, gesture: $0) })
+            .first(where: { $0.action == .openApplication && !$0.command.isEmpty })
+        else { return nil }
+
+        let command = mapping.command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !command.isEmpty else { return nil }
+
+        let expandedCommand = NSString(string: command).expandingTildeInPath
+        let appName = command.lowercased().hasSuffix(".app") ? command : "\(command).app"
+        let candidatePaths = command.contains("/")
+            ? [expandedCommand]
+            : [
+                "/Applications/\(appName)",
+                "/System/Applications/\(appName)",
+                "/System/Applications/Utilities/\(appName)",
+                NSString(string: "~/Applications/\(appName)").expandingTildeInPath
+            ]
+
+        if let path = candidatePaths.first(where: { FileManager.default.fileExists(atPath: $0) }) {
+            return NSWorkspace.shared.icon(forFile: path)
+        }
+
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: command) {
+            return NSWorkspace.shared.icon(forFile: url.path)
+        }
+
+        return nil
     }
 }
 

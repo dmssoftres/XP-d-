@@ -38,6 +38,6 @@ struct MappingKey: Hashable, Codable {
 }
 
 struct Mapping: Codable, Equatable {
-    var action: ActionKind = .keyboardShortcut
+    var action: ActionKind = .openApplication
     var command: String = ""
 }

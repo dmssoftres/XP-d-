@@ -17,8 +17,12 @@ Initial target device:
 - Select a physical/visual control and assign actions.
 - Persist mappings locally.
 - Menu-bar presence plus a normal configuration window.
+- A click-through Key Stack overlay shows recent remote inputs and hold progress
+  in the top-right corner. It can be disabled from the XP[d] menu-bar menu.
 
-The wheel-center button is intentionally treated as unresolved until its HID behavior is verified.
+The wheel-center button is detected from its special empty keyboard report and
+can be mapped from the same inspector as every other control. XPPen's driver
+continues to cycle the wheel function group when the button is pressed.
 
 ## HID learning
 

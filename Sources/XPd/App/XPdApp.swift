@@ -1,4 +1,5 @@
 import AppKit
+import IOKit.hidsystem
 import SwiftUI
 
 @main
@@ -13,7 +14,7 @@ struct XPdApp: App {
         }
         .defaultSize(width: 980, height: 650)
 
-        MenuBarExtra("XP[d]", systemImage: "dial.medium") {
+        MenuBarExtra("XP[d]", systemImage: "smallcircle.filled.circle") {
             MenuBarView(store: store)
         }
     }
@@ -23,6 +24,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
+        if IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeUnknown {
+            _ = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
+        }
     }
 }
 
@@ -32,6 +36,12 @@ private struct MenuBarView: View {
 
     var body: some View {
         Text(store.hid.isConnected ? "Shortcut Remote connected" : "Shortcut Remote disconnected")
+        Divider()
+        Toggle("Show Input Overlay", isOn: Bindable(store).showsInputOverlay)
+        Button("Preview Input Overlay") {
+            store.previewInputOverlay()
+        }
+        .disabled(!store.showsInputOverlay)
         Divider()
         Button("Open XP[d]") {
             openWindow(id: "main")

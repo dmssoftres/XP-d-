@@ -21,6 +21,13 @@ struct MappingInspector: View {
                         .font(.title2.weight(.semibold))
                 }
                 Spacer()
+                Button {
+                    store.previewInputOverlay()
+                } label: {
+                    Label("Preview", systemImage: "play.fill")
+                }
+                .controlSize(.small)
+                .disabled(!store.showsInputOverlay)
                 Text(store.selectedGesture.rawValue)
                     .font(.caption.weight(.medium))
                     .padding(.horizontal, 10)
@@ -37,6 +44,18 @@ struct MappingInspector: View {
                     }
 
                     TextField("Command", text: binding.command)
+
+                    if let result = store.lastActionResult {
+                        Label(
+                            result.message,
+                            systemImage: result.succeeded
+                                ? "checkmark.circle.fill"
+                                : "exclamationmark.triangle.fill"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(result.succeeded ? Color.green : Color.orange)
+                        .lineLimit(2)
+                    }
 
                     VStack(alignment: .leading, spacing: 7) {
                         Text("Gesture")
@@ -101,7 +120,7 @@ struct MappingInspector: View {
             }
 
             if store.selectedControl == .wheelCenter {
-                Label("Wheel-center input is intentionally unresolved until we identify its HID report.", systemImage: "ladybug")
+                Label("Wheel-center input remains unresolved because the remote has not exposed a unique HID report for it.", systemImage: "ladybug")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .padding(12)

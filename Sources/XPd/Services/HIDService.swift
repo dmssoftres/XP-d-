@@ -1,5 +1,6 @@
 import Foundation
 import IOKit.hid
+import IOKit.hidsystem
 import Observation
 import OSLog
 
@@ -37,6 +38,10 @@ final class HIDService {
     }
 
     private func start() {
+        if IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeUnknown {
+            _ = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
+        }
+
         let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
         resources.manager = manager
 
@@ -151,7 +156,7 @@ final class HIDService {
             }
         }
 
-        let payload = bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
+        let payload = payloadBytes.map { String(format: "%02X", $0) }.joined(separator: " ")
         let signature = "r\(reportID):\(payload)"
 
         lastEvent = signature
