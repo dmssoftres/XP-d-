@@ -60,11 +60,42 @@ struct MappingInspector: View {
             }
 
             GroupBox("Live HID") {
-                HStack {
-                    Text(store.hid.lastEvent)
-                        .font(.system(.body, design: .monospaced))
-                        .textSelection(.enabled)
-                    Spacer()
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text(store.hidBinding(for: store.selectedControl) ?? "No HID input learned")
+                            .font(.system(.body, design: .monospaced))
+                            .textSelection(.enabled)
+                            .lineLimit(1)
+                        Spacer()
+                    }
+
+                    HStack {
+                        Button(store.learningControl == store.selectedControl ? "Waiting for input…" : "Learn selected control") {
+                            store.learnSelectedControl()
+                        }
+                        .disabled(!store.hid.isConnected || !store.hid.hasInputAccess || store.learningControl != nil)
+
+                        if store.hidBinding(for: store.selectedControl) != nil {
+                            Button("Clear", role: .destructive) {
+                                store.clearHIDBinding(for: store.selectedControl)
+                            }
+                        }
+                    }
+
+                    if store.learningControl != nil {
+                        Text("Press the matching control on the physical remote.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else if !store.hid.hasInputAccess {
+                        Text("Allow XP[d] in System Settings › Privacy & Security › Input Monitoring, then relaunch.")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    } else {
+                        Text(store.hid.lastEvent)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
                 }
                 .padding(6)
             }

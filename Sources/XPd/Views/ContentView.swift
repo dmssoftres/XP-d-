@@ -26,7 +26,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("XP[d]")
                     .font(.headline)
-                Text(store.hid.isConnected ? "Shortcut Remote connected" : "Waiting for Shortcut Remote")
+                Text(deviceStatus)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -41,5 +41,11 @@ struct ContentView: View {
         }
         .padding(.horizontal, 22)
         .padding(.vertical, 14)
+    }
+
+    private var deviceStatus: String {
+        if !store.hid.isConnected { return "Waiting for Shortcut Remote" }
+        if !store.hid.hasInputAccess { return "Input Monitoring permission required" }
+        return "Shortcut Remote connected"
     }
 }

@@ -1,24 +1,70 @@
-#!/bin/zsh
+#!/usr/bin/env bash
 set -euo pipefail
 
+MODE="${1:-run}"
 APP_NAME="XPd"
 BUNDLE_NAME="XP[d]"
 BUNDLE_ID="com.dmssoftres.xpd"
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST="$ROOT/dist"
 APP="$DIST/$BUNDLE_NAME.app"
-BINARY="$ROOT/.build/debug/$APP_NAME"
+INFO_PLIST="$APP/Contents/Info.plist"
 
-pkill -x "$APP_NAME" 2>/dev/null || true
+open_app() {
+  /usr/bin/open "$APP"
+}
+
+stop_app() {
+  pkill -x "$APP_NAME" 2>/dev/null || true
+  for _ in {1..50}; do
+    if ! pgrep -x "$APP_NAME" >/dev/null; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  echo "Timed out waiting for XP[d] to quit." >&2
+  return 1
+}
+
+case "$MODE" in
+  --relaunch|relaunch)
+    if [[ ! -x "$APP/Contents/MacOS/$APP_NAME" ]]; then
+      echo "XP[d] has not been built yet; run $0 first." >&2
+      exit 1
+    fi
+    stop_app
+    open_app
+    sleep 1
+    pgrep -x "$APP_NAME" >/dev/null
+    echo "XP[d] relaunched without changing its code signature."
+    exit 0
+    ;;
+  --reset-input-monitoring|reset-input-monitoring)
+    if [[ ! -x "$APP/Contents/MacOS/$APP_NAME" ]]; then
+      echo "XP[d] has not been built yet; run $0 first." >&2
+      exit 1
+    fi
+    stop_app
+    /usr/bin/tccutil reset ListenEvent "$BUNDLE_ID"
+    /usr/bin/open 'x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent'
+    open_app
+    echo "Reset XP[d]'s stale Input Monitoring record. Enable XP[d], then use --relaunch."
+    exit 0
+    ;;
+esac
+
+stop_app
 
 cd "$ROOT"
 swift build
+BUILD_BINARY="$(swift build --show-bin-path)/$APP_NAME"
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
-cp "$BINARY" "$APP/Contents/MacOS/$APP_NAME"
+cp "$BUILD_BINARY" "$APP/Contents/MacOS/$APP_NAME"
+chmod +x "$APP/Contents/MacOS/$APP_NAME"
 
-cat > "$APP/Contents/Info.plist" <<PLIST
+cat > "$INFO_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -29,14 +75,37 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSPrincipalClass</key><string>NSApplication</string>
+  <key>NSInputMonitoringUsageDescription</key>
+  <string>XP[d] reads input from your connected Shortcut Remote so its controls can be mapped.</string>
 </dict>
 </plist>
 PLIST
 
-/usr/bin/open -n "$APP"
+/usr/bin/codesign --force --sign - "$APP"
 
-if [[ "${1:-}" == "--verify" ]]; then
-  sleep 1
-  pgrep -x "$APP_NAME" >/dev/null
-  echo "XP[d] launched successfully."
-fi
+case "$MODE" in
+  run)
+    open_app
+    ;;
+  --debug|debug)
+    lldb -- "$APP/Contents/MacOS/$APP_NAME"
+    ;;
+  --logs|logs)
+    open_app
+    /usr/bin/log stream --info --style compact --predicate "process == \"$APP_NAME\""
+    ;;
+  --telemetry|telemetry)
+    open_app
+    /usr/bin/log stream --info --style compact --predicate "subsystem == \"$BUNDLE_ID\""
+    ;;
+  --verify|verify)
+    open_app
+    sleep 1
+    pgrep -x "$APP_NAME" >/dev/null
+    echo "XP[d] launched successfully."
+    ;;
+  *)
+    echo "usage: $0 [run|--debug|--logs|--telemetry|--verify|--relaunch|--reset-input-monitoring]" >&2
+    exit 2
+    ;;
+esac
