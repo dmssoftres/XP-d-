@@ -6,6 +6,7 @@ struct RemoteView: View {
 
     var body: some View {
         device
+            .padding(.top, 18)
     }
 
     private var device: some View {

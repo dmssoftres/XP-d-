@@ -21,6 +21,11 @@ struct ActionExecutionResult: Equatable {
 /// Services/AppKit; no shell command is involved.
 @MainActor
 final class ActionRunner {
+    enum ToggleOperation: Equatable {
+        case minimize
+        case restore
+    }
+
     private enum WindowMutationResult {
         case success(Int)
         case failure(AXError)
@@ -28,10 +33,16 @@ final class ActionRunner {
 
     private let workspace = NSWorkspace.shared
 
-    /// Pure ordering seam used by the AX implementation and focused tests:
-    /// the focused window is preferred, with the main window as fallback.
-    static func preferredWindowIndex(focused: [Bool], main: [Bool]) -> Int? {
-        focused.firstIndex(of: true) ?? main.firstIndex(of: true)
+    /// Pure seams shared by the AX implementation and focused tests.
+    static func orderedWindowCandidates<T>(focused: T?, main: T?) -> [T] {
+        [focused, main].compactMap { $0 }
+    }
+
+    static func toggleOperation(
+        applicationIsActive: Bool,
+        targetWindowIsMinimized: Bool?
+    ) -> ToggleOperation {
+        applicationIsActive && targetWindowIsMinimized != true ? .minimize : .restore
     }
 
     func execute(
@@ -190,7 +201,10 @@ final class ActionRunner {
             return .failure("Allow XP[d] in Accessibility, then press again")
         }
 
-        if application.isActive, targetWindowIsMinimized(application) != true {
+        if Self.toggleOperation(
+            applicationIsActive: application.isActive,
+            targetWindowIsMinimized: targetWindowIsMinimized(application)
+        ) == .minimize {
             return minimize(application, requestedName: requestedName)
         }
         return restore(application, requestedName: requestedName, promptForAccess: true)
@@ -340,7 +354,10 @@ final class ActionRunner {
             candidates.append(mainValue as! AXUIElement)
         }
 
-        return candidates
+        return Self.orderedWindowCandidates(
+            focused: candidates.first,
+            main: candidates.dropFirst().first
+        )
     }
 
     private func normalized(_ value: String) -> String {

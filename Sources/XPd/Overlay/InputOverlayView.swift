@@ -9,28 +9,12 @@ struct InputOverlayView: View {
                 ProfileSelectorCard(selection: selection)
                     .transition(.scale(scale: 0.96).combined(with: .opacity))
             } else {
-                VStack(alignment: .trailing, spacing: 9) {
-                    ForEach(Array(model.visibleEntries.enumerated()), id: \.element.id) { index, entry in
-                        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
-                            if index == 0 {
-                                SoftSlateCard(
-                                    entry: entry,
-                                    now: context.date,
-                                    displayDuration: model.displayDuration
-                                )
-                            } else {
-                                SoftSlateHistoryCard(
-                                    entry: entry,
-                                    now: context.date,
-                                    displayDuration: model.displayDuration
-                                )
-                            }
-                        }
-                        .transition(.asymmetric(
-                            insertion: .move(edge: .top).combined(with: .opacity),
-                            removal: .opacity.combined(with: .scale(scale: 0.98))
-                        ))
+                if #available(macOS 26.0, *) {
+                    GlassEffectContainer(spacing: 9) {
+                        entryStack
                     }
+                } else {
+                    entryStack
                 }
             }
         }
@@ -38,6 +22,32 @@ struct InputOverlayView: View {
         .padding(10)
         .animation(.spring(response: 0.34, dampingFraction: 0.86), value: model.visibleEntries.map(\.id))
         .animation(.spring(response: 0.3, dampingFraction: 0.88), value: model.profileSelection)
+    }
+
+    private var entryStack: some View {
+        VStack(alignment: .trailing, spacing: 9) {
+            ForEach(Array(model.visibleEntries.enumerated()), id: \.element.id) { index, entry in
+                TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
+                    if index == 0 {
+                        SoftSlateCard(
+                            entry: entry,
+                            now: context.date,
+                            displayDuration: model.displayDuration
+                        )
+                    } else {
+                        SoftSlateHistoryCard(
+                            entry: entry,
+                            now: context.date,
+                            displayDuration: model.displayDuration
+                        )
+                    }
+                }
+                .transition(.asymmetric(
+                    insertion: .move(edge: .top).combined(with: .opacity),
+                    removal: .opacity.combined(with: .scale(scale: 0.98))
+                ))
+            }
+        }
     }
 }
 
@@ -92,15 +102,8 @@ private struct ProfileSelectorCard: View {
         }
         .padding(16)
         .frame(width: 290)
-        .background {
-            OverlayGlassSurface()
-                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.12), lineWidth: 0.8)
-        }
-        .shadow(color: Color.black.opacity(0.18), radius: 20, y: 10)
+        .overlayGlassCard(cornerRadius: 18)
+        .shadow(color: Color.black.opacity(0.10), radius: 16, y: 8)
     }
 }
 
@@ -171,31 +174,8 @@ private struct SoftSlateCard: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
         .frame(width: 290, height: 118)
-        .background {
-            OverlayGlassSurface()
-                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(
-                    LinearGradient(
-                        colors: [Color.white.opacity(0.18), Color.white.opacity(0.04)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 0.8
-                )
-        }
-        .overlay(alignment: .top) {
-            LinearGradient(
-                colors: [Color.white.opacity(0.06), Color.clear],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .frame(height: 32)
-            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        }
-        .shadow(color: Color.black.opacity(0.12), radius: 18, y: 9)
+        .overlayGlassCard(cornerRadius: 18)
+        .shadow(color: Color.black.opacity(0.08), radius: 14, y: 7)
         .opacity(cardOpacity)
     }
 }
@@ -254,15 +234,8 @@ private struct SoftSlateHistoryCard: View {
         }
         .padding(.horizontal, 14)
         .frame(width: 290, height: 50, alignment: .leading)
-        .background {
-            OverlayGlassSurface()
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.07), lineWidth: 0.7)
-        }
-        .shadow(color: Color.black.opacity(0.10), radius: 12, y: 6)
+        .overlayGlassCard(cornerRadius: 14)
+        .shadow(color: Color.black.opacity(0.06), radius: 10, y: 5)
         .opacity(cardOpacity)
     }
 }

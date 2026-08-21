@@ -30,3 +30,28 @@ struct OverlayGlassSurface: View {
             .allowsHitTesting(false)
     }
 }
+
+private struct OverlayGlassCardModifier: ViewModifier {
+    let cornerRadius: CGFloat
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content.glassEffect(
+                .regular,
+                in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            )
+        } else {
+            content.background {
+                OverlayGlassSurface()
+                    .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            }
+        }
+    }
+}
+
+extension View {
+    func overlayGlassCard(cornerRadius: CGFloat) -> some View {
+        modifier(OverlayGlassCardModifier(cornerRadius: cornerRadius))
+    }
+}

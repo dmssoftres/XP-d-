@@ -137,9 +137,32 @@ final class TapApplicationInheritanceTests: XCTestCase {
     }
 
     func testWindowResolutionPrefersFocusedAndFallsBackToMain() {
-        XCTAssertEqual(ActionRunner.preferredWindowIndex(focused: [false, true], main: [true, false]), 1)
-        XCTAssertEqual(ActionRunner.preferredWindowIndex(focused: [false, false], main: [false, true]), 1)
-        XCTAssertNil(ActionRunner.preferredWindowIndex(focused: [false], main: [false]))
+        XCTAssertEqual(
+            ActionRunner.orderedWindowCandidates(focused: "focused", main: "main"),
+            ["focused", "main"]
+        )
+        XCTAssertEqual(
+            ActionRunner.orderedWindowCandidates(focused: nil, main: "main"),
+            ["main"]
+        )
+        XCTAssertTrue(
+            ActionRunner.orderedWindowCandidates(focused: nil as String?, main: nil).isEmpty
+        )
+    }
+
+    func testToggleMinimizesOnlyFrontmostUnminimizedTargetAndOtherwiseRestores() {
+        XCTAssertEqual(
+            ActionRunner.toggleOperation(applicationIsActive: true, targetWindowIsMinimized: false),
+            .minimize
+        )
+        XCTAssertEqual(
+            ActionRunner.toggleOperation(applicationIsActive: true, targetWindowIsMinimized: true),
+            .restore
+        )
+        XCTAssertEqual(
+            ActionRunner.toggleOperation(applicationIsActive: false, targetWindowIsMinimized: false),
+            .restore
+        )
     }
 
     private func makeStore() -> MappingStore {
