@@ -35,6 +35,10 @@ enum ActionKind: String, CaseIterable, Codable, Identifiable {
     case noAction = "No action"
 
     var id: String { rawValue }
+
+    var isApplicationAction: Bool {
+        self == .openApplication || self == .toggleApplication
+    }
 }
 
 struct MappingKey: Hashable, Codable {
@@ -45,4 +49,40 @@ struct MappingKey: Hashable, Codable {
 struct Mapping: Codable, Equatable {
     var action: ActionKind = .openApplication
     var command: String = ""
+    /// When set on a Hold or Double application action, resolve the target
+    /// from this control's current Tap mapping instead of storing a second
+    /// application command.  The explicit decoder keeps older persisted
+    /// mappings source- and data-compatible by treating the missing key as
+    /// false.
+    var usesTapApplication: Bool = false
+
+    private enum CodingKeys: String, CodingKey {
+        case action
+        case command
+        case usesTapApplication
+    }
+
+    init(
+        action: ActionKind = .openApplication,
+        command: String = "",
+        usesTapApplication: Bool = false
+    ) {
+        self.action = action
+        self.command = command
+        self.usesTapApplication = usesTapApplication
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        action = try container.decodeIfPresent(ActionKind.self, forKey: .action) ?? .openApplication
+        command = try container.decodeIfPresent(String.self, forKey: .command) ?? ""
+        usesTapApplication = try container.decodeIfPresent(Bool.self, forKey: .usesTapApplication) ?? false
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(action, forKey: .action)
+        try container.encode(command, forKey: .command)
+        try container.encode(usesTapApplication, forKey: .usesTapApplication)
+    }
 }

@@ -35,6 +35,8 @@ private struct MenuBarView: View {
     let store: MappingStore
 
     var body: some View {
+        Text("XP[d] \(AppVersion.display)")
+        Divider()
         Text(store.hid.isConnected ? "Shortcut Remote connected" : "Shortcut Remote disconnected")
         if store.hid.isConnected {
             Label(menuBarBatteryStatus, systemImage: menuBarBatterySymbol)

@@ -28,6 +28,12 @@ final class ActionRunner {
 
     private let workspace = NSWorkspace.shared
 
+    /// Pure ordering seam used by the AX implementation and focused tests:
+    /// the focused window is preferred, with the main window as fallback.
+    static func preferredWindowIndex(focused: [Bool], main: [Bool]) -> Int? {
+        focused.firstIndex(of: true) ?? main.firstIndex(of: true)
+    }
+
     func execute(
         mapping: Mapping,
         completion: @escaping @MainActor (ActionExecutionResult) -> Void
@@ -184,7 +190,7 @@ final class ActionRunner {
             return .failure("Allow XP[d] in Accessibility, then press again")
         }
 
-        if application.isActive, hasUnminimizedWindow(application) {
+        if application.isActive, targetWindowIsMinimized(application) != true {
             return minimize(application, requestedName: requestedName)
         }
         return restore(application, requestedName: requestedName, promptForAccess: true)
@@ -261,23 +267,13 @@ final class ActionRunner {
         for application: NSRunningApplication
     ) -> WindowMutationResult {
         let applicationElement = AXUIElementCreateApplication(application.processIdentifier)
-        var windowsValue: CFTypeRef?
-        let copyResult = AXUIElementCopyAttributeValue(
-            applicationElement,
-            kAXWindowsAttribute as CFString,
-            &windowsValue
-        )
-        guard copyResult == .success else { return .failure(copyResult) }
-
-        guard let windows = windowsValue as? [AXUIElement] else {
-            return .success(0)
-        }
-
-        var affectedWindows = 0
         var firstError: AXError?
         let minimizedValue: CFTypeRef = minimized ? kCFBooleanTrue! : kCFBooleanFalse!
 
-        for window in windows {
+        // Limit mutations to the focused window, falling back to the main
+        // window.  Iterating kAXWindowsAttribute would minimize unrelated
+        // documents belonging to the same application.
+        for window in targetWindows(for: applicationElement) {
             var isSettable = DarwinBoolean(false)
             let settableResult = AXUIElementIsAttributeSettable(
                 window,
@@ -292,44 +288,59 @@ final class ActionRunner {
                 minimizedValue
             )
             if setResult == .success {
-                affectedWindows += 1
+                return .success(1)
             } else if firstError == nil {
                 firstError = setResult
             }
         }
 
-        if affectedWindows == 0, let firstError {
+        if let firstError {
             return .failure(firstError)
         }
-        return .success(affectedWindows)
+        return .success(0)
     }
 
-    private func hasUnminimizedWindow(_ application: NSRunningApplication) -> Bool {
+    private func targetWindowIsMinimized(_ application: NSRunningApplication) -> Bool? {
         let applicationElement = AXUIElementCreateApplication(application.processIdentifier)
-        var windowsValue: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-            applicationElement,
-            kAXWindowsAttribute as CFString,
-            &windowsValue
-        ) == .success,
-        let windows = windowsValue as? [AXUIElement]
-        else {
-            return true
+        guard let window = targetWindows(for: applicationElement).first else {
+            return nil
         }
 
-        return windows.contains { window in
-            var minimizedValue: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(
-                window,
-                kAXMinimizedAttribute as CFString,
-                &minimizedValue
-            ) == .success,
-            let isMinimized = minimizedValue as? Bool
-            else {
-                return true
-            }
-            return !isMinimized
+        var minimizedValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            window,
+            kAXMinimizedAttribute as CFString,
+            &minimizedValue
+        ) == .success else {
+            return nil
         }
+        return minimizedValue as? Bool
+    }
+
+    private func targetWindows(for applicationElement: AXUIElement) -> [AXUIElement] {
+        var candidates: [AXUIElement] = []
+
+        var focusedValue: CFTypeRef?
+        if AXUIElementCopyAttributeValue(
+            applicationElement,
+            kAXFocusedWindowAttribute as CFString,
+            &focusedValue
+        ) == .success,
+           let focusedValue {
+            candidates.append(focusedValue as! AXUIElement)
+        }
+
+        var mainValue: CFTypeRef?
+        if AXUIElementCopyAttributeValue(
+            applicationElement,
+            kAXMainWindowAttribute as CFString,
+            &mainValue
+        ) == .success,
+           let mainValue {
+            candidates.append(mainValue as! AXUIElement)
+        }
+
+        return candidates
     }
 
     private func normalized(_ value: String) -> String {

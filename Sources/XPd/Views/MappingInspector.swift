@@ -2,9 +2,6 @@ import SwiftUI
 
 struct MappingInspector: View {
     let store: MappingStore
-    @State private var isImportingConfiguration = false
-    @State private var isExportingConfiguration = false
-    @State private var exportDocument = XPdConfigurationDocument()
     @State private var isEditingCommand = false
     @FocusState private var isCommandFieldFocused: Bool
 
@@ -44,7 +41,17 @@ struct MappingInspector: View {
                 statusCard(title: "Device", value: store.hid.isConnected ? "Connected" : "Offline", detail: "VID 10429 · PID 514")
             }
 
-            configurationControls
+            if let message = store.lastConfigurationResult.message {
+                Label(
+                    message,
+                    systemImage: store.lastConfigurationResult.isSuccess
+                        ? "checkmark.circle.fill"
+                        : "exclamationmark.triangle.fill"
+                )
+                .font(.caption)
+                .foregroundStyle(store.lastConfigurationResult.isSuccess ? Color.green : Color.orange)
+                .lineLimit(2)
+            }
 
             GroupBox("Live HID") {
                 VStack(alignment: .leading, spacing: 10) {
@@ -135,19 +142,6 @@ struct MappingInspector: View {
 
             Spacer(minLength: 0)
         }
-        .fileImporter(
-            isPresented: $isImportingConfiguration,
-            allowedContentTypes: XPdConfigurationDocument.readableContentTypes,
-            allowsMultipleSelection: false,
-            onCompletion: importConfiguration
-        )
-        .fileExporter(
-            isPresented: $isExportingConfiguration,
-            document: exportDocument,
-            contentType: .json,
-            defaultFilename: exportFilename,
-            onCompletion: exportConfigurationCompleted
-        )
         .onChange(of: store.selectedControl) { _, _ in
             endCommandEditing()
         }
@@ -173,7 +167,11 @@ struct MappingInspector: View {
                     }
                 }
 
-                commandEditor
+                if isTapInheritanceEligible {
+                    tapApplicationEditor
+                } else {
+                    commandEditor
+                }
 
                 if isApplicationAction {
                     Text("Use an app name, bundle ID, or .app path. Toggle application requires Accessibility permission.")
@@ -331,6 +329,40 @@ struct MappingInspector: View {
         }
     }
 
+    @ViewBuilder
+    private var tapApplicationEditor: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle("Use same application as Tap", isOn: binding.usesTapApplication)
+
+            if binding.wrappedValue.usesTapApplication {
+                switch store.inheritedTapApplication(for: store.selectedControl) {
+                case let .success(application):
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Inherited from Tap")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text(application)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 7)
+                            .frame(height: 22)
+                            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 5))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 5)
+                                    .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                            }
+                    }
+                case let .failure(error):
+                    Label(error.localizedDescription, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .lineLimit(2)
+                }
+            }
+        }
+    }
+
     private var commandDisplayValue: String {
         let command = binding.wrappedValue.command
         return command.isEmpty ? commandPlaceholder : command
@@ -346,80 +378,6 @@ struct MappingInspector: View {
     private func endCommandEditing() {
         isCommandFieldFocused = false
         isEditingCommand = false
-    }
-
-    private var configurationControls: some View {
-        HStack(spacing: 10) {
-            Button {
-                isImportingConfiguration = true
-            } label: {
-                Label("Import", systemImage: "square.and.arrow.down")
-            }
-
-            Button {
-                guard let data = store.exportConfiguration() else { return }
-                exportDocument = XPdConfigurationDocument(data: data)
-                isExportingConfiguration = true
-            } label: {
-                Label("Export", systemImage: "square.and.arrow.up")
-            }
-
-            Spacer()
-
-            if let message = store.lastConfigurationResult.message {
-                Label(
-                    message,
-                    systemImage: store.lastConfigurationResult.isSuccess
-                        ? "checkmark.circle.fill"
-                        : "exclamationmark.triangle.fill"
-                )
-                .font(.caption)
-                .foregroundStyle(store.lastConfigurationResult.isSuccess ? Color.green : Color.orange)
-                .lineLimit(2)
-            }
-        }
-    }
-
-    private func importConfiguration(_ result: Result<[URL], Error>) {
-        switch result {
-        case .success(let urls):
-            guard let url = urls.first else { return }
-            let hasScopedAccess = url.startAccessingSecurityScopedResource()
-            defer {
-                if hasScopedAccess { url.stopAccessingSecurityScopedResource() }
-            }
-
-            do {
-                let data = try Data(contentsOf: url)
-                store.importConfiguration(data)
-            } catch {
-                store.configurationFileOperationFailed(.import, error: error)
-            }
-        case .failure(let error):
-            guard !isUserCancellation(error) else { return }
-            store.configurationFileOperationFailed(.import, error: error)
-        }
-    }
-
-    private func exportConfigurationCompleted(_ result: Result<URL, Error>) {
-        switch result {
-        case .success:
-            store.configurationExportCompleted()
-        case .failure(let error):
-            guard !isUserCancellation(error) else { return }
-            store.configurationFileOperationFailed(.export, error: error)
-        }
-    }
-
-    private func isUserCancellation(_ error: Error) -> Bool {
-        (error as? CocoaError)?.code == .userCancelled
-    }
-
-    private var exportFilename: String {
-        let safeProfileName = store.profileName
-            .replacingOccurrences(of: "/", with: "-")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return safeProfileName.isEmpty ? "XPd-Configuration" : "XPd-\(safeProfileName)"
     }
 
     private func statusCard(title: String, value: String, detail: String) -> some View {
@@ -442,7 +400,12 @@ struct MappingInspector: View {
     }
 
     private var isApplicationAction: Bool {
-        selectedAction == .openApplication || selectedAction == .toggleApplication
+        selectedAction.isApplicationAction
+    }
+
+    private var isTapInheritanceEligible: Bool {
+        (store.selectedGesture == .hold || store.selectedGesture == .doubleTap)
+            && isApplicationAction
     }
 
     private var commandPlaceholder: String {

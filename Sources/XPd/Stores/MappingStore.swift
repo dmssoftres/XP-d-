@@ -48,6 +48,20 @@ final class MappingStore {
         }
     }
 
+    enum MappingResolutionError: LocalizedError, Equatable {
+        case tapMappingMustBeApplication
+        case tapApplicationMissing
+
+        var errorDescription: String? {
+            switch self {
+            case .tapMappingMustBeApplication:
+                return "Tap must use Open application or Toggle application before it can be inherited."
+            case .tapApplicationMissing:
+                return "Tap does not contain a valid application target."
+            }
+        }
+    }
+
     var selectedControl: RemoteControl = .k1
     var selectedGesture: GestureKind = .tap
     var profileName = "Global" {
@@ -172,9 +186,65 @@ final class MappingStore {
         mappings[MappingKey(control: control, gesture: gesture)] ?? Mapping()
     }
 
+    /// Returns the application target currently configured for a control's
+    /// Tap mapping.  The target is intentionally read on demand so Hold and
+    /// Double mappings follow later Tap edits without copying stale data.
+    func inheritedTapApplication(for control: RemoteControl) -> Result<String, MappingResolutionError> {
+        let tap = mapping(for: control, gesture: .tap)
+        guard tap.action.isApplicationAction else {
+            return .failure(.tapMappingMustBeApplication)
+        }
+
+        let command = tap.command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !command.isEmpty else {
+            return .failure(.tapApplicationMissing)
+        }
+        return .success(command)
+    }
+
+    /// Resolves an action mapping immediately before execution.  Only Hold
+    /// and Double application actions can opt into Tap inheritance; all other
+    /// mappings are returned unchanged for backward compatibility.
+    func resolvedMapping(for control: RemoteControl, gesture: GestureKind) -> Result<Mapping, MappingResolutionError> {
+        let mapping = mapping(for: control, gesture: gesture)
+        guard (gesture == .hold || gesture == .doubleTap),
+              mapping.action.isApplicationAction,
+              mapping.usesTapApplication else {
+            return .success(mapping)
+        }
+
+        switch inheritedTapApplication(for: control) {
+        case let .success(command):
+            var resolved = mapping
+            resolved.command = command
+            // The command is now concrete; do not ask an execution-only
+            // caller to resolve the same mapping again.
+            resolved.usesTapApplication = false
+            return .success(resolved)
+        case let .failure(error):
+            return .failure(error)
+        }
+    }
+
     func update(_ mapping: Mapping, for control: RemoteControl, gesture: GestureKind) {
         mappings[MappingKey(control: control, gesture: gesture)] = mapping
         save()
+    }
+
+    /// Executes a mapping after resolving any same-control Tap inheritance.
+    /// Hold/Double gesture recognition remains intentionally outside this
+    /// method; current HID input calls it for Tap only.
+    func executeMapping(
+        for control: RemoteControl,
+        gesture: GestureKind,
+        completion: @escaping @MainActor (ActionExecutionResult) -> Void
+    ) {
+        switch resolvedMapping(for: control, gesture: gesture) {
+        case let .success(mapping):
+            actionRunner.execute(mapping: mapping, completion: completion)
+        case let .failure(error):
+            completion(.failure(error.localizedDescription))
+        }
     }
 
     /// Adds a profile with an independent copy of the default mapping/HID
@@ -460,8 +530,7 @@ final class MappingStore {
 
         if !actionPressesInFlight.contains(matched) {
             actionPressesInFlight.insert(matched)
-            let mapping = mapping(for: matched, gesture: .tap)
-            actionRunner.execute(mapping: mapping) { [weak self] result in
+            executeMapping(for: matched, gesture: .tap) { [weak self] result in
                 self?.lastActionResult = result
             }
         }

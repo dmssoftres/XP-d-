@@ -3,6 +3,9 @@ import SwiftUI
 struct ContentView: View {
     let store: MappingStore
     @State private var isManagingProfiles = false
+    @State private var isImportingConfiguration = false
+    @State private var isExportingConfiguration = false
+    @State private var exportDocument = XPdConfigurationDocument()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -25,6 +28,19 @@ struct ContentView: View {
         .sheet(isPresented: $isManagingProfiles) {
             ProfileManagementView(store: store)
         }
+        .fileImporter(
+            isPresented: $isImportingConfiguration,
+            allowedContentTypes: XPdConfigurationDocument.readableContentTypes,
+            allowsMultipleSelection: false,
+            onCompletion: importConfiguration
+        )
+        .fileExporter(
+            isPresented: $isExportingConfiguration,
+            document: exportDocument,
+            contentType: .json,
+            defaultFilename: exportFilename,
+            onCompletion: exportConfigurationCompleted
+        )
     }
 
     private var header: some View {
@@ -37,7 +53,7 @@ struct ContentView: View {
                 HStack(alignment: .firstTextBaseline, spacing: 5) {
                     Text("XP[d]")
                         .font(.headline)
-                    Text("v\(appVersion)")
+                    Text(AppVersion.display)
                         .font(.caption2.weight(.medium))
                         .foregroundStyle(.secondary)
                 }
@@ -49,6 +65,7 @@ struct ContentView: View {
                 batteryIndicator
             }
             Spacer()
+            configurationControls
             Picker("Profile", selection: Bindable(store).profileName) {
                 ForEach(store.availableProfiles, id: \.self) { profile in
                     Text(profile).tag(profile)
@@ -128,10 +145,66 @@ struct ContentView: View {
         return "Remote battery \(percentage) percent"
     }
 
-    private var appVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
-            ?? "0.1.3"
+    private var configurationControls: some View {
+        HStack(spacing: 10) {
+            Button {
+                isImportingConfiguration = true
+            } label: {
+                Label("Import", systemImage: "square.and.arrow.down")
+            }
+
+            Button {
+                guard let data = store.exportConfiguration() else { return }
+                exportDocument = XPdConfigurationDocument(data: data)
+                isExportingConfiguration = true
+            } label: {
+                Label("Export", systemImage: "square.and.arrow.up")
+            }
+        }
     }
+
+    private func importConfiguration(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            guard let url = urls.first else { return }
+            let hasScopedAccess = url.startAccessingSecurityScopedResource()
+            defer {
+                if hasScopedAccess { url.stopAccessingSecurityScopedResource() }
+            }
+
+            do {
+                let data = try Data(contentsOf: url)
+                store.importConfiguration(data)
+            } catch {
+                store.configurationFileOperationFailed(.import, error: error)
+            }
+        case .failure(let error):
+            guard !isUserCancellation(error) else { return }
+            store.configurationFileOperationFailed(.import, error: error)
+        }
+    }
+
+    private func exportConfigurationCompleted(_ result: Result<URL, Error>) {
+        switch result {
+        case .success:
+            store.configurationExportCompleted()
+        case .failure(let error):
+            guard !isUserCancellation(error) else { return }
+            store.configurationFileOperationFailed(.export, error: error)
+        }
+    }
+
+    private func isUserCancellation(_ error: Error) -> Bool {
+        (error as? CocoaError)?.code == .userCancelled
+    }
+
+    private var exportFilename: String {
+        let safeProfileName = store.profileName
+            .replacingOccurrences(of: "/", with: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return safeProfileName.isEmpty ? "XPd-Configuration" : "XPd-\(safeProfileName)"
+    }
+
 }
 
 private struct ProfileManagementView: View {

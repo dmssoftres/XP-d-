@@ -93,18 +93,14 @@ private struct ProfileSelectorCard: View {
         .padding(16)
         .frame(width: 290)
         .background {
-            OverlayGlassMaterial()
+            OverlayGlassSurface()
                 .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        }
-        .background {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(Color(red: 0.07, green: 0.09, blue: 0.13).opacity(0.18))
         }
         .overlay {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.16), lineWidth: 0.8)
+                .strokeBorder(Color.white.opacity(0.12), lineWidth: 0.8)
         }
-        .shadow(color: Color.black.opacity(0.30), radius: 24, y: 12)
+        .shadow(color: Color.black.opacity(0.18), radius: 20, y: 10)
     }
 }
 
@@ -128,9 +124,7 @@ private struct SoftSlateCard: View {
     }
 
     private var versionLabel: String {
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
-        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
-        return build.map { "v\(version) (\($0))" } ?? "v\(version)"
+        "v\(AppVersion.display)"
     }
 
     private var cardOpacity: Double {
@@ -178,27 +172,14 @@ private struct SoftSlateCard: View {
         .padding(.vertical, 14)
         .frame(width: 290, height: 118)
         .background {
-            OverlayGlassMaterial()
+            OverlayGlassSurface()
                 .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        }
-        .background {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [
-                            Color(red: 0.10, green: 0.12, blue: 0.16).opacity(0.20),
-                            Color(red: 0.07, green: 0.09, blue: 0.13).opacity(0.10)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
         }
         .overlay {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .strokeBorder(
                     LinearGradient(
-                        colors: [Color.white.opacity(0.32), Color.white.opacity(0.10)],
+                        colors: [Color.white.opacity(0.18), Color.white.opacity(0.04)],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     ),
@@ -207,14 +188,14 @@ private struct SoftSlateCard: View {
         }
         .overlay(alignment: .top) {
             LinearGradient(
-                colors: [Color.white.opacity(0.15), Color.clear],
+                colors: [Color.white.opacity(0.06), Color.clear],
                 startPoint: .top,
                 endPoint: .bottom
             )
             .frame(height: 32)
             .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         }
-        .shadow(color: Color.black.opacity(0.24), radius: 22, y: 11)
+        .shadow(color: Color.black.opacity(0.12), radius: 18, y: 9)
         .opacity(cardOpacity)
     }
 }
@@ -274,19 +255,14 @@ private struct SoftSlateHistoryCard: View {
         .padding(.horizontal, 14)
         .frame(width: 290, height: 50, alignment: .leading)
         .background {
-            OverlayGlassMaterial()
+            OverlayGlassSurface()
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .opacity(0.82)
-        }
-        .background {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color(red: 0.08, green: 0.10, blue: 0.14).opacity(0.10))
         }
         .overlay {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.10), lineWidth: 0.7)
+                .strokeBorder(Color.white.opacity(0.07), lineWidth: 0.7)
         }
-        .shadow(color: Color.black.opacity(0.18), radius: 14, y: 7)
+        .shadow(color: Color.black.opacity(0.10), radius: 12, y: 6)
         .opacity(cardOpacity)
     }
 }
