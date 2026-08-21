@@ -94,12 +94,11 @@ private struct ProfileSelectorCard: View {
         .frame(width: 290)
         .background {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .opacity(0.78)
+                .fill(.thinMaterial)
         }
         .background {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(Color(red: 0.07, green: 0.09, blue: 0.13).opacity(0.52))
+                .fill(Color(red: 0.07, green: 0.09, blue: 0.13).opacity(0.18))
         }
         .overlay {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
@@ -138,62 +137,43 @@ private struct SoftSlateCard: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ZStack(alignment: .topTrailing) {
+        VStack(spacing: 11) {
+            HStack(spacing: 15) {
                 Text(entry.control.overlayLabel)
-                    .font(.system(size: 70, weight: .bold, design: .rounded))
-                    .foregroundStyle(Color.white.opacity(0.055))
+                    .font(.custom("HelveticaNeue-Medium", fixedSize: 34))
+                    .foregroundStyle(Color.white.opacity(0.96))
                     .lineLimit(1)
-                    .minimumScaleFactor(0.55)
-                    .frame(width: 118, height: 67, alignment: .trailing)
-                    .offset(x: 4, y: -10)
+                    .minimumScaleFactor(0.65)
+                    .frame(width: 58, alignment: .center)
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("PHYSICAL CONTROL")
-                        .font(.system(size: 8, weight: .semibold, design: .rounded))
-                        .tracking(1)
-                        .foregroundStyle(Color.white.opacity(0.38))
+                Rectangle()
+                    .fill(Color.white.opacity(0.12))
+                    .frame(width: 0.7, height: 70)
 
-                    Text(entry.control.overlayLabel)
-                        .font(.system(size: 25, weight: .medium, design: .rounded))
-                        .foregroundStyle(Color.white.opacity(0.96))
-                        .lineLimit(1)
+                VStack(spacing: 5) {
+                    SoftSlateActionLine(label: "TAP", presentation: entry.tap, isActive: !isHolding)
+                    SoftSlateActionLine(label: "HOLD", presentation: entry.hold, isActive: isHolding)
+                    SoftSlateActionLine(label: "DOUBLE", presentation: entry.doubleTap, isActive: false)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(maxWidth: .infinity)
             }
-            .frame(height: 59)
-
-            Rectangle()
-                .fill(Color.white.opacity(0.11))
-                .frame(height: 0.7)
-                .padding(.bottom, 9)
-
-            VStack(spacing: 4) {
-                SoftSlateActionLine(label: "TAP", presentation: entry.tap, isActive: !isHolding)
-                SoftSlateActionLine(label: "HOLD", presentation: entry.hold, isActive: isHolding)
-                SoftSlateActionLine(label: "DOUBLE", presentation: entry.doubleTap, isActive: false)
-            }
-
-            Spacer(minLength: 9)
 
             HorizontalHoldMeter(progress: holdProgress)
         }
-        .padding(.horizontal, 15)
-        .padding(.top, 12)
-        .padding(.bottom, 12)
-        .frame(width: 290, height: 184)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .frame(width: 290, height: 118)
         .background {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .opacity(0.72)
+                .fill(.thinMaterial)
         }
         .background {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .fill(
                     LinearGradient(
                         colors: [
-                            Color(red: 0.10, green: 0.12, blue: 0.16).opacity(0.58),
-                            Color(red: 0.07, green: 0.09, blue: 0.13).opacity(0.42)
+                            Color(red: 0.10, green: 0.12, blue: 0.16).opacity(0.20),
+                            Color(red: 0.07, green: 0.09, blue: 0.13).opacity(0.10)
                         ],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
@@ -204,7 +184,7 @@ private struct SoftSlateCard: View {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .strokeBorder(
                     LinearGradient(
-                        colors: [Color.white.opacity(0.22), Color.white.opacity(0.075)],
+                        colors: [Color.white.opacity(0.32), Color.white.opacity(0.10)],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     ),
@@ -213,14 +193,14 @@ private struct SoftSlateCard: View {
         }
         .overlay(alignment: .top) {
             LinearGradient(
-                colors: [Color.white.opacity(0.08), Color.clear],
+                colors: [Color.white.opacity(0.15), Color.clear],
                 startPoint: .top,
                 endPoint: .bottom
             )
-            .frame(height: 54)
+            .frame(height: 32)
             .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         }
-        .shadow(color: Color.black.opacity(0.30), radius: 24, y: 12)
+        .shadow(color: Color.black.opacity(0.24), radius: 22, y: 11)
         .opacity(cardOpacity)
     }
 }
@@ -233,14 +213,14 @@ private struct SoftSlateActionLine: View {
     var body: some View {
         HStack(spacing: 12) {
             Text(label)
-                .font(.system(size: 9, weight: .medium, design: .rounded))
-                .tracking(0.55)
+                .font(.custom("HelveticaNeue", fixedSize: 11))
+                .tracking(0.35)
                 .foregroundStyle(isActive ? Color.cyan.opacity(0.84) : Color.white.opacity(0.48))
-                .frame(width: 54, alignment: .leading)
+                .frame(width: 48, alignment: .leading)
 
             ActionValue(presentation: presentation, isActive: isActive, compact: false)
         }
-        .frame(height: 20)
+        .frame(height: 19)
     }
 }
 
@@ -261,7 +241,7 @@ private struct SoftSlateHistoryCard: View {
     var body: some View {
         HStack(spacing: 13) {
             Text(entry.control.overlayLabel)
-                .font(.system(size: 14, weight: .semibold, design: .rounded))
+                .font(.custom("HelveticaNeue-Medium", fixedSize: 14))
                 .foregroundStyle(Color.white.opacity(0.78))
                 .frame(width: 42, alignment: .leading)
 
@@ -271,7 +251,7 @@ private struct SoftSlateHistoryCard: View {
 
             VStack(alignment: .leading, spacing: 3) {
                 Text("TAP")
-                    .font(.system(size: 8, weight: .semibold, design: .rounded))
+                    .font(.custom("HelveticaNeue", fixedSize: 8))
                     .tracking(0.7)
                     .foregroundStyle(Color.white.opacity(0.30))
                 ActionValue(presentation: entry.tap, isActive: false, compact: true)
@@ -281,12 +261,12 @@ private struct SoftSlateHistoryCard: View {
         .frame(width: 290, height: 50, alignment: .leading)
         .background {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .opacity(0.48)
+                .fill(.thinMaterial)
+                .opacity(0.82)
         }
         .background {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color(red: 0.08, green: 0.10, blue: 0.14).opacity(0.31))
+                .fill(Color(red: 0.08, green: 0.10, blue: 0.14).opacity(0.10))
         }
         .overlay {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -306,7 +286,10 @@ private struct ActionValue: View {
         Group {
             if presentation.shortcutTokens.isEmpty {
                 Text(presentation.title)
-                    .font(.system(size: compact ? 10 : 12, weight: isActive ? .medium : .regular, design: .rounded))
+                    .font(.custom(
+                        compact ? "HelveticaNeue" : "HelveticaNeue-Light",
+                        fixedSize: compact ? 10 : 14
+                    ))
                     .foregroundStyle(
                         presentation.isConfigured
                             ? Color.white.opacity(isActive ? 0.94 : 0.70)
@@ -323,7 +306,10 @@ private struct ActionValue: View {
                                 .foregroundStyle(Color.white.opacity(0.30))
                         }
                         Text(token)
-                            .font(.system(size: compact ? 9 : 11, weight: .medium, design: .rounded))
+                            .font(.custom(
+                                compact ? "HelveticaNeue" : "HelveticaNeue-Medium",
+                                fixedSize: compact ? 9 : 13
+                            ))
                             .foregroundStyle(Color.white.opacity(isActive ? 0.92 : 0.68))
                     }
                 }
