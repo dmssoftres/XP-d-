@@ -11,7 +11,7 @@ No backend, database, cloud account, telemetry service, or third-party package d
 | Component | Responsibility | Interfaces | Owner |
 |---|---|---|---|
 | `XPdApp` / `AppDelegate` | Application lifecycle, menu-bar/window setup, initial input permission request | SwiftUI, AppKit, IOKit permission API | Unknown |
-| `HIDService` | Match `10429:514`, manage HID lifecycle, publish input reports/wheel values | IOKit HID callbacks | Unknown |
+| `HIDService` | Match `10429:514`, manage HID lifecycle, publish input reports/wheel values, and expose optional verified battery percentage | IOKit HID callbacks/properties | Unknown |
 | `MappingStore` | Central state, selection, mappings, HID bindings, persistence, imports, action dispatch | SwiftUI observable state, `UserDefaults` | Unknown |
 | `ActionRunner` | Execute mapped shortcuts, scrolling, app actions, and commands; permission preflight/settings | Core Graphics, AppKit, ApplicationServices, process APIs | Unknown |
 | Configuration models/document | Codable configuration schema, validation, JSON import/export | Foundation, SwiftUI `FileDocument` | Unknown |

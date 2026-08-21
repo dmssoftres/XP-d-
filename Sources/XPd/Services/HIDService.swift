@@ -26,6 +26,7 @@ final class HIDService {
 
     private(set) var isConnected = false
     private(set) var hasInputAccess = false
+    private(set) var batteryPercentage: Int?
     private(set) var lastEvent = "Waiting for Shortcut Remote…"
     private(set) var recentReports: [String] = []
 
@@ -33,7 +34,16 @@ final class HIDService {
 
     @ObservationIgnored private let resources = HIDResources()
     @ObservationIgnored private var report6ControlIsActive = false
+    @ObservationIgnored private var connectedDevice: IOHIDDevice?
+    @ObservationIgnored private var lastBatteryRefresh = Date.distantPast
     private let logger = Logger(subsystem: "com.dmssoftres.xpd", category: "HID")
+
+    private static let batteryPropertyKeys = [
+        "BatteryPercent",
+        "BatteryLevel",
+        "BatteryStrength"
+    ]
+    private static let batteryRefreshInterval: TimeInterval = 15
 
     init() {
         start()
@@ -66,8 +76,10 @@ final class HIDService {
             guard let context else { return }
             MainActor.assumeIsolated {
                 let service = Unmanaged<HIDService>.fromOpaque(context).takeUnretainedValue()
+                service.connectedDevice = device
                 service.registerInputReports(for: device)
                 service.isConnected = true
+                service.refreshBattery(force: true)
                 service.lastEvent = service.hasInputAccess
                     ? "Shortcut Remote connected"
                     : "Connected · Input Monitoring required"
@@ -79,7 +91,7 @@ final class HIDService {
             guard let context else { return }
             MainActor.assumeIsolated {
                 let service = Unmanaged<HIDService>.fromOpaque(context).takeUnretainedValue()
-                service.isConnected = false
+                service.handleDeviceRemoval()
                 service.lastEvent = "Shortcut Remote disconnected"
                 service.logger.info("Shortcut Remote disconnected")
             }
@@ -136,6 +148,8 @@ final class HIDService {
     }
 
     private func received(reportID: UInt32, bytes: [UInt8]) {
+        refreshBatteryIfNeeded()
+
         let payloadBytes: [UInt8]
         if let reportByte = UInt8(exactly: reportID), bytes.first == reportByte {
             payloadBytes = Array(bytes.dropFirst())
@@ -201,6 +215,8 @@ final class HIDService {
     }
 
     private func receivedWheel(value: Int, usagePage: UInt32, usage: UInt32, reportID: UInt32) {
+        refreshBatteryIfNeeded()
+
         let direction = value > 0 ? "+" : "-"
         let signature = "wheel:\(direction)"
         lastEvent = "\(signature) · p\(usagePage) u\(usage) r\(reportID)"
@@ -208,5 +224,62 @@ final class HIDService {
         recentReports = Array(recentReports.prefix(8))
         logger.info("HID wheel: \(signature, privacy: .public) value=\(value)")
         onInput?(signature)
+    }
+
+    private func handleDeviceRemoval() {
+        isConnected = false
+        connectedDevice = nil
+        batteryPercentage = nil
+        lastBatteryRefresh = .distantPast
+    }
+
+    private func refreshBatteryIfNeeded() {
+        refreshBattery(force: false)
+    }
+
+    private func refreshBattery(force: Bool) {
+        guard isConnected, let connectedDevice else {
+            batteryPercentage = nil
+            return
+        }
+
+        let now = Date()
+        guard force || now.timeIntervalSince(lastBatteryRefresh) >= Self.batteryRefreshInterval else {
+            return
+        }
+
+        lastBatteryRefresh = now
+        batteryPercentage = Self.batteryPercentage(for: connectedDevice)
+    }
+
+    private static func batteryPercentage(for device: IOHIDDevice) -> Int? {
+        for key in batteryPropertyKeys {
+            guard let property = IOHIDDeviceGetProperty(device, key as CFString) else {
+                continue
+            }
+
+            if let percentage = normalizedBatteryPercentage(from: property) {
+                return percentage
+            }
+        }
+
+        return nil
+    }
+
+    /// Accepts only an exact integer percentage. Values such as fractions,
+    /// sentinels, booleans, strings, and out-of-range numbers remain unknown.
+    static func normalizedBatteryPercentage(from value: Any?) -> Int? {
+        guard let number = value as? NSNumber else { return nil }
+        guard CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+
+        let doubleValue = number.doubleValue
+        guard doubleValue.isFinite,
+              doubleValue.rounded(.towardZero) == doubleValue,
+              (0...100).contains(doubleValue)
+        else {
+            return nil
+        }
+
+        return Int(doubleValue)
     }
 }

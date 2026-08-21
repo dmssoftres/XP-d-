@@ -41,6 +41,9 @@ struct ContentView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            if store.hid.isConnected {
+                batteryIndicator
+            }
             Spacer()
             Picker("Profile", selection: Bindable(store).profileName) {
                 ForEach(MappingStore.availableProfiles, id: \.self) { profile in
@@ -64,6 +67,53 @@ struct ContentView: View {
         if !store.hid.isConnected { return .red }
         if !store.hid.hasInputAccess { return .orange }
         return .green
+    }
+
+    private var batteryIndicator: some View {
+        HStack(spacing: 4) {
+            Image(systemName: batterySymbol)
+            Text(batteryLabel)
+        }
+        .font(.caption)
+        .foregroundStyle(batteryColor)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(batteryAccessibilityLabel)
+    }
+
+    private var batteryLabel: String {
+        guard let percentage = store.hid.batteryPercentage else {
+            return "Battery unavailable"
+        }
+        return "\(percentage)%"
+    }
+
+    private var batterySymbol: String {
+        guard let percentage = store.hid.batteryPercentage else {
+            return "questionmark.circle"
+        }
+        switch percentage {
+        case 90...100: return "battery.100percent"
+        case 75..<90: return "battery.75percent"
+        case 50..<75: return "battery.50percent"
+        case 25..<50: return "battery.25percent"
+        default: return "battery.0percent"
+        }
+    }
+
+    private var batteryColor: Color {
+        guard let percentage = store.hid.batteryPercentage else {
+            return .secondary
+        }
+        if percentage <= 10 { return .red }
+        if percentage <= 20 { return .orange }
+        return .secondary
+    }
+
+    private var batteryAccessibilityLabel: String {
+        guard let percentage = store.hid.batteryPercentage else {
+            return "Remote battery unavailable"
+        }
+        return "Remote battery \(percentage) percent"
     }
 
     private var appVersion: String {

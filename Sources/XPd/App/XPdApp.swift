@@ -36,6 +36,10 @@ private struct MenuBarView: View {
 
     var body: some View {
         Text(store.hid.isConnected ? "Shortcut Remote connected" : "Shortcut Remote disconnected")
+        if store.hid.isConnected {
+            Label(menuBarBatteryStatus, systemImage: menuBarBatterySymbol)
+                .foregroundStyle(menuBarBatteryColor)
+        }
         Divider()
         Toggle("Show Input Overlay", isOn: Bindable(store).showsInputOverlay)
         Picker("Hide Overlay After", selection: Bindable(store).inputOverlayDuration) {
@@ -53,5 +57,34 @@ private struct MenuBarView: View {
             NSApp.activate(ignoringOtherApps: true)
         }
         Button("Quit") { NSApp.terminate(nil) }
+    }
+
+    private var menuBarBatteryStatus: String {
+        guard let percentage = store.hid.batteryPercentage else {
+            return "Battery unavailable"
+        }
+        return "Battery \(percentage)%"
+    }
+
+    private var menuBarBatteryColor: Color {
+        guard let percentage = store.hid.batteryPercentage else {
+            return .secondary
+        }
+        if percentage <= 10 { return .red }
+        if percentage <= 20 { return .orange }
+        return .secondary
+    }
+
+    private var menuBarBatterySymbol: String {
+        guard let percentage = store.hid.batteryPercentage else {
+            return "questionmark.circle"
+        }
+        switch percentage {
+        case 90...100: return "battery.100percent"
+        case 75..<90: return "battery.75percent"
+        case 50..<75: return "battery.50percent"
+        case 25..<50: return "battery.25percent"
+        default: return "battery.0percent"
+        }
     }
 }
