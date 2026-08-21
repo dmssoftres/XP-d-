@@ -5,7 +5,8 @@ MODE="${1:-run}"
 APP_NAME="XPd"
 BUNDLE_NAME="XP[d]"
 BUNDLE_ID="com.dmssoftres.xpd"
-APP_VERSION="0.1.0"
+APP_VERSION="0.1.1"
+APP_BUILD="2"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST="$ROOT/dist"
 APP="$DIST/$BUNDLE_NAME.app"
@@ -87,7 +88,7 @@ cat > "$INFO_PLIST" <<PLIST
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundleName</key><string>$BUNDLE_NAME</string>
   <key>CFBundleShortVersionString</key><string>$APP_VERSION</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleVersion</key><string>$APP_BUILD</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSPrincipalClass</key><string>NSApplication</string>
