@@ -14,8 +14,9 @@ No backend, database, cloud account, telemetry service, or third-party package d
 | `HIDService` | Match `10429:514`, manage HID lifecycle, publish input reports/wheel values, and combine exact HID/BLE battery sources | IOKit HID callbacks/properties | Unknown |
 | `ShortcutRemoteBatteryMonitor` | Verify the target BLE PnP identity, enable its two notify-only vendor characteristics, and parse exact battery packets | CoreBluetooth | Unknown |
 | `ButtonGestureRecognizer` | Convert K1–K10 down/release reports into mutually exclusive Tap, Hold, and Double events with cancellable timing | Main-actor scheduler seam | Unknown |
-| `MappingStore` | Ordered dynamic profiles, active-profile mappings/HID bindings, migration, persistence, imports, selector state, action dispatch | SwiftUI observable state, `UserDefaults` | Unknown |
+| `MappingStore` | Ordered Standard/MIDI profiles, mapping/HID/MIDI state, migration, persistence, imports, selector/Fn routing, action dispatch | SwiftUI observable state, `UserDefaults` | Unknown |
 | `ActionRunner` | Execute mapped shortcuts, scrolling, app actions, and commands; permission preflight/settings | Core Graphics, AppKit, ApplicationServices, process APIs | Unknown |
+| `MIDIOutputService` | Create Control/Performance virtual sources, encode MIDI 1.0 UMP, track active output, pitch return, cleanup, and exact send-result monitor events | CoreMIDI actor and injectable backend | Unknown |
 | Configuration models/document | Codable configuration schema, validation, JSON import/export | Foundation, SwiftUI `FileDocument` | Unknown |
 | `ContentView`, `RemoteView`, `MappingInspector` | Hardware editor, mapping controls, live status, import/export | SwiftUI | Unknown |
 | Input overlay controller/model/view | Click-through recent-input HUD, hold progress, profile selection | AppKit panel, SwiftUI | Unknown |
@@ -25,7 +26,17 @@ No backend, database, cloud account, telemetry service, or third-party package d
 
 Shortcut Remote HID value/report → `HIDService` → `ButtonGestureRecognizer` for K1–K10 → `MappingStore` gesture resolution → persisted mapping lookup → optional same-control Tap application resolution → `ActionRunner` side effect and input-overlay presentation. Tap waits through the Double window; Hold and Double suppress Tap. Profile changes, imports, learning, disconnects, and displaced live controls cancel pending gestures. Inherited Hold/Double application targets are read at execution time; invalid Tap mappings stop before side effects.
 
-Configuration UI/profile-manager edits → `MappingStore` → one ordered version-3 profile collection in `UserDefaults`. Version-2 fixed-profile persistence migrates in Global/Finder/Logic Pro order; older shared mappings and HID bindings migrate into Global. Export builds a complete ordered JSON document; version-2 exports upgrade on decode, and imports validate Global, names, active profile, mappings, and bindings before one replacement.
+Configuration UI/profile-manager edits → `MappingStore` → one ordered version-4 profile collection in `UserDefaults`. Version-2 fixed and version-3 dynamic persistence migrate to Standard profiles; older shared mappings and HID bindings migrate into Global. Export builds a complete ordered JSON document; v2/v3 exports upgrade on decode, and imports validate realms, remembered profiles, typed MIDI values, mappings, and bindings before one replacement.
+
+MIDI-realm HID input → `MappingStore` primary/Fn routing and session offsets →
+`MIDIOutputService` → independent `XP[d] Control` or `XP[d] Performance`
+virtual source. The service tracks origin/port/channel/note state so release,
+profile/import/disconnect/Panic/shutdown boundaries can send matching Note Off,
+All Notes Off, and centered Pitch Bend messages.
+
+Every actual send attempt also emits one transient monitor event back to the
+main-actor store. The MIDI inspector keeps only the newest 100 events and can
+copy or clear them; monitor history is diagnostic state and is never persisted.
 
 Wheel-center hold → open selector with current profile order → wheel rotation updates only the pending highlight → center release activates the highlighted profile and loads its mappings/HID bindings. Adding, deleting, or importing profiles closes stale selector state.
 
@@ -53,6 +64,10 @@ The build script compiles `XPd`, assembles `dist/XP[d].app`, creates its Info.pl
 - Wheel-center report changes or loses its device-specific standalone empty report-6 distinction: selector confirmation may regress and requires controlled real-hardware recapture.
 - Action target unavailable or permission denied: report a structured action failure without corrupting mappings.
 - Inherited Hold/Double target invalid: show the Tap validation failure and do not invoke `ActionRunner`.
+- CoreMIDI source creation/send failure: keep profile state intact, report the
+  affected port, and retain failed live/toggle state so cleanup can retry.
+- Unverified physical Fn rollover: do not substitute a latch or claim the
+  software routing seam proves target-device behavior.
 
 ## Architecture references
 
@@ -60,6 +75,8 @@ The build script compiles `XPd`, assembles `dist/XP[d].app`, creates its Info.pl
 - `Sources/XPd/Services/HIDService.swift`
 - `Sources/XPd/Stores/MappingStore.swift`
 - `Sources/XPd/Services/ActionRunner.swift`
+- `Sources/XPd/Services/MIDIOutputService.swift`
+- `Sources/XPd/Models/MIDITypes.swift`
 - `Sources/XPd/Models/XPdConfiguration.swift`
 - `script/build_and_run.sh`
 - `.llm/DECISIONS.md`

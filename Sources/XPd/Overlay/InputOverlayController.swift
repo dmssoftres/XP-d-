@@ -102,6 +102,29 @@ final class InputOverlayController {
         }
     }
 
+    func showMIDI(
+        profileName: String,
+        layer: MIDIMappingLayer = .primary,
+        control: RemoteControl? = nil,
+        summary: String? = nil
+    ) {
+        guard model.isEnabled else { return }
+        ensureVisible()
+        model.showMIDI(
+            profileName: profileName,
+            layer: layer,
+            control: control,
+            summary: summary
+        )
+    }
+
+    func clearMIDI() {
+        model.clearMIDI()
+        if !model.isEnabled, model.profileSelection == nil {
+            panel.orderOut(nil)
+        }
+    }
+
     private func ensureVisible() {
         positionOnActiveScreen()
         panel.orderFrontRegardless()

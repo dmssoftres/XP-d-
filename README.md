@@ -2,6 +2,10 @@
 
 A native macOS utility for turning the XPPen/HANWUGEE Shortcut Remote into a programmable controller.
 
+XP[d] can also host typed MIDI profiles and publishes two virtual MIDI sources:
+`XP[d] Control` for DAW Remote mappings and `XP[d] Performance` for notes,
+drums, and chords.
+
 Initial target device:
 - Vendor ID: `10429`
 - Product ID: `514`
@@ -55,14 +59,31 @@ Restoring and minimizing another app's windows requires XP[d] to be enabled once
 in **System Settings › Privacy & Security › Accessibility**. No AppleScript or
 shell command is required.
 
+## MIDI profiles
+
+Create a profile with the MIDI realm to edit Note, CC, Program Change, Chord,
+wheel, and Pitch Bend output. Each mapping chooses the Control or Performance
+source. MIDI Lock keeps wheel-based profile selection inside the MIDI realm;
+the main window and menu-bar menu always provide a direct escape. A profile may
+reserve K1-K10 or wheel center as a momentary Fn control for its second layer.
+Physical Fn rollover—especially center plus wheel—still requires target-device
+acceptance and is never replaced with a latch.
+
+The MIDI inspector includes a live monitor for acceptance and troubleshooting.
+It reports the messages XP[d] actually sends—including Note On/Off and failed
+attempts—with their port, decoded values, and raw UMP word. Use **Copy** to
+share the newest 100 entries or **Clear** before a focused hardware test.
+
 ## Configuration files
 
 Use **Import** and **Export** in the mapping inspector to move or back up the
 complete XP[d] setup as readable JSON. Use the profile-management button beside
 the header picker to add profiles or remove any profile except Global. The
-version 3 file preserves profile order and contains every profile's complete
+version 4 file preserves profile order and contains every profile's realm,
+complete
 Tap, Hold, and Double mappings and HID bindings, plus the active profile and
-overlay preference. Version 2 exports upgrade on import, and invalid imports are
+overlay preference. MIDI profiles additionally contain typed primary/Fn
+mappings. Version 2 and 3 exports upgrade on import, and invalid imports are
 rejected before the current setup is replaced.
 
 ## Remote battery

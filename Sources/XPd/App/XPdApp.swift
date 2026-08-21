@@ -54,11 +54,93 @@ private struct MenuBarView: View {
         }
         .disabled(!store.showsInputOverlay)
         Divider()
+        Text("Profile: \(store.profileName)")
+        Label(
+            store.midiLocked ? "MIDI Lock" : "Standard",
+            systemImage: store.midiLocked ? "pianokeys" : "slider.horizontal.3"
+        )
+        Button(store.profileRealm == .midi ? "Leave MIDI Lock" : "Enter MIDI Lock") {
+            _ = store.toggleWorkspace()
+        }
+        .disabled(store.profileRealm != .midi && store.midiProfiles.isEmpty)
+        if store.profileRealm != .midi && store.midiProfiles.isEmpty {
+            Text("Create a MIDI profile to enter MIDI Lock")
+        }
+        profileSelectionMenu
+        if store.profileRealm == .midi {
+            midiOutputMenu
+        }
+        Divider()
         Button("Open XP[d]") {
             openWindow(id: "main")
             NSApp.activate(ignoringOtherApps: true)
         }
         Button("Quit") { NSApp.terminate(nil) }
+    }
+
+    @ViewBuilder
+    private var profileSelectionMenu: some View {
+        Menu("Select Profile") {
+            profileRealmMenu(.standard)
+            profileRealmMenu(.midi)
+        }
+    }
+
+    @ViewBuilder
+    private func profileRealmMenu(_ realm: ProfileRealm) -> some View {
+        let profiles = store.availableProfiles.filter { store.profileRealm(for: $0) == realm }
+        Menu(realm == .midi ? "MIDI" : "Standard") {
+            if profiles.isEmpty {
+                Text(realm == .midi ? "No MIDI profiles" : "No standard profiles")
+            } else {
+                ForEach(profiles, id: \.self) { profile in
+                    Button {
+                        _ = store.selectProfile(profile)
+                    } label: {
+                        if store.profileName == profile {
+                            Label(profile, systemImage: "checkmark")
+                        } else {
+                            Text(profile)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var midiOutputMenu: some View {
+        Menu("MIDI Output") {
+            midiEndpointLabel(for: .control)
+            midiEndpointLabel(for: .performance)
+            if let message = store.lastMessage {
+                Divider()
+                Text("Last: \(message.summary)")
+                    .lineLimit(2)
+            }
+            if let error = store.lastError {
+                Text("Error: \(error)")
+                    .lineLimit(2)
+            }
+            Divider()
+            Button("Refresh MIDI Status") {
+                store.refreshMIDIEndpointStatus()
+            }
+            Button("Panic MIDI", role: .destructive) {
+                store.panicMIDI()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func midiEndpointLabel(for port: MIDIOutputPort) -> some View {
+        let status = store.endpointStatuses[port]
+        let available = status?.isAvailable == true
+        Label(
+            "\(port.displayName): \(available ? "Available" : "Unavailable")",
+            systemImage: available ? "checkmark.circle" : "xmark.circle"
+        )
+        .foregroundStyle(available ? .primary : .secondary)
     }
 
     private var menuBarBatteryStatus: String {

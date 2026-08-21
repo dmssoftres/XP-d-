@@ -108,4 +108,147 @@ final class XPdConfigurationTests: XCTestCase {
             XCTAssertEqual(error as? XPdConfiguration.ValidationError, .invalidProfileName(" Global "))
         }
     }
+
+    func testVersionThreeMigratesEveryProfileToStandardWithoutDataLoss() throws {
+        let legacy = XPdConfiguration(
+            version: XPdConfiguration.previousVersion,
+            profiles: [
+                .init(
+                    name: "Global",
+                    mappings: [.init(control: .k1, gesture: .tap, mapping: Mapping(action: .noAction, command: "legacy"))],
+                    hidBindings: [.init(control: .k1, signature: "legacy-report")]
+                ),
+                .init(name: "Studio", mappings: [], hidBindings: [])
+            ],
+            profileName: "Studio",
+            showsInputOverlay: false
+        )
+
+        let upgraded = try XPdConfiguration.decode(try JSONEncoder().encode(legacy))
+        XCTAssertEqual(upgraded.version, XPdConfiguration.currentVersion)
+        XCTAssertEqual(upgraded.profiles.map(\.name), ["Global", "Studio"])
+        XCTAssertTrue(upgraded.profiles.allSatisfy { $0.realm == .standard && $0.midiSettings == nil })
+        XCTAssertEqual(upgraded.profileName, "Studio")
+        XCTAssertEqual(upgraded.lastStandardProfileName, "Studio")
+        XCTAssertEqual(upgraded.activeRealm, .standard)
+        XCTAssertFalse(upgraded.midiLocked)
+        XCTAssertEqual(upgraded.workspaceLockControl, .k3)
+        XCTAssertEqual(upgraded.profiles[0].mappings[0].mapping.command, "legacy")
+        XCTAssertEqual(upgraded.profiles[0].hidBindings[0].signature, "legacy-report")
+    }
+
+    func testMIDIProfileRoundTripsTypedMappingsAndWorkspaceState() throws {
+        let settings = MIDIProfileSettings(
+            fnControl: .k10,
+            fnHoldThreshold: 1.10,
+            primaryButtons: [
+                .init(
+                    control: .k1,
+                    mapping: MIDIButtonMapping(
+                        kind: .note,
+                        outputPort: .performance,
+                        channel: 2,
+                        note: 36,
+                        velocity: 112,
+                        releaseVelocity: 0,
+                        label: "Kick"
+                    )
+                )
+            ],
+            functionButtons: [
+                .init(
+                    control: .k2,
+                    mapping: MIDIButtonMapping(
+                        kind: .chord,
+                        outputPort: .performance,
+                        channel: 2,
+                        velocity: 100,
+                        chord: [60, 64, 67],
+                        interaction: .momentary,
+                        label: "Cm"
+                    )
+                )
+            ],
+            primaryWheel: MIDIWheelMapping(
+                kind: .relativeCC,
+                outputPort: .control,
+                channel: 1,
+                controller: 21,
+                relativeEncoding: .twosComplement,
+                clockwiseValue: 1,
+                counterClockwiseValue: 127
+            ),
+            functionWheel: MIDIWheelMapping(
+                kind: .absoluteCC,
+                outputPort: .performance,
+                channel: 1,
+                controller: 1
+            )
+        )
+        let configuration = XPdConfiguration(
+            profiles: [
+                .init(name: "Global", mappings: [], hidBindings: []),
+                .init(name: "Ableton", mappings: [], hidBindings: [], realm: .midi, midiSettings: settings)
+            ],
+            profileName: "Ableton",
+            showsInputOverlay: true,
+            activeRealm: .midi,
+            lastStandardProfileName: "Global",
+            lastMIDIProfileName: "Ableton",
+            midiLocked: true,
+            workspaceLockControl: .k3
+        )
+
+        let first = try configuration.encodedData()
+        let decoded = try XPdConfiguration.decode(first)
+        XCTAssertEqual(decoded, configuration)
+        XCTAssertEqual(first, try decoded.encodedData())
+        XCTAssertEqual(decoded.profiles[1].midiSettings?.fnControl, .k10)
+        XCTAssertEqual(decoded.profiles[1].midiSettings?.fnHoldThreshold, 1.10)
+        XCTAssertEqual(decoded.profiles[1].midiSettings?.primaryButtons.first?.mapping.note, 36)
+        XCTAssertEqual(decoded.profiles[1].midiSettings?.functionButtons.first?.mapping.chord, [60, 64, 67])
+        XCTAssertEqual(decoded.profiles[1].midiSettings?.primaryWheel.controller, 21)
+    }
+
+    func testMIDIValidationRejectsInvalidChannelChordFnAndDuplicateEntries() {
+        var invalidChannel = MIDIButtonMapping(kind: .note)
+        invalidChannel.channel = 17
+        XCTAssertThrowsError(try invalidChannel.validate()) { error in
+            XCTAssertEqual(error as? MIDIValidationError, .invalidChannel(17))
+        }
+
+        var duplicateChord = MIDIButtonMapping(kind: .chord)
+        duplicateChord.chord = [60, 60]
+        XCTAssertThrowsError(try duplicateChord.validate())
+
+        let duplicateEntries = MIDIProfileSettings(
+            fnControl: .wheelCW,
+            primaryButtons: [
+                .init(control: .k1, mapping: MIDIButtonMapping(kind: .note)),
+                .init(control: .k1, mapping: MIDIButtonMapping(kind: .cc))
+            ]
+        )
+        XCTAssertThrowsError(try duplicateEntries.validate()) { error in
+            XCTAssertEqual(error as? MIDIValidationError, .invalidFnControl(.wheelCW))
+        }
+
+        let duplicateControls = MIDIProfileSettings(
+            primaryButtons: [
+                .init(control: .k1, mapping: MIDIButtonMapping(kind: .note)),
+                .init(control: .k1, mapping: MIDIButtonMapping(kind: .cc))
+            ]
+        )
+        XCTAssertThrowsError(try duplicateControls.validate()) { error in
+            XCTAssertEqual(error as? MIDIValidationError, .duplicateButtonMapping(layer: .primary, control: .k1))
+        }
+
+        var invalidThreshold = MIDIProfileSettings()
+        invalidThreshold.fnHoldThreshold = 0.09
+        XCTAssertThrowsError(try invalidThreshold.validate()) { error in
+            XCTAssertEqual(error as? MIDIValidationError, .invalidFnHoldThreshold(0.09))
+        }
+
+        invalidThreshold.fnHoldThreshold = .nan
+        XCTAssertThrowsError(try invalidThreshold.validate())
+    }
 }

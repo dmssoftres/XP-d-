@@ -85,11 +85,29 @@ struct ProfileOverlaySelection: Equatable {
     let selectedProfile: String
 }
 
+/// The compact, persistent status card shown while a MIDI profile owns the
+/// remote.  A nil summary means the workspace is armed but no control is
+/// currently held; the profile and layer remain visible in that state.
+struct MIDIOverlayPresentation: Equatable {
+    let profileName: String
+    let layer: MIDIMappingLayer
+    let control: RemoteControl?
+    let summary: String?
+
+    var lockTitle: String { "MIDI LOCK" }
+
+    var layerTitle: String {
+        layer == .function ? "FN LAYER" : "PRIMARY"
+    }
+}
+
 @Observable
 @MainActor
 final class InputOverlayModel {
     private(set) var entries: [InputOverlayEntry] = []
     private(set) var profileSelection: ProfileOverlaySelection?
+    private(set) var midiPresentation: MIDIOverlayPresentation?
+    var midiState: MIDIOverlayPresentation? { midiPresentation }
     var isEnabled = true
     private(set) var displayDuration: TimeInterval
     @ObservationIgnored var visibilityDidChange: ((Bool) -> Void)?
@@ -163,8 +181,31 @@ final class InputOverlayModel {
         visibilityDidChange?(hasVisibleContent)
     }
 
+    func showMIDI(
+        profileName: String,
+        layer: MIDIMappingLayer = .primary,
+        control: RemoteControl? = nil,
+        summary: String? = nil
+    ) {
+        guard isEnabled else { return }
+        midiPresentation = MIDIOverlayPresentation(
+            profileName: profileName,
+            layer: layer,
+            control: control,
+            summary: summary
+        )
+        visibilityDidChange?(true)
+    }
+
+    func clearMIDI() {
+        guard midiPresentation != nil else { return }
+        midiPresentation = nil
+        visibilityDidChange?(hasVisibleContent)
+    }
+
     func reset() {
         entries.removeAll()
+        midiPresentation = nil
         visibilityDidChange?(hasVisibleContent)
     }
 

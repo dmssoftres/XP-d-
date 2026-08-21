@@ -1,5 +1,41 @@
+import AppKit
 import Foundation
 import Observation
+
+private final class MIDIShutdownGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var hasRequested = false
+
+    func request() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !hasRequested else { return false }
+        hasRequested = true
+        return true
+    }
+}
+
+private final class MIDIShutdownObserver: @unchecked Sendable {
+    var token: NSObjectProtocol?
+}
+
+private final class MIDICommandTail: @unchecked Sendable {
+    var task: Task<Void, Never>?
+}
+
+private final class MIDIMonitorRelay: @unchecked Sendable {
+    weak var store: MappingStore?
+
+    init(store: MappingStore) {
+        self.store = store
+    }
+
+    func receive(_ event: MIDIOutputService.MonitorEvent) {
+        Task { @MainActor [weak self] in
+            self?.store?.recordMIDIEvent(event)
+        }
+    }
+}
 
 @Observable
 @MainActor
@@ -16,6 +52,8 @@ final class MappingStore {
         case duplicateName(String)
         case profileNotFound(String)
         case cannotDeleteGlobal
+        case noMIDIProfile
+        case invalidMIDIProfile(String)
 
         var errorDescription: String? {
             switch self {
@@ -27,6 +65,10 @@ final class MappingStore {
                 return "Profile not found: \(name)."
             case .cannotDeleteGlobal:
                 return "The Global profile cannot be deleted."
+            case .noMIDIProfile:
+                return "Create a MIDI profile before entering MIDI Lock."
+            case let .invalidMIDIProfile(message):
+                return message
             }
         }
     }
@@ -69,6 +111,7 @@ final class MappingStore {
 
     var selectedControl: RemoteControl = .k1
     var selectedGesture: GestureKind = .tap
+    var selectedMIDILayer: MIDIMappingLayer = .primary
     var profileName = "Global" {
         didSet {
             guard availableProfiles.contains(profileName) else {
@@ -77,6 +120,7 @@ final class MappingStore {
             }
             guard profileName != oldValue, !isReplacingConfiguration else { return }
             cancelPendingButtonGestures()
+            resetMIDIState()
             saveActiveProfile(named: oldValue)
             activateProfile(named: profileName)
             defaults.set(profileName, forKey: profileNameDefaultsKey)
@@ -90,6 +134,11 @@ final class MappingStore {
     private(set) var lastActionResult: ActionExecutionResult?
     private(set) var lastConfigurationResult: ConfigurationOperationResult = .idle
     private(set) var lastPersistenceResult: PersistenceResult = .idle
+    private(set) var lastMIDIMessage: MIDIOutputService.SentMessage?
+    private(set) var lastMIDIError: String?
+    private(set) var lastMIDIStatus: String?
+    private(set) var midiEndpointStatuses: [MIDIOutputPort: MIDIOutputService.EndpointStatus] = [:]
+    private(set) var midiMonitorEvents: [MIDIOutputService.MonitorEvent] = []
     var showsInputOverlay: Bool {
         didSet {
             defaults.set(showsInputOverlay, forKey: inputOverlayDefaultsKey)
@@ -122,11 +171,85 @@ final class MappingStore {
     }
     let hid: HIDService
 
+    /// The active profile's persisted realm.  Standard profiles retain the
+    /// original ActionRunner path; MIDI profiles own their typed MIDI state.
+    private(set) var activeRealm: ProfileRealm = .standard
+    var profileRealm: ProfileRealm { activeRealm }
+    /// Read-only UI state for the overlay/menu presentation. The Fn layer is
+    /// strictly momentary and is cleared by every MIDI cleanup path.
+    var isFnLayerActive: Bool { fnIsActive }
+    var activeRealmProfileStatus: String {
+        let realmLabel = activeRealm == .midi ? "MIDI" : "Standard"
+        return realmLabel + " · " + profileName
+    }
+    var midiLocked: Bool = false
+    var workspaceLockControl: RemoteControl = XPdConfiguration.defaultWorkspaceLockControl
+    var currentMIDISettings: MIDIProfileSettings? {
+        guard activeRealm == .midi else { return nil }
+        return midiSettings
+    }
+    var midiSettings: MIDIProfileSettings?
+
+    /// Session-only expressive offsets. They intentionally live outside the
+    /// persisted profile schema and reset whenever the MIDI workspace is
+    /// replaced or cleaned up.
+    private var midiTransposeOffsets: [MIDIMappingLayer: Int] = [.primary: 0, .function: 0]
+    private var midiDrumBankOffsets: [MIDIMappingLayer: Int] = [.primary: 0, .function: 0]
+
+    var availableProfilesInActiveRealm: [String] {
+        availableProfiles.filter { profileStates[$0]?.realm == activeRealm }
+    }
+    var midiProfiles: [String] {
+        availableProfiles.filter { profileStates[$0]?.realm == .midi }
+    }
+    var standardProfiles: [String] {
+        availableProfiles.filter { profileStates[$0]?.realm == .standard }
+    }
+
+    func profileRealm(for name: String) -> ProfileRealm? { profileStates[name]?.realm }
+
+    @discardableResult
+    func setWorkspaceLockControl(_ control: RemoteControl) -> Bool {
+        guard control.isMIDIButton else {
+            lastActionResult = .failure("Workspace lock control must be a K button.")
+            return false
+        }
+        workspaceLockControl = control
+        saveAllProfiles()
+        return true
+    }
+
     static let inputOverlayDurationOptions: [Double] = [2, 4, 6, 8]
 
     private struct ProfileState: Codable, Equatable {
         var mappings: [MappingKey: Mapping]
         var hidBindings: [RemoteControl: String]
+        var realm: ProfileRealm
+        var midiSettings: MIDIProfileSettings?
+
+        init(
+            mappings: [MappingKey: Mapping],
+            hidBindings: [RemoteControl: String],
+            realm: ProfileRealm = .standard,
+            midiSettings: MIDIProfileSettings? = nil
+        ) {
+            self.mappings = mappings
+            self.hidBindings = hidBindings
+            self.realm = realm
+            self.midiSettings = midiSettings
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            mappings = try container.decodeIfPresent([MappingKey: Mapping].self, forKey: .mappings) ?? [:]
+            hidBindings = try container.decodeIfPresent([RemoteControl: String].self, forKey: .hidBindings) ?? [:]
+            realm = try container.decodeIfPresent(ProfileRealm.self, forKey: .realm) ?? .standard
+            midiSettings = try container.decodeIfPresent(MIDIProfileSettings.self, forKey: .midiSettings)
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case mappings, hidBindings, realm, midiSettings
+        }
     }
 
     private struct PersistedProfile: Codable, Equatable {
@@ -138,12 +261,56 @@ final class MappingStore {
         let version: Int
         let profiles: [PersistedProfile]
         let activeProfileName: String
+        let activeRealm: ProfileRealm
+        let lastStandardProfileName: String?
+        let lastMIDIProfileName: String?
+        let midiLocked: Bool
+        let workspaceLockControl: RemoteControl
+
+        init(
+            version: Int,
+            profiles: [PersistedProfile],
+            activeProfileName: String,
+            activeRealm: ProfileRealm = .standard,
+            lastStandardProfileName: String? = nil,
+            lastMIDIProfileName: String? = nil,
+            midiLocked: Bool = false,
+            workspaceLockControl: RemoteControl = XPdConfiguration.defaultWorkspaceLockControl
+        ) {
+            self.version = version
+            self.profiles = profiles
+            self.activeProfileName = activeProfileName
+            self.activeRealm = activeRealm
+            self.lastStandardProfileName = lastStandardProfileName
+            self.lastMIDIProfileName = lastMIDIProfileName
+            self.midiLocked = midiLocked
+            self.workspaceLockControl = workspaceLockControl
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            version = try container.decode(Int.self, forKey: .version)
+            profiles = try container.decodeIfPresent([PersistedProfile].self, forKey: .profiles) ?? []
+            activeProfileName = try container.decodeIfPresent(String.self, forKey: .activeProfileName) ?? "Global"
+            activeRealm = try container.decodeIfPresent(ProfileRealm.self, forKey: .activeRealm) ?? .standard
+            lastStandardProfileName = try container.decodeIfPresent(String.self, forKey: .lastStandardProfileName)
+            lastMIDIProfileName = try container.decodeIfPresent(String.self, forKey: .lastMIDIProfileName)
+            midiLocked = try container.decodeIfPresent(Bool.self, forKey: .midiLocked) ?? false
+            workspaceLockControl = try container.decodeIfPresent(RemoteControl.self, forKey: .workspaceLockControl)
+                ?? XPdConfiguration.defaultWorkspaceLockControl
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case version, profiles, activeProfileName, activeRealm
+            case lastStandardProfileName, lastMIDIProfileName, midiLocked, workspaceLockControl
+        }
     }
 
     private let defaults: UserDefaults
-    private let profilesDefaultsKey = "XPd.profiles.v3"
+    private let profilesDefaultsKey = "XPd.profiles.v4"
+    private let previousProfilesDefaultsKey = "XPd.profiles.v3"
     private let legacyProfilesDefaultsKey = "XPd.profiles.v2"
-    private let profilesMigrationKey = "XPd.profiles.v3.migrated"
+    private let profilesMigrationKey = "XPd.profiles.v4.migrated"
     private let defaultsKey = "XPd.mappings.v1"
     private let hidBindingsKey = "XPd.hidBindings.v1"
     private let profileNameDefaultsKey = "XPd.profileName.v1"
@@ -155,23 +322,43 @@ final class MappingStore {
     private var isProfileSelectorVisible = false
     private var isWheelCenterHeld = false
     private var pendingProfileName: String?
+    private var profileSelectorTimeoutTask: Task<Void, Never>?
+    private var profileSelectorTimeoutGeneration = 0
     private var isReplacingConfiguration = false
     private var loadedProfileName: String?
+    private var loadedActiveRealm: ProfileRealm = .standard
+    private var loadedLastStandardProfileName: String?
+    private var loadedLastMIDIProfileName: String?
+    private var loadedMIDIIsLocked = false
+    private var loadedWorkspaceLockControl: RemoteControl = XPdConfiguration.defaultWorkspaceLockControl
+    private var lastStandardProfileName: String?
+    private var lastMIDIProfileName: String?
+    private var fnIsActive = false
+    private var activeMIDIControls: Set<RemoteControl> = []
+    private var midiControlLayers: [RemoteControl: Int] = [:]
+    private var centerFnHoldTask: Task<Void, Never>?
+    private var centerFnHoldGeneration = 0
+    private let midiOutputService: MIDIOutputService
+    private let midiCommandTail = MIDICommandTail()
+    private let midiShutdownGate = MIDIShutdownGate()
     private let actionRunner = ActionRunner()
     private let actionExecutionOverride: ActionExecutionOverride?
     private let buttonGestureRecognizer: ButtonGestureRecognizer
     @ObservationIgnored private lazy var inputOverlay = InputOverlayController(displayDuration: inputOverlayDuration)
+    @ObservationIgnored private let terminationObserver = MIDIShutdownObserver()
 
     init(
         userDefaults: UserDefaults = .standard,
         startHardware: Bool = true,
         gestureSchedule: @escaping ButtonGestureRecognizer.Schedule = ButtonGestureRecognizer.productionSchedule,
-        actionExecutionOverride: ActionExecutionOverride? = nil
+        actionExecutionOverride: ActionExecutionOverride? = nil,
+        midiOutputService: MIDIOutputService? = nil
     ) {
         defaults = userDefaults
         hid = HIDService(startHardware: startHardware)
         buttonGestureRecognizer = ButtonGestureRecognizer(schedule: gestureSchedule)
         self.actionExecutionOverride = actionExecutionOverride
+        self.midiOutputService = midiOutputService ?? MIDIOutputService(defaults: userDefaults)
 
         let savedProfile = defaults.string(forKey: profileNameDefaultsKey)
         showsInputOverlay = defaults.object(forKey: inputOverlayDefaultsKey) as? Bool ?? true
@@ -185,6 +372,13 @@ final class MappingStore {
         let restoredProfile = migratedLegacyState
             ? "Global"
             : (loadedProfileName ?? savedProfile).flatMap { availableProfiles.contains($0) ? $0 : nil } ?? "Global"
+        activeRealm = loadedActiveRealm
+        lastStandardProfileName = loadedLastStandardProfileName
+        lastMIDIProfileName = loadedLastMIDIProfileName
+        midiLocked = loadedMIDIIsLocked
+        workspaceLockControl = loadedWorkspaceLockControl.isMIDIButton
+            ? loadedWorkspaceLockControl
+            : XPdConfiguration.defaultWorkspaceLockControl
         isReplacingConfiguration = true
         profileName = restoredProfile
         isReplacingConfiguration = false
@@ -197,16 +391,276 @@ final class MappingStore {
         }
         hid.onDisconnect = { [weak self] in
             self?.cancelPendingButtonGestures()
+            self?.resetMIDIState(force: true)
+            self?.refreshMIDIEndpointStatus()
             self?.closeProfileSelector()
         }
         buttonGestureRecognizer.onGesture = { [weak self] control, gesture in
             self?.recognizedButtonGesture(control: control, gesture: gesture)
+        }
+        let midiService = self.midiOutputService
+        let monitorRelay = MIDIMonitorRelay(store: self)
+        midiCommandTail.task = Task {
+            await midiService.setMonitorSink { [monitorRelay] event in
+                monitorRelay.receive(event)
+            }
+        }
+        refreshMIDIEndpointStatus()
+        syncMIDIOverlay()
+        terminationObserver.token = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.requestMIDIShutdown() }
+        }
+    }
+
+    deinit {
+        if let token = terminationObserver.token {
+            NotificationCenter.default.removeObserver(token)
+        }
+        guard midiShutdownGate.request() else { return }
+        let previous = midiCommandTail.task
+        let service = midiOutputService
+        Task {
+            if let previous { await previous.value }
+            _ = await service.resetForShutdown()
         }
     }
 
     func mapping(for control: RemoteControl, gesture: GestureKind) -> Mapping {
         mappings[MappingKey(control: control, gesture: gesture)] ?? Mapping()
     }
+
+    // MARK: MIDI profile state
+
+    func midiButtonMapping(for control: RemoteControl, layer: MIDIMappingLayer = .primary) -> MIDIButtonMapping {
+        guard let settings = midiSettings else { return MIDIButtonMapping() }
+        let entries = layer == .primary ? settings.primaryButtons : settings.functionButtons
+        return entries.first(where: { $0.control == control })?.mapping ?? MIDIButtonMapping()
+    }
+
+    func primaryButtonMapping(for control: RemoteControl) -> MIDIButtonMapping {
+        midiButtonMapping(for: control, layer: .primary)
+    }
+
+    func midiMapping(for control: RemoteControl, layer: MIDIMappingLayer = .primary) -> MIDIButtonMapping {
+        midiButtonMapping(for: control, layer: layer)
+    }
+
+    func effectiveMIDIButtonMappingForTesting(
+        for control: RemoteControl,
+        layer: MIDIMappingLayer = .primary
+    ) -> MIDIButtonMapping {
+        adjustedMIDIButtonMapping(midiButtonMapping(for: control, layer: layer), layer: layer)
+    }
+
+    func functionButtonMapping(for control: RemoteControl) -> MIDIButtonMapping {
+        midiButtonMapping(for: control, layer: .function)
+    }
+
+    func updateMIDIButtonMapping(
+        _ mapping: MIDIButtonMapping,
+        for control: RemoteControl,
+        layer: MIDIMappingLayer = .primary
+    ) {
+        guard activeRealm == .midi, control.isMIDIButton else { return }
+        guard (try? mapping.validate()) != nil else {
+            lastMIDIError = "Invalid MIDI button mapping."
+            return
+        }
+        resetMIDIState()
+        var settings = midiSettings ?? MIDIProfileSettings()
+        if layer == .primary {
+            settings.primaryButtons.removeAll { $0.control == control }
+            settings.primaryButtons.append(.init(control: control, mapping: mapping))
+        } else {
+            settings.functionButtons.removeAll { $0.control == control }
+            settings.functionButtons.append(.init(control: control, mapping: mapping))
+        }
+        midiSettings = settings
+        saveMIDIState()
+    }
+
+    func updatePrimaryButtonMapping(_ mapping: MIDIButtonMapping, for control: RemoteControl) {
+        updateMIDIButtonMapping(mapping, for: control, layer: .primary)
+    }
+
+    func updateFunctionButtonMapping(_ mapping: MIDIButtonMapping, for control: RemoteControl) {
+        updateMIDIButtonMapping(mapping, for: control, layer: .function)
+    }
+
+    func updateMIDIButton(_ mapping: MIDIButtonMapping, for control: RemoteControl, layer: MIDIMappingLayer = .primary) {
+        updateMIDIButtonMapping(mapping, for: control, layer: layer)
+    }
+
+    func midiWheelMapping(for layer: MIDIMappingLayer = .primary) -> MIDIWheelMapping {
+        layer == .primary ? midiSettings?.primaryWheel ?? MIDIWheelMapping() : midiSettings?.functionWheel ?? MIDIWheelMapping(kind: .absoluteCC, controller: 1)
+    }
+
+    func primaryWheelMapping() -> MIDIWheelMapping { midiWheelMapping(for: .primary) }
+    func functionWheelMapping() -> MIDIWheelMapping { midiWheelMapping(for: .function) }
+    func wheelMapping(for layer: MIDIMappingLayer = .primary) -> MIDIWheelMapping { midiWheelMapping(for: layer) }
+
+    func updateMIDIWheelMapping(_ mapping: MIDIWheelMapping, layer: MIDIMappingLayer = .primary) {
+        guard activeRealm == .midi else { return }
+        guard (try? mapping.validate()) != nil else {
+            lastMIDIError = "Invalid MIDI wheel mapping."
+            return
+        }
+        resetMIDIState()
+        var settings = midiSettings ?? MIDIProfileSettings()
+        if layer == .primary { settings.primaryWheel = mapping } else { settings.functionWheel = mapping }
+        midiSettings = settings
+        saveMIDIState()
+    }
+
+    func updatePrimaryWheelMapping(_ mapping: MIDIWheelMapping) { updateMIDIWheelMapping(mapping, layer: .primary) }
+    func updateFunctionWheelMapping(_ mapping: MIDIWheelMapping) { updateMIDIWheelMapping(mapping, layer: .function) }
+    func updateWheelMapping(_ mapping: MIDIWheelMapping, layer: MIDIMappingLayer = .primary) { updateMIDIWheelMapping(mapping, layer: layer) }
+
+    @discardableResult
+    func updateMIDIPracticeFnControl(_ control: RemoteControl?) -> Bool {
+        guard activeRealm == .midi else { return false }
+        if let control, !control.isMIDIEligibleFnControl {
+            lastMIDIError = MIDIValidationError.invalidFnControl(control).localizedDescription
+            return false
+        }
+        var settings = midiSettings ?? MIDIProfileSettings()
+        guard settings.fnControl != control else { return true }
+        resetMIDIState(force: true)
+        settings.fnControl = control
+        midiSettings = settings
+        saveMIDIState()
+        return true
+    }
+
+    func updateFnAssignment(_ control: RemoteControl?) -> Bool {
+        updateMIDIPracticeFnControl(control)
+    }
+
+    func setFnControl(_ control: RemoteControl?) -> Bool { updateMIDIPracticeFnControl(control) }
+
+    /// Updates the persisted center-as-Fn hold threshold. The model's valid
+    /// range is 0.10...3.0 seconds; UI edits are clamped before the complete
+    /// MIDI settings object is validated and autosaved.
+    @discardableResult
+    func updateMIDIHoldThreshold(_ threshold: TimeInterval) -> Bool {
+        guard activeRealm == .midi else { return false }
+        guard threshold.isFinite else {
+            lastMIDIError = "Fn hold threshold must be finite."
+            return false
+        }
+        var settings = midiSettings ?? MIDIProfileSettings()
+        settings.fnHoldThreshold = max(0.10, min(3.0, threshold))
+        guard (try? settings.validate()) != nil else {
+            lastMIDIError = "Invalid Fn hold threshold."
+            return false
+        }
+        midiSettings = settings
+        saveMIDIState()
+        return true
+    }
+
+    func setMIDIHoldThreshold(_ threshold: TimeInterval) -> Bool {
+        updateMIDIHoldThreshold(threshold)
+    }
+
+    var fnControl: RemoteControl? { midiSettings?.fnControl }
+
+    func refreshMIDIEndpointStatus() {
+        Task { [weak self] in
+            guard let self else { return }
+            let statuses = await midiOutputService.endpointStatus()
+            let message = await midiOutputService.lastMessage
+            let error = await midiOutputService.lastError
+            self.midiEndpointStatuses = statuses
+            self.lastMIDIMessage = message
+            self.lastMIDIError = error
+        }
+    }
+
+    var midiEndpointStatus: [MIDIOutputPort: MIDIOutputService.EndpointStatus] { midiEndpointStatuses }
+    var endpointStatuses: [MIDIOutputPort: MIDIOutputService.EndpointStatus] { midiEndpointStatuses }
+    var lastMessage: MIDIOutputService.SentMessage? { lastMIDIMessage }
+    var lastError: String? { lastMIDIError }
+    var midiStatus: String? { lastMIDIStatus }
+
+    func clearMIDIMonitor() {
+        midiMonitorEvents.removeAll()
+    }
+
+    func midiTransposeOffset(for layer: MIDIMappingLayer = .primary) -> Int {
+        midiTransposeOffsets[layer, default: 0]
+    }
+
+    func midiDrumBankOffset(for layer: MIDIMappingLayer = .primary) -> Int {
+        midiDrumBankOffsets[layer, default: 0]
+    }
+
+    func panicMIDI() {
+        enqueueMIDICommand { service in
+            await service.panic()
+        }
+        fnIsActive = false
+        activeMIDIControls.removeAll()
+        midiControlLayers.removeAll()
+        resetSessionOffsets()
+        syncMIDIOverlay()
+    }
+
+    func panic() { panicMIDI() }
+    func panicMIDIOutput() { panicMIDI() }
+    func sendTestMIDIMessage(for control: RemoteControl, layer: MIDIMappingLayer = .primary) {
+        sendMIDITestMessage(for: control, layer: layer)
+    }
+
+    func sendMIDITestMessage(for control: RemoteControl, layer: MIDIMappingLayer = .primary) {
+        guard activeRealm == .midi, control.isMIDIButton else { return }
+        let mapping = adjustedMIDIButtonMapping(
+            midiButtonMapping(for: control, layer: layer),
+            layer: layer
+        )
+        let origin = MIDIOutputService.Origin("test:\(control.rawValue)", layer: layer == .primary ? 1 : 2)
+        enqueueMIDICommand { service in
+            let result = await service.sendButton(mapping, origin: origin)
+            _ = await service.release(origin: origin)
+            return result
+        }
+    }
+
+    func selectProfile(_ name: String) -> Bool {
+        guard let state = profileStates[name] else {
+            lastActionResult = .failure(ProfileError.profileNotFound(name).localizedDescription)
+            return false
+        }
+        closeProfileSelector()
+        midiLocked = state.realm == .midi
+        profileName = name
+        return true
+    }
+
+    func selectProfile(named name: String) -> Bool { selectProfile(name) }
+    func setActiveProfile(_ name: String) -> Bool { selectProfile(name) }
+
+    @discardableResult
+    func toggleWorkspace() -> Bool {
+        let targetRealm: ProfileRealm = activeRealm == .midi ? .standard : .midi
+        guard let target = rememberedProfile(in: targetRealm) ?? availableProfiles.first(where: { profileStates[$0]?.realm == targetRealm }) else {
+            lastActionResult = .failure(ProfileError.noMIDIProfile.localizedDescription)
+            return false
+        }
+        closeProfileSelector()
+        resetMIDIState(force: true)
+        midiLocked = targetRealm == .midi
+        profileName = target
+        activeRealm = targetRealm
+        saveAllProfiles()
+        return true
+    }
+
+    func toggleMIDIWorkspace() -> Bool { toggleWorkspace() }
 
     /// Returns the application target currently configured for a control's
     /// Tap mapping.  The target is intentionally read on demand so Hold and
@@ -277,17 +731,53 @@ final class MappingStore {
     /// state and activates it so it is immediately ready for editing.
     @discardableResult
     func addProfile(named rawName: String) throws -> String {
+        try addProfile(named: rawName, realm: .standard, midiSettings: nil)
+    }
+
+    @discardableResult
+    func addProfile(
+        named rawName: String,
+        realm: ProfileRealm,
+        midiSettings: MIDIProfileSettings? = nil
+    ) throws -> String {
         let name = try validatedNewProfileName(rawName)
+        let resolvedMIDISettings: MIDIProfileSettings?
+        if realm == .midi {
+            let candidate = midiSettings ?? Self.defaultMIDIProfileSettings()
+            do { try candidate.validate() } catch {
+                throw ProfileError.invalidMIDIProfile(Self.configurationErrorMessage(for: error))
+            }
+            resolvedMIDISettings = candidate
+        } else {
+            resolvedMIDISettings = nil
+        }
         closeProfileSelector()
-        profileStates[name] = Self.defaultProfileState()
+        resetMIDIState(force: true)
+        saveActiveProfile()
+        profileStates[name] = ProfileState(
+            mappings: Self.defaultProfileState().mappings,
+            hidBindings: Self.defaultProfileState().hidBindings,
+            realm: realm,
+            midiSettings: resolvedMIDISettings
+        )
         availableProfiles.append(name)
         isReplacingConfiguration = true
         profileName = name
         isReplacingConfiguration = false
         activateProfile(named: name)
+        activeRealm = realm
+        midiLocked = realm == .midi
         defaults.set(profileName, forKey: profileNameDefaultsKey)
         saveAllProfiles()
         return name
+    }
+
+    @discardableResult
+    func addMIDIProfile(
+        named name: String,
+        settings: MIDIProfileSettings? = nil
+    ) throws -> String {
+        try addProfile(named: name, realm: .midi, midiSettings: settings)
     }
 
     /// Deletes an inactive or active profile. Global is intentionally
@@ -300,6 +790,7 @@ final class MappingStore {
 
         closeProfileSelector()
         if profileName == name {
+            resetMIDIState(force: true)
             isReplacingConfiguration = true
             profileName = "Global"
             isReplacingConfiguration = false
@@ -345,6 +836,19 @@ final class MappingStore {
         pendingProfileName
     }
 
+    var profileSelectorTimeoutGenerationForTesting: Int {
+        profileSelectorTimeoutGeneration
+    }
+
+    func simulateProfileSelectorTimeoutForTesting() {
+        guard isProfileSelectorVisible else { return }
+        closeProfileSelector()
+    }
+
+    func waitForMIDICommandsForTesting() async {
+        await midiCommandTail.task?.value
+    }
+
     /// Returns the current configuration as deterministic, pretty-printed
     /// JSON data. File panels and filesystem access belong to the UI layer.
     func exportConfiguration() -> Data? {
@@ -353,13 +857,20 @@ final class MappingStore {
             return XPdConfiguration.Profile(
                 name: name,
                 mappings: Self.mappingEntries(from: state.mappings),
-                hidBindings: Self.hidBindingEntries(from: state.hidBindings)
+                hidBindings: Self.hidBindingEntries(from: state.hidBindings),
+                realm: state.realm,
+                midiSettings: state.midiSettings
             )
         }
         let configuration = XPdConfiguration(
             profiles: profiles,
             profileName: profileName,
-            showsInputOverlay: showsInputOverlay
+            showsInputOverlay: showsInputOverlay,
+            activeRealm: activeRealm,
+            lastStandardProfileName: lastStandardProfileName,
+            lastMIDIProfileName: lastMIDIProfileName,
+            midiLocked: midiLocked,
+            workspaceLockControl: workspaceLockControl
         )
 
         do {
@@ -404,7 +915,9 @@ final class MappingStore {
             }
             importedStates[profile.name] = ProfileState(
                 mappings: importedMappings,
-                hidBindings: importedHIDBindings
+                hidBindings: importedHIDBindings,
+                realm: profile.realm,
+                midiSettings: profile.midiSettings
             )
         }
 
@@ -422,10 +935,16 @@ final class MappingStore {
         }
 
         cancelPendingButtonGestures()
+        resetMIDIState(force: true)
         isReplacingConfiguration = true
         profileStates = importedStates
         availableProfiles = configuration.profiles.map(\.name)
         profileName = configuration.profileName
+        activeRealm = configuration.activeRealm
+        lastStandardProfileName = configuration.lastStandardProfileName
+        lastMIDIProfileName = configuration.lastMIDIProfileName
+        midiLocked = configuration.midiLocked
+        workspaceLockControl = configuration.workspaceLockControl
         activateProfile(named: configuration.profileName)
         isReplacingConfiguration = false
 
@@ -505,6 +1024,15 @@ final class MappingStore {
         let generation = liveInputGeneration
 
         guard let signature else {
+            if activeRealm == .midi, let liveControl {
+                if liveControl == .wheelCenter, fnControl == .wheelCenter {
+                    finishCenterMIDIInteraction()
+                } else {
+                    handleMIDIControlRelease(liveControl)
+                }
+                self.liveControl = nil
+                return
+            }
             if isWheelCenterHeld {
                 isWheelCenterHeld = false
                 confirmProfileSelection()
@@ -538,23 +1066,51 @@ final class MappingStore {
 
         guard let matched = hidBindings.first(where: { $0.value == signature })?.key else { return }
         if let displacedControl = liveControl, displacedControl != matched {
-            buttonGestureRecognizer.cancel(displacedControl)
-            if showsInputOverlay, !displacedControl.isWheelRotation {
-                inputOverlay.release(control: displacedControl)
+            if activeRealm == .midi {
+                handleMIDIControlRelease(displacedControl)
+            } else {
+                buttonGestureRecognizer.cancel(displacedControl)
+                if showsInputOverlay, !displacedControl.isWheelRotation {
+                    inputOverlay.release(control: displacedControl)
+                }
             }
         }
         selectedControl = matched
         liveControl = matched
 
         if matched == .wheelCenter {
+            if activeRealm == .midi, fnControl == .wheelCenter {
+                beginCenterMIDIInteraction()
+                return
+            }
             isWheelCenterHeld = true
             openProfileSelector()
+            return
+        }
+
+        if isProfileSelectorVisible, matched == workspaceLockControl {
+            _ = toggleWorkspace()
+            liveControl = nil
+            return
+        }
+
+        if isProfileSelectorVisible, matched.isMIDIButton {
+            // While the selector is open, every non-lock K button is
+            // intentionally consumed so an accidental press cannot execute
+            // the profile's normal mapping.
+            closeProfileSelector()
+            liveControl = nil
             return
         }
 
         if isProfileSelectorVisible, matched == .wheelCW || matched == .wheelCCW {
             rotateProfile(matched == .wheelCW ? 1 : -1)
             liveControl = nil
+            return
+        }
+
+        if activeRealm == .midi {
+            handleMIDIControlPress(matched)
             return
         }
 
@@ -582,6 +1138,149 @@ final class MappingStore {
         }
     }
 
+    private func beginCenterMIDIInteraction() {
+        guard !isWheelCenterHeld else { return }
+        isWheelCenterHeld = true
+        openProfileSelector()
+        centerFnHoldGeneration &+= 1
+        let generation = centerFnHoldGeneration
+        centerFnHoldTask?.cancel()
+        let holdThreshold = midiSettings?.fnHoldThreshold ?? MIDIProfileSettings.defaultFnHoldThreshold
+        centerFnHoldTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(holdThreshold))
+            guard let self, self.centerFnHoldGeneration == generation,
+                  self.isWheelCenterHeld, self.activeRealm == .midi,
+                  self.fnControl == .wheelCenter else { return }
+            self.fnIsActive = true
+            self.activeMIDIControls.insert(.wheelCenter)
+            self.midiControlLayers[.wheelCenter] = 2
+            self.isProfileSelectorVisible = false
+            self.pendingProfileName = nil
+            self.cancelProfileSelectorTimeout()
+            self.inputOverlay.hideProfileSelector()
+            self.syncMIDIOverlay(layer: .function)
+        }
+    }
+
+    private func finishCenterMIDIInteraction() {
+        centerFnHoldGeneration &+= 1
+        centerFnHoldTask?.cancel()
+        centerFnHoldTask = nil
+        if fnIsActive {
+            releaseMIDIControl(.wheelCenter, layer: 2)
+            fnIsActive = false
+            isWheelCenterHeld = false
+            syncMIDIOverlay()
+            return
+        }
+        isWheelCenterHeld = false
+        confirmProfileSelection()
+    }
+
+    private func handleMIDIControlPress(_ control: RemoteControl) {
+        if control == .wheelCenter, fnControl == .wheelCenter {
+            beginCenterMIDIInteraction()
+            return
+        }
+        guard control.isMIDIButton || control.isWheelRotation else { return }
+        if control.isWheelRotation {
+            let layer: MIDIMappingLayer = fnIsActive ? .function : .primary
+            let mapping = midiWheelMapping(for: layer)
+            let direction: MIDIWheelDirection = control == .wheelCW ? .clockwise : .counterClockwise
+            if updateSessionWheelOffset(direction: direction, mapping: mapping, layer: layer) {
+                return
+            }
+            syncMIDIOverlay(
+                layer: layer,
+                control: control,
+                summary: midiWheelOverlaySummary(mapping, control: control)
+            )
+            enqueueMIDICommand { service in
+                await service.wheel(direction, mapping: mapping)
+            }
+            return
+        }
+
+        if control == fnControl {
+            fnIsActive = true
+            activeMIDIControls.insert(control)
+            midiControlLayers[control] = 2
+            syncMIDIOverlay(layer: .function)
+            return
+        }
+
+        let layer: MIDIMappingLayer = fnIsActive ? .function : .primary
+        let layerNumber = layer == .primary ? 1 : 2
+        let mapping = adjustedMIDIButtonMapping(
+            midiButtonMapping(for: control, layer: layer),
+            layer: layer
+        )
+        activeMIDIControls.insert(control)
+        midiControlLayers[control] = layerNumber
+        syncMIDIOverlay(
+            layer: layer,
+            control: control,
+            summary: midiButtonOverlaySummary(mapping, control: control)
+        )
+        let origin = MIDIOutputService.Origin(control.rawValue, layer: layerNumber)
+        enqueueMIDICommand { service in
+            await service.sendButton(mapping, origin: origin)
+        }
+    }
+
+    private func handleMIDIControlRelease(_ control: RemoteControl) {
+        guard activeMIDIControls.contains(control) else {
+            if control.isWheelRotation {
+                syncMIDIOverlay()
+            }
+            return
+        }
+        let layer = midiControlLayers[control] ?? (fnIsActive ? 2 : 1)
+        if control == fnControl {
+            releaseMIDIControl(control, layer: 2)
+            fnIsActive = false
+            enqueueMIDICommand { service in
+                await service.releaseLayer(2)
+            }
+            syncMIDIOverlay()
+        } else {
+            releaseMIDIControl(control, layer: layer)
+            syncMIDIOverlay(
+                layer: fnIsActive ? .function : .primary,
+                control: nil,
+                summary: nil
+            )
+        }
+    }
+
+    private func releaseMIDIControl(_ control: RemoteControl, layer: Int) {
+        activeMIDIControls.remove(control)
+        midiControlLayers.removeValue(forKey: control)
+        let origin = MIDIOutputService.Origin(control.rawValue, layer: layer)
+        enqueueMIDICommand { service in
+            await service.release(origin: origin)
+        }
+    }
+
+    /// Deterministic seams for tests and for future HID decoders that can
+    /// provide an unambiguous press/release pair. These methods deliberately
+    /// do not pretend the current generic HID release stream can identify
+    /// arbitrary rollover order.
+    func simulateMIDIControlPressForTesting(_ control: RemoteControl) {
+        guard activeRealm == .midi else { return }
+        selectedControl = control
+        handleMIDIControlPress(control)
+    }
+
+    func simulateMIDIControlReleaseForTesting(_ control: RemoteControl) {
+        guard activeRealm == .midi else { return }
+        if control == .wheelCenter, fnControl == .wheelCenter {
+            finishCenterMIDIInteraction()
+            return
+        }
+        handleMIDIControlRelease(control)
+    }
+
     private func cancelPendingButtonGestures() {
         buttonGestureRecognizer.cancelAll()
         if let liveControl, showsInputOverlay, !liveControl.isWheelRotation {
@@ -600,12 +1299,15 @@ final class MappingStore {
 
     private func openProfileSelector() {
         guard !isProfileSelectorVisible else { return }
+        let profiles = availableProfilesInActiveRealm
+        guard !profiles.isEmpty else { return }
         isProfileSelectorVisible = true
         pendingProfileName = profileName
         inputOverlay.showProfileSelector(
-            profiles: availableProfiles,
+            profiles: profiles,
             selectedProfile: profileName
         )
+        restartProfileSelectorTimeout()
     }
 
     private func confirmProfileSelection() {
@@ -617,24 +1319,50 @@ final class MappingStore {
     }
 
     private func rotateProfile(_ direction: Int) {
-        guard !availableProfiles.isEmpty else { return }
+        let profiles = availableProfilesInActiveRealm
+        guard !profiles.isEmpty else { return }
         let highlightedProfile = pendingProfileName ?? profileName
-        let currentIndex = availableProfiles.firstIndex(of: highlightedProfile) ?? 0
-        let count = availableProfiles.count
+        let currentIndex = profiles.firstIndex(of: highlightedProfile) ?? 0
+        let count = profiles.count
         let nextIndex = (currentIndex + direction + count) % count
-        pendingProfileName = availableProfiles[nextIndex]
+        pendingProfileName = profiles[nextIndex]
         inputOverlay.showProfileSelector(
-            profiles: availableProfiles,
+            profiles: profiles,
             selectedProfile: pendingProfileName ?? profileName
         )
+        restartProfileSelectorTimeout()
     }
 
     private func closeProfileSelector() {
+        cancelProfileSelectorTimeout()
+        centerFnHoldGeneration &+= 1
+        centerFnHoldTask?.cancel()
+        centerFnHoldTask = nil
         isProfileSelectorVisible = false
         isWheelCenterHeld = false
         pendingProfileName = nil
         inputOverlay.hideProfileSelector()
         liveControl = nil
+        syncMIDIOverlay()
+    }
+
+    private func restartProfileSelectorTimeout() {
+        cancelProfileSelectorTimeout()
+        profileSelectorTimeoutGeneration &+= 1
+        let generation = profileSelectorTimeoutGeneration
+        profileSelectorTimeoutTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(4))
+            guard let self,
+                  self.profileSelectorTimeoutGeneration == generation,
+                  self.isProfileSelectorVisible else { return }
+            self.closeProfileSelector()
+        }
+    }
+
+    private func cancelProfileSelectorTimeout() {
+        profileSelectorTimeoutGeneration &+= 1
+        profileSelectorTimeoutTask?.cancel()
+        profileSelectorTimeoutTask = nil
     }
 
     private func showOverlayPress(for control: RemoteControl) {
@@ -645,6 +1373,246 @@ final class MappingStore {
             hold: overlayMapping(for: control, gesture: .hold),
             doubleTap: overlayMapping(for: control, gesture: .doubleTap)
         )
+    }
+
+    private func saveMIDIState() {
+        saveActiveProfile()
+        saveAllProfiles()
+        refreshMIDIEndpointStatus()
+    }
+
+    private func applyMIDIResult(_ result: Result<MIDIOutputService.StateResult, MIDIOutputService.ServiceError>) {
+        switch result {
+        case .success:
+            lastMIDIError = nil
+        case let .failure(error):
+            lastMIDIError = error.localizedDescription
+        }
+        refreshMIDIEndpointStatus()
+    }
+
+    fileprivate func recordMIDIEvent(_ event: MIDIOutputService.MonitorEvent) {
+        midiMonitorEvents.insert(event, at: 0)
+        if midiMonitorEvents.count > 100 {
+            midiMonitorEvents.removeLast(midiMonitorEvents.count - 100)
+        }
+    }
+
+    private func enqueueMIDICommand(
+        _ operation: @escaping (MIDIOutputService) async -> Result<MIDIOutputService.StateResult, MIDIOutputService.ServiceError>
+    ) {
+        let previous = midiCommandTail.task
+        let service = midiOutputService
+        midiCommandTail.task = Task { @MainActor [weak self] in
+            if let previous { await previous.value }
+            let result = await operation(service)
+            self?.applyMIDIResult(result)
+        }
+    }
+
+    private func requestMIDIShutdown() {
+        guard midiShutdownGate.request() else { return }
+        closeProfileSelector()
+        resetMIDIState(force: true)
+        enqueueMIDICommand { service in
+            await service.resetForShutdown()
+        }
+    }
+
+    /// Keeps the persistent lock card in sync with the active realm while
+    /// leaving profile-selector presentation in the model's higher-priority
+    /// slot. Trigger details are deliberately ephemeral and are cleared on
+    /// release or any MIDI reset.
+    private func syncMIDIOverlay(
+        layer: MIDIMappingLayer? = nil,
+        control: RemoteControl? = nil,
+        summary: String? = nil
+    ) {
+        guard activeRealm == .midi else {
+            inputOverlay.clearMIDI()
+            return
+        }
+        inputOverlay.showMIDI(
+            profileName: profileName,
+            layer: layer ?? (fnIsActive ? .function : .primary),
+            control: control,
+            summary: summary
+        )
+    }
+
+    private func midiButtonOverlaySummary(
+        _ mapping: MIDIButtonMapping,
+        control: RemoteControl
+    ) -> String {
+        let prefix = control.overlayLabel
+        switch mapping.kind {
+        case .note:
+            return prefix + " · Note " + String(mapping.note) + " · Ch " + String(mapping.channel) + " · Vel " + String(mapping.velocity)
+        case .cc:
+            return prefix + " · CC " + String(mapping.controller) + " · Ch " + String(mapping.channel) + " · " + String(mapping.pressValue)
+        case .program:
+            return prefix + " · PC " + String(mapping.program) + " · Ch " + String(mapping.channel)
+        case .chord:
+            return prefix + " · Chord " + mapping.chord.map(String.init).joined(separator: ",") + " · Ch " + String(mapping.channel)
+        case .noAction:
+            return prefix + " · No action"
+        }
+    }
+
+    private func midiWheelOverlaySummary(
+        _ mapping: MIDIWheelMapping,
+        control: RemoteControl
+    ) -> String {
+        let direction = control == .wheelCW ? "↷" : "↶"
+        switch mapping.kind {
+        case .relativeCC:
+            return direction + " · CC " + String(mapping.controller) + " · Ch " + String(mapping.channel)
+        case .absoluteCC:
+            return direction + " · Absolute CC " + String(mapping.controller) + " · Ch " + String(mapping.channel)
+        case .pitchBendNudgeReturn:
+            return direction + " · Pitch Bend · Ch " + String(mapping.channel)
+        case .transpose:
+            return direction + " · Transpose · " + String(mapping.transposeSemitones) + " st"
+        case .drumBank:
+            return direction + " · Drum Bank · " + String(mapping.drumBankStep)
+        case .noAction:
+            return direction + " · No action"
+        }
+    }
+
+    /// Applies the two stateful performance wheel modes locally. The output
+    /// service owns MIDI wire encoding, while the store owns profile-session
+    /// musical offsets because they change which note a later button press
+    /// should emit.
+    @discardableResult
+    private func updateSessionWheelOffset(
+        direction: MIDIWheelDirection,
+        mapping: MIDIWheelMapping,
+        layer: MIDIMappingLayer
+    ) -> Bool {
+        guard mapping.kind == .transpose || mapping.kind == .drumBank else { return false }
+        let directionSign = (direction == .clockwise ? 1 : -1) * (mapping.reversedDirection ? -1 : 1)
+        let current: Int
+        let proposed: Int
+        let status: String
+        switch mapping.kind {
+        case .transpose:
+            current = midiTransposeOffsets[layer, default: 0]
+            proposed = current + directionSign * mapping.transposeSemitones
+            let next = clampedSessionOffset(proposed, layer: layer)
+            midiTransposeOffsets[layer] = next
+            status = "Transpose offset " + signedValue(next) + " st · " + layer.rawValue
+        case .drumBank:
+            current = midiDrumBankOffsets[layer, default: 0]
+            proposed = current + directionSign * mapping.drumBankStep
+            let next = clampedDrumBankOffset(proposed, layer: layer)
+            midiDrumBankOffsets[layer] = next
+            status = "Drum Bank " + signedValue(next) + " · " + layer.rawValue
+        default:
+            return false
+        }
+        lastMIDIStatus = status
+        syncMIDIOverlay(
+            layer: layer,
+            control: direction == .clockwise ? .wheelCW : .wheelCCW,
+            summary: status
+        )
+        return true
+    }
+
+    private func clampedSessionOffset(_ proposed: Int, layer: MIDIMappingLayer) -> Int {
+        let notes = baseNoteValues(for: layer)
+        guard let minimum = notes.min(), let maximum = notes.max() else {
+            return max(-127, min(127, proposed))
+        }
+        let lowerBound = -minimum
+        let upperBound = 127 - maximum
+        return max(lowerBound, min(upperBound, proposed))
+    }
+
+    private func clampedDrumBankOffset(_ proposed: Int, layer: MIDIMappingLayer) -> Int {
+        let notes = baseNoteValues(for: layer)
+        guard let minimum = notes.min(), let maximum = notes.max() else {
+            return max(-12, min(12, proposed))
+        }
+        let lowerBank = -(minimum / 10)
+        let upperBank = (127 - maximum) / 10
+        return max(lowerBank, min(upperBank, proposed))
+    }
+
+    private func baseNoteValues(for layer: MIDIMappingLayer) -> [Int] {
+        guard let settings = midiSettings else { return [] }
+        let entries = layer == .primary ? settings.primaryButtons : settings.functionButtons
+        return entries.flatMap { entry in
+            switch entry.mapping.kind {
+            case .note:
+                return [entry.mapping.note]
+            case .chord:
+                return entry.mapping.chord
+            case .cc, .program, .noAction:
+                return []
+            }
+        }
+    }
+
+    private func adjustedMIDIButtonMapping(
+        _ mapping: MIDIButtonMapping,
+        layer: MIDIMappingLayer
+    ) -> MIDIButtonMapping {
+        let offset = midiTransposeOffsets[layer, default: 0]
+            + midiDrumBankOffsets[layer, default: 0] * 10
+        guard offset != 0 else { return mapping }
+        var adjusted = mapping
+        switch adjusted.kind {
+        case .note:
+            adjusted.note = shiftedMIDIValue(adjusted.note, by: offset)
+        case .chord:
+            adjusted.chord = adjusted.chord.map { shiftedMIDIValue($0, by: offset) }
+        case .cc, .program, .noAction:
+            break
+        }
+        return adjusted
+    }
+
+    private func shiftedMIDIValue(_ value: Int, by offset: Int) -> Int {
+        max(0, min(127, value + offset))
+    }
+
+    private func signedValue(_ value: Int) -> String {
+        value >= 0 ? "+" + String(value) : String(value)
+    }
+
+    private func resetSessionOffsets() {
+        midiTransposeOffsets = [.primary: 0, .function: 0]
+        midiDrumBankOffsets = [.primary: 0, .function: 0]
+        lastMIDIStatus = nil
+    }
+
+    private func resetMIDIState(force: Bool = false) {
+        if isProfileSelectorVisible {
+            closeProfileSelector()
+        } else {
+            cancelProfileSelectorTimeout()
+        }
+        centerFnHoldGeneration &+= 1
+        centerFnHoldTask?.cancel()
+        centerFnHoldTask = nil
+        let hadMIDIState = fnIsActive || !activeMIDIControls.isEmpty
+        fnIsActive = false
+        activeMIDIControls.removeAll()
+        midiControlLayers.removeAll()
+        resetSessionOffsets()
+        syncMIDIOverlay()
+        guard force || hadMIDIState || activeRealm == .midi else { return }
+        enqueueMIDICommand { service in
+            await service.resetForProfileChange()
+        }
+    }
+
+    private func rememberedProfile(in realm: ProfileRealm) -> String? {
+        let remembered = realm == .midi ? lastMIDIProfileName : lastStandardProfileName
+        guard let remembered, profileStates[remembered]?.realm == realm else { return nil }
+        return remembered
     }
 
     private func save() {
@@ -663,17 +1631,35 @@ final class MappingStore {
 
     private func saveActiveProfile(named name: String) {
         guard availableProfiles.contains(name) else { return }
-        profileStates[name] = ProfileState(mappings: mappings, hidBindings: hidBindings)
+        profileStates[name] = ProfileState(
+            mappings: mappings,
+            hidBindings: hidBindings,
+            realm: activeRealm,
+            midiSettings: activeRealm == .midi ? midiSettings : nil
+        )
     }
 
     private func activateProfile(named name: String) {
         guard let state = profileStates[name] else {
             mappings = [:]
             hidBindings = [:]
+            activeRealm = .standard
+            midiSettings = nil
+            syncMIDIOverlay()
             return
         }
         mappings = state.mappings
         hidBindings = state.hidBindings
+        activeRealm = state.realm
+        midiSettings = state.midiSettings
+        if activeRealm == .midi {
+            lastMIDIProfileName = name
+            midiLocked = true
+        } else {
+            lastStandardProfileName = name
+            midiLocked = false
+        }
+        syncMIDIOverlay()
     }
 
     private func saveAllProfiles() {
@@ -684,7 +1670,12 @@ final class MappingStore {
                     guard let state = profileStates[name] else { return nil }
                     return PersistedProfile(name: name, state: state)
                 },
-                activeProfileName: profileName
+                activeProfileName: profileName,
+                activeRealm: activeRealm,
+                lastStandardProfileName: lastStandardProfileName,
+                lastMIDIProfileName: lastMIDIProfileName,
+                midiLocked: midiLocked,
+                workspaceLockControl: workspaceLockControl
             )
             let data = try JSONEncoder().encode(persisted)
             defaults.set(data, forKey: profilesDefaultsKey)
@@ -698,11 +1689,51 @@ final class MappingStore {
     private func loadOrMigrateProfiles() -> Bool {
         if let data = defaults.data(forKey: profilesDefaultsKey),
            let decoded = try? JSONDecoder().decode(PersistedProfiles.self, from: data),
+           decoded.version == XPdConfiguration.currentVersion,
            isValidPersistedProfiles(decoded) {
             availableProfiles = decoded.profiles.map(\.name)
             profileStates = Dictionary(uniqueKeysWithValues: decoded.profiles.map { ($0.name, $0.state) })
             loadedProfileName = decoded.activeProfileName
+            loadedActiveRealm = decoded.activeRealm
+            loadedLastStandardProfileName = decoded.lastStandardProfileName
+            loadedLastMIDIProfileName = decoded.lastMIDIProfileName
+            loadedMIDIIsLocked = decoded.midiLocked
+            loadedWorkspaceLockControl = decoded.workspaceLockControl
             defaults.set(true, forKey: profilesMigrationKey)
+            return false
+        }
+
+        // v3 persisted dynamic profiles had the same mapping/HID shape but
+        // no realm or MIDI fields. Decode them through the compatibility
+        // defaults in ProfileState and explicitly upgrade every profile to
+        // the standard realm.
+        if let data = defaults.data(forKey: previousProfilesDefaultsKey),
+           let decoded = try? JSONDecoder().decode(PersistedProfiles.self, from: data),
+           decoded.version == XPdConfiguration.previousVersion {
+            availableProfiles = decoded.profiles.map(\.name)
+            profileStates = Dictionary(uniqueKeysWithValues: decoded.profiles.map { profile in
+                (profile.name, ProfileState(mappings: profile.state.mappings, hidBindings: profile.state.hidBindings))
+            })
+            guard isValidPersistedProfiles(
+                PersistedProfiles(
+                    version: XPdConfiguration.currentVersion,
+                    profiles: availableProfiles.compactMap { name in
+                        profileStates[name].map { PersistedProfile(name: name, state: $0) }
+                    },
+                    activeProfileName: decoded.activeProfileName
+                )
+            ) else {
+                availableProfiles = XPdConfiguration.defaultProfileNames
+                profileStates = Self.defaultProfileStates()
+                return false
+            }
+            loadedProfileName = decoded.activeProfileName
+            loadedActiveRealm = .standard
+            loadedLastStandardProfileName = decoded.activeProfileName
+            loadedLastMIDIProfileName = nil
+            loadedMIDIIsLocked = false
+            loadedWorkspaceLockControl = .k3
+            saveAllProfiles()
             return false
         }
 
@@ -758,11 +1789,18 @@ final class MappingStore {
                 XPdConfiguration.Profile(
                     name: profile.name,
                     mappings: Self.mappingEntries(from: profile.state.mappings),
-                    hidBindings: Self.hidBindingEntries(from: profile.state.hidBindings)
+                    hidBindings: Self.hidBindingEntries(from: profile.state.hidBindings),
+                    realm: profile.state.realm,
+                    midiSettings: profile.state.midiSettings
                 )
             },
             profileName: persisted.activeProfileName,
-            showsInputOverlay: showsInputOverlay
+            showsInputOverlay: showsInputOverlay,
+            activeRealm: persisted.activeRealm,
+            lastStandardProfileName: persisted.lastStandardProfileName,
+            lastMIDIProfileName: persisted.lastMIDIProfileName,
+            midiLocked: persisted.midiLocked,
+            workspaceLockControl: persisted.workspaceLockControl
         )
         return (try? configuration.validate()) != nil
     }
@@ -796,6 +1834,31 @@ final class MappingStore {
     private static func defaultProfileState() -> ProfileState {
         let mappings = [MappingKey(control: .k1, gesture: .tap): Mapping(action: .openApplication, command: "ChatGPT")]
         return ProfileState(mappings: mappings, hidBindings: defaultHIDBindings)
+    }
+
+    private static func defaultMIDIProfileSettings() -> MIDIProfileSettings {
+        let primary = (1...10).map { index in
+            MIDIButtonMappingEntry(
+                control: RemoteControl.allCases[index - 1],
+                mapping: MIDIButtonMapping(
+                    kind: .note,
+                    outputPort: .performance,
+                    channel: 1,
+                    note: 35 + index,
+                    velocity: 100,
+                    releaseVelocity: 0,
+                    interaction: .momentary,
+                    label: "K\(index)"
+                )
+            )
+        }
+        return MIDIProfileSettings(
+            fnControl: .k10,
+            primaryButtons: primary,
+            functionButtons: [],
+            primaryWheel: MIDIWheelMapping(kind: .pitchBendNudgeReturn, outputPort: .performance),
+            functionWheel: MIDIWheelMapping(kind: .absoluteCC, outputPort: .control, controller: 1)
+        )
     }
 
     private static func mappingEntries(from mappings: [MappingKey: Mapping]) -> [XPdConfiguration.MappingEntry] {

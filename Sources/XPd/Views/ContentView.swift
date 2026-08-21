@@ -65,14 +65,21 @@ struct ContentView: View {
                 batteryIndicator
             }
             Spacer()
+            workspaceControls
             configurationControls
-            Picker("Profile", selection: Bindable(store).profileName) {
+            Picker("Profile", selection: profileSelectionBinding) {
                 ForEach(store.availableProfiles, id: \.self) { profile in
-                    Text(profile).tag(profile)
+                    HStack(spacing: 6) {
+                        Text(profile)
+                        Text(store.profileRealm(for: profile) == .midi ? "MIDI" : "Standard")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    .tag(profile)
                 }
             }
             .pickerStyle(.menu)
-            .frame(width: 160)
+            .frame(width: 150)
             Button {
                 isManagingProfiles = true
             } label: {
@@ -84,6 +91,52 @@ struct ContentView: View {
         }
         .padding(.horizontal, 22)
         .padding(.vertical, 14)
+    }
+
+    private var profileSelectionBinding: Binding<String> {
+        Binding(
+            get: { store.profileName },
+            set: { _ = store.selectProfile($0) }
+        )
+    }
+
+    private var workspaceControls: some View {
+        HStack(spacing: 7) {
+            Text(store.activeRealm == .midi ? "MIDI Lock" : "Standard")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(store.activeRealm == .midi ? .orange : .secondary)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 4)
+                .background(.quaternary, in: Capsule())
+                .accessibilityLabel("Active workspace: \(store.activeRealm == .midi ? "MIDI Lock" : "Standard")")
+
+            Button {
+                _ = store.toggleWorkspace()
+            } label: {
+                Label(store.activeRealm == .midi ? "Unlock" : "MIDI", systemImage: store.activeRealm == .midi ? "lock.open" : "lock")
+            }
+            .controlSize(.small)
+            .disabled(store.activeRealm != .midi && store.midiProfiles.isEmpty)
+            .help(store.activeRealm == .midi ? "Return to Standard profiles" : "Enter MIDI Lock")
+
+            if store.activeRealm == .midi {
+                Text(midiEndpointHeadline)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Button("Panic", role: .destructive) { store.panicMIDI() }
+                    .controlSize(.small)
+                    .help("Send MIDI All Notes Off")
+            }
+        }
+    }
+
+    private var midiEndpointHeadline: String {
+        let available = MIDIOutputPort.allCases.filter { store.midiEndpointStatus[$0]?.isAvailable == true }.count
+        if let error = MIDIOutputPort.allCases.compactMap({ store.midiEndpointStatus[$0]?.error }).first {
+            return "MIDI \(available)/\(MIDIOutputPort.allCases.count) · \(error)"
+        }
+        return "MIDI \(available)/\(MIDIOutputPort.allCases.count)"
     }
 
     private var deviceStatus: String {
@@ -211,6 +264,7 @@ private struct ProfileManagementView: View {
     let store: MappingStore
     @Environment(\.dismiss) private var dismiss
     @State private var newProfileName = ""
+    @State private var newProfileRealm: ProfileRealm = .standard
     @State private var profileToDelete: String?
     @State private var errorMessage: String?
 
@@ -230,10 +284,13 @@ private struct ProfileManagementView: View {
 
             List {
                 ForEach(store.availableProfiles, id: \.self) { profile in
-                    HStack(spacing: 10) {
+                    HStack(spacing: 8) {
                         Image(systemName: profile == "Global" ? "globe" : "app")
                             .foregroundStyle(.secondary)
                         Text(profile)
+                        Text(store.profileRealm(for: profile) == .midi ? "MIDI" : "Standard")
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(store.profileRealm(for: profile) == .midi ? .orange : .secondary)
                         if profile == store.profileName {
                             Text("Active")
                                 .font(.caption2.weight(.medium))
@@ -265,6 +322,13 @@ private struct ProfileManagementView: View {
                 TextField("New profile name", text: $newProfileName)
                     .textFieldStyle(.roundedBorder)
                     .onSubmit(addProfile)
+                Picker("Realm", selection: $newProfileRealm) {
+                    ForEach(ProfileRealm.allCases) { realm in
+                        Text(realm == .midi ? "MIDI" : "Standard").tag(realm)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
                 Button("Add", action: addProfile)
                     .disabled(newProfileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
@@ -301,8 +365,13 @@ private struct ProfileManagementView: View {
 
     private func addProfile() {
         do {
-            _ = try store.addProfile(named: newProfileName)
+            if newProfileRealm == .midi {
+                _ = try store.addMIDIProfile(named: newProfileName)
+            } else {
+                _ = try store.addProfile(named: newProfileName)
+            }
             newProfileName = ""
+            newProfileRealm = .standard
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription

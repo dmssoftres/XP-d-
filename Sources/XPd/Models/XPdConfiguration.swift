@@ -6,27 +6,86 @@ import Foundation
 /// meaningful to the wheel selector, while mapping/HID entries can be sorted
 /// before encoding for stable diffs.
 struct XPdConfiguration: Codable, Equatable {
-    static let currentVersion = 3
+    static let currentVersion = 4
     static let legacyVersion = 2
+    static let previousVersion = 3
     static let defaultProfileNames = ["Global", "Finder", "Logic Pro"]
+    static let defaultWorkspaceLockControl: RemoteControl = .k3
 
     let version: Int
     let profiles: [Profile]
     let profileName: String
     let showsInputOverlay: Bool
+    let activeRealm: ProfileRealm
+    let lastStandardProfileName: String?
+    let lastMIDIProfileName: String?
+    let midiLocked: Bool
+    let workspaceLockControl: RemoteControl
 
     /// A complete mapping and HID-binding record owned by one profile.
     struct Profile: Codable, Equatable, Identifiable {
         let name: String
         let mappings: [MappingEntry]
         let hidBindings: [HIDBindingEntry]
+        let realm: ProfileRealm
+        let midiSettings: MIDIProfileSettings?
 
         var id: String { name }
 
-        init(name: String, mappings: [MappingEntry], hidBindings: [HIDBindingEntry]) {
+        var profileRealm: ProfileRealm {
+            realm
+        }
+
+        init(
+            name: String,
+            mappings: [MappingEntry],
+            hidBindings: [HIDBindingEntry],
+            realm: ProfileRealm = .standard,
+            midiSettings: MIDIProfileSettings? = nil
+        ) {
             self.name = name
             self.mappings = mappings
             self.hidBindings = hidBindings
+            self.realm = realm
+            self.midiSettings = midiSettings
+        }
+
+        init(
+            name: String,
+            mappings: [MappingEntry],
+            hidBindings: [HIDBindingEntry],
+            profileRealm: ProfileRealm,
+            midiSettings: MIDIProfileSettings? = nil
+        ) {
+            self.init(
+                name: name,
+                mappings: mappings,
+                hidBindings: hidBindings,
+                realm: profileRealm,
+                midiSettings: midiSettings
+            )
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            name = try container.decode(String.self, forKey: .name)
+            mappings = try container.decodeIfPresent([MappingEntry].self, forKey: .mappings) ?? []
+            hidBindings = try container.decodeIfPresent([HIDBindingEntry].self, forKey: .hidBindings) ?? []
+            realm = try container.decodeIfPresent(ProfileRealm.self, forKey: .realm) ?? .standard
+            midiSettings = try container.decodeIfPresent(MIDIProfileSettings.self, forKey: .midiSettings)
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(name, forKey: .name)
+            try container.encode(mappings, forKey: .mappings)
+            try container.encode(hidBindings, forKey: .hidBindings)
+            try container.encode(realm, forKey: .realm)
+            try container.encodeIfPresent(midiSettings, forKey: .midiSettings)
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case name, mappings, hidBindings, realm, midiSettings
         }
     }
 
@@ -59,6 +118,11 @@ struct XPdConfiguration: Codable, Equatable {
         case missingProfileName(String)
         case invalidProfileName(String)
         case invalidActiveProfile(String)
+        case invalidRememberedProfile(String, ProfileRealm)
+        case invalidWorkspaceLockControl(RemoteControl)
+        case invalidMIDIWorkspaceState
+        case midiSettingsInLegacyProfile(String)
+        case midiSettingsOnStandardProfile(String)
         case duplicateMappingKey(profile: String, control: RemoteControl, gesture: GestureKind)
         case duplicateHIDControl(profile: String, control: RemoteControl)
         case duplicateHIDSignature(profile: String, signature: String)
@@ -78,6 +142,16 @@ struct XPdConfiguration: Codable, Equatable {
                 return "Profile names must be trimmed, non-empty, and at most 40 characters: \(name)."
             case let .invalidActiveProfile(name):
                 return "Invalid active profile: \(name)."
+            case let .invalidRememberedProfile(name, realm):
+                return "Remembered \(realm.rawValue) profile is not present: \(name)."
+            case let .invalidWorkspaceLockControl(control):
+                return "Workspace lock control must be a K button: \(control.rawValue)."
+            case .invalidMIDIWorkspaceState:
+                return "MIDI Lock can only be active in the MIDI profile realm."
+            case let .midiSettingsInLegacyProfile(name):
+                return "Legacy profile unexpectedly contains MIDI settings: \(name)."
+            case let .midiSettingsOnStandardProfile(name):
+                return "Standard profile unexpectedly contains MIDI settings: \(name)."
             case let .duplicateMappingKey(profile, control, gesture):
                 return "Duplicate mapping in \(profile) for \(control.rawValue) · \(gesture.rawValue)."
             case let .duplicateHIDControl(profile, control):
@@ -94,17 +168,93 @@ struct XPdConfiguration: Codable, Equatable {
         version: Int = XPdConfiguration.currentVersion,
         profiles: [Profile],
         profileName: String,
-        showsInputOverlay: Bool
+        showsInputOverlay: Bool,
+        activeRealm: ProfileRealm = .standard,
+        lastStandardProfileName: String? = nil,
+        lastMIDIProfileName: String? = nil,
+        midiLocked: Bool = false,
+        workspaceLockControl: RemoteControl = XPdConfiguration.defaultWorkspaceLockControl
     ) {
         self.version = version
         self.profiles = profiles
         self.profileName = profileName
         self.showsInputOverlay = showsInputOverlay
+        self.activeRealm = activeRealm
+        self.lastStandardProfileName = lastStandardProfileName
+        self.lastMIDIProfileName = lastMIDIProfileName
+        self.midiLocked = midiLocked
+        self.workspaceLockControl = workspaceLockControl
     }
 
-    /// Decodes and validates the entire document before returning it. Version
-    /// 2 exports are validated using the historical exact profile set and
-    /// returned as an upgraded v3 value.
+    init(
+        version: Int = XPdConfiguration.currentVersion,
+        profiles: [Profile],
+        profileName: String,
+        showsInputOverlay: Bool,
+        activeProfileRealm: ProfileRealm,
+        lastStandardProfileName: String? = nil,
+        lastMIDIProfileName: String? = nil,
+        midiLocked: Bool = false,
+        workspaceLockKey: RemoteControl = XPdConfiguration.defaultWorkspaceLockControl
+    ) {
+        self.init(
+            version: version,
+            profiles: profiles,
+            profileName: profileName,
+            showsInputOverlay: showsInputOverlay,
+            activeRealm: activeProfileRealm,
+            lastStandardProfileName: lastStandardProfileName,
+            lastMIDIProfileName: lastMIDIProfileName,
+            midiLocked: midiLocked,
+            workspaceLockControl: workspaceLockKey
+        )
+    }
+
+    /// Alternate names used by workspace/routing code; the persisted keys
+    /// remain concise and stable.
+    var activeProfileRealm: ProfileRealm { activeRealm }
+    var workspaceLockKey: RemoteControl { workspaceLockControl }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let decodedVersion = try container.decode(Int.self, forKey: .version)
+        let decodedProfiles = try container.decodeIfPresent([Profile].self, forKey: .profiles) ?? []
+        let decodedProfileName = try container.decodeIfPresent(String.self, forKey: .profileName) ?? "Global"
+        let decodedShowsInputOverlay = try container.decodeIfPresent(Bool.self, forKey: .showsInputOverlay) ?? true
+        let decodedRealm = try container.decodeIfPresent(ProfileRealm.self, forKey: .activeRealm)
+        let decodedLastStandard = try container.decodeIfPresent(String.self, forKey: .lastStandardProfileName)
+        let decodedLastMIDI = try container.decodeIfPresent(String.self, forKey: .lastMIDIProfileName)
+        let decodedMIDIlocked = try container.decodeIfPresent(Bool.self, forKey: .midiLocked) ?? false
+        let decodedLockControl = try container.decodeIfPresent(RemoteControl.self, forKey: .workspaceLockControl)
+            ?? container.decodeIfPresent(RemoteControl.self, forKey: .workspaceLockKey)
+            ?? .k3
+        version = decodedVersion
+        profiles = decodedProfiles
+        profileName = decodedProfileName
+        showsInputOverlay = decodedShowsInputOverlay
+        activeRealm = decodedRealm ?? (decodedProfiles.first(where: { $0.name == decodedProfileName })?.realm ?? .standard)
+        lastStandardProfileName = decodedLastStandard
+        lastMIDIProfileName = decodedLastMIDI
+        midiLocked = decodedMIDIlocked
+        workspaceLockControl = decodedLockControl
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(version, forKey: .version)
+        try container.encode(profiles, forKey: .profiles)
+        try container.encode(profileName, forKey: .profileName)
+        try container.encode(showsInputOverlay, forKey: .showsInputOverlay)
+        try container.encode(activeRealm, forKey: .activeRealm)
+        try container.encodeIfPresent(lastStandardProfileName, forKey: .lastStandardProfileName)
+        try container.encodeIfPresent(lastMIDIProfileName, forKey: .lastMIDIProfileName)
+        try container.encode(midiLocked, forKey: .midiLocked)
+        try container.encode(workspaceLockControl, forKey: .workspaceLockControl)
+    }
+
+    /// Decodes and validates the entire document before returning it. Versions
+    /// 2 and 3 are decoded through their published shape and upgraded to v4;
+    /// every migrated profile is explicitly marked as standard.
     static func decode(_ data: Data) throws -> XPdConfiguration {
         let decoder = JSONDecoder()
         let version = try decoder.decode(VersionEnvelope.self, from: data).version
@@ -113,14 +263,31 @@ struct XPdConfiguration: Codable, Equatable {
             let configuration = try decoder.decode(XPdConfiguration.self, from: data)
             try configuration.validate()
             return configuration
-        case legacyVersion:
+        case legacyVersion, previousVersion:
             let legacy = try decoder.decode(XPdConfiguration.self, from: data)
-            try legacy.validateV2()
+            if version == legacyVersion {
+                try legacy.validateV2()
+            } else {
+                try legacy.validateV3()
+            }
             return XPdConfiguration(
                 version: currentVersion,
-                profiles: legacy.profiles,
+                profiles: legacy.profiles.map {
+                    Profile(
+                        name: $0.name,
+                        mappings: $0.mappings,
+                        hidBindings: $0.hidBindings,
+                        realm: .standard,
+                        midiSettings: nil
+                    )
+                },
                 profileName: legacy.profileName,
-                showsInputOverlay: legacy.showsInputOverlay
+                showsInputOverlay: legacy.showsInputOverlay,
+                activeRealm: .standard,
+                lastStandardProfileName: legacy.profileName,
+                lastMIDIProfileName: nil,
+                midiLocked: false,
+                workspaceLockControl: .k3
             )
         default:
             throw ValidationError.unsupportedVersion(version)
@@ -155,6 +322,18 @@ struct XPdConfiguration: Codable, Equatable {
             throw ValidationError.invalidActiveProfile(profileName)
         }
 
+        guard profiles.first(where: { $0.name == profileName })?.realm == activeRealm else {
+            throw ValidationError.invalidActiveProfile(profileName)
+        }
+        guard workspaceLockControl.isMIDIButton else {
+            throw ValidationError.invalidWorkspaceLockControl(workspaceLockControl)
+        }
+        guard !midiLocked || activeRealm == .midi else {
+            throw ValidationError.invalidMIDIWorkspaceState
+        }
+        try validateRememberedProfile(lastStandardProfileName, realm: .standard)
+        try validateRememberedProfile(lastMIDIProfileName, realm: .midi)
+
         try validateEntries()
     }
 
@@ -186,8 +365,54 @@ struct XPdConfiguration: Codable, Equatable {
         try validateEntries()
     }
 
-    private func validateEntries() throws {
+    /// Version 3 added dynamic profile names but no MIDI realm or workspace
+    /// state.  Keep its validation separate so malformed v3 input cannot be
+    /// “rescued” by v4 defaults during migration.
+    private func validateV3() throws {
+        guard version == Self.previousVersion else {
+            throw ValidationError.unsupportedVersion(version)
+        }
+        guard !profiles.isEmpty else {
+            throw ValidationError.missingProfileName("Global")
+        }
+
+        var profileNames = Set<String>()
         for profile in profiles {
+            let trimmedName = profile.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedName.isEmpty, trimmedName.count <= 40, trimmedName == profile.name else {
+                throw ValidationError.invalidProfileName(profile.name)
+            }
+            guard profileNames.insert(Self.profileNameComparisonKey(trimmedName)).inserted else {
+                throw ValidationError.duplicateProfileName(profile.name)
+            }
+        }
+        guard profiles.contains(where: { $0.name == "Global" }) else {
+            throw ValidationError.missingProfileName("Global")
+        }
+        guard profiles.contains(where: { $0.name == profileName }) else {
+            throw ValidationError.invalidActiveProfile(profileName)
+        }
+        try validateEntries(allowMIDISettings: false)
+    }
+
+    private func validateRememberedProfile(_ name: String?, realm: ProfileRealm) throws {
+        guard let name else { return }
+        guard profiles.contains(where: { $0.name == name && $0.realm == realm }) else {
+            throw ValidationError.invalidRememberedProfile(name, realm)
+        }
+    }
+
+    private func validateEntries(allowMIDISettings: Bool = true) throws {
+        for profile in profiles {
+            if profile.realm == .standard, profile.midiSettings != nil {
+                throw ValidationError.midiSettingsOnStandardProfile(profile.name)
+            }
+            if profile.realm == .midi, !allowMIDISettings, profile.midiSettings != nil {
+                throw ValidationError.midiSettingsInLegacyProfile(profile.name)
+            }
+            if allowMIDISettings, let midiSettings = profile.midiSettings {
+                try midiSettings.validate()
+            }
             var mappingKeys = Set<MappingKey>()
             for entry in profile.mappings {
                 let key = MappingKey(control: entry.control, gesture: entry.gesture)
@@ -228,12 +453,16 @@ struct XPdConfiguration: Codable, Equatable {
     /// Encodes a stable, human-readable document suitable for export or
     /// source-control comparison.
     func encodedData() throws -> Data {
-        // Keep the encoder useful for migration fixtures and older callers;
-        // normal store exports always construct the current v3 value.
-        if version == Self.legacyVersion {
+        // Keep the encoder useful for migration fixtures and older callers.
+        switch version {
+        case Self.legacyVersion:
             try validateV2()
-        } else {
+        case Self.previousVersion:
+            try validateV3()
+        case Self.currentVersion:
             try validate()
+        default:
+            throw ValidationError.unsupportedVersion(version)
         }
 
         let sortedConfiguration = XPdConfiguration(
@@ -252,11 +481,18 @@ struct XPdConfiguration: Codable, Equatable {
                     },
                     hidBindings: profile.hidBindings.sorted {
                         Self.controlIndex($0.control) < Self.controlIndex($1.control)
-                    }
+                    },
+                    realm: profile.realm,
+                    midiSettings: Self.sortedMIDISettings(profile.midiSettings)
                 )
             },
             profileName: profileName,
-            showsInputOverlay: showsInputOverlay
+            showsInputOverlay: showsInputOverlay,
+            activeRealm: activeRealm,
+            lastStandardProfileName: lastStandardProfileName,
+            lastMIDIProfileName: lastMIDIProfileName,
+            midiLocked: midiLocked,
+            workspaceLockControl: workspaceLockControl
         )
 
         let encoder = JSONEncoder()
@@ -266,6 +502,19 @@ struct XPdConfiguration: Codable, Equatable {
 
     private struct VersionEnvelope: Decodable {
         let version: Int
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case version, profiles, profileName, showsInputOverlay
+        case activeRealm, lastStandardProfileName, lastMIDIProfileName
+        case midiLocked, workspaceLockControl, workspaceLockKey
+    }
+
+    private static func sortedMIDISettings(_ settings: MIDIProfileSettings?) -> MIDIProfileSettings? {
+        guard var settings else { return nil }
+        settings.primaryButtons.sort { controlIndex($0.control) < controlIndex($1.control) }
+        settings.functionButtons.sort { controlIndex($0.control) < controlIndex($1.control) }
+        return settings
     }
 
     static func profileNameComparisonKey(_ name: String) -> String {

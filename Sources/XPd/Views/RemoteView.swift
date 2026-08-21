@@ -139,7 +139,31 @@ struct RemoteView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Wheel center")
+
+            if store.activeRealm == .midi {
+                midiWheelSummary
+            }
         }
+    }
+
+    private var midiWheelSummary: some View {
+        let mapping = store.midiWheelMapping(for: store.selectedMIDILayer)
+        return VStack(spacing: 1) {
+            Text(mapping.kind.rawValue)
+                .font(.system(size: 8, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.75))
+                .lineLimit(1)
+                .minimumScaleFactor(0.65)
+            Text(wheelSummary(mapping))
+                .font(.system(size: 8, weight: .medium, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.52))
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+        }
+        .frame(width: 86)
+        .padding(.top, 20)
+        .allowsHitTesting(false)
+        .accessibilityLabel("MIDI wheel \(mapping.kind.rawValue), \(wheelSummary(mapping))")
     }
 
     private var centerStroke: Color {
@@ -197,6 +221,119 @@ struct RemoteView: View {
     }
 
     private func keyButton(_ control: RemoteControl, height: CGFloat = 62) -> some View {
+        if store.activeRealm == .midi {
+            return AnyView(midiKeyButton(control, height: height))
+        }
+        return AnyView(standardKeyButton(control, height: height))
+    }
+
+    private func midiKeyButton(_ control: RemoteControl, height: CGFloat) -> some View {
+        let mapping = store.midiButtonMapping(for: control, layer: store.selectedMIDILayer)
+        let isFn = store.fnControl == control
+        return VStack(spacing: 1) {
+            if isFn {
+                Text("FN")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(.orange)
+                    .lineLimit(1)
+            } else {
+                Menu {
+                    ForEach(midiMenuKinds(current: mapping.kind)) { kind in
+                        Button {
+                            var updated = mapping
+                            updated.kind = kind
+                            store.updateMIDIButtonMapping(updated, for: control, layer: store.selectedMIDILayer)
+                        } label: {
+                            if kind == mapping.kind {
+                                Label(kind.rawValue, systemImage: "checkmark")
+                            } else {
+                                Text(kind.rawValue)
+                            }
+                        }
+                    }
+                } label: {
+                    Text(mapping.kind.rawValue)
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.73))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.55)
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize(horizontal: false, vertical: true)
+                .help("Change MIDI message type")
+            }
+
+            Button {
+                store.selectedControl = control
+            } label: {
+                VStack(spacing: 1) {
+                    Text(control.rawValue)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(keyLabelColor(control))
+                    Text(isFn ? "Hold → Layer 2" : midiButtonSummary(mapping))
+                        .font(.system(size: 7.5, weight: .medium, design: .monospaced))
+                        .foregroundStyle(isFn ? .orange : .white.opacity(0.54))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.55)
+                }
+                .frame(maxWidth: .infinity, minHeight: height - 14, maxHeight: height - 14)
+                .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+            }
+            .buttonStyle(HardwareKeyStyle(
+                selected: store.selectedControl == control,
+                live: store.liveControl == control
+            ))
+        }
+        .frame(maxWidth: .infinity, minHeight: height, maxHeight: height)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(isFn ? "\(control.rawValue), FN, hold for Layer 2" : "\(control.rawValue), \(mapping.kind.rawValue), \(midiButtonSummary(mapping))")
+    }
+
+    private func midiButtonSummary(_ mapping: MIDIButtonMapping) -> String {
+        switch mapping.kind {
+        case .note:
+            return "\(midiNoteName(mapping.note))(\(mapping.note)) Ch\(mapping.channel) V\(mapping.velocity)"
+        case .cc:
+            return "CC\(mapping.controller) Ch\(mapping.channel) \(mapping.pressValue)/\(mapping.releaseValue)"
+        case .program:
+            return "PC\(mapping.program) Ch\(mapping.channel)"
+        case .chord:
+            return "\(mapping.chord.map(String.init).joined(separator: ",")) Ch\(mapping.channel) V\(mapping.velocity)"
+        case .noAction: return "—"
+        }
+    }
+
+    private func midiNoteName(_ note: Int) -> String {
+        let names = ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B"]
+        guard (0...127).contains(note) else { return "N" }
+        return names[note % 12] + String(note / 12 - 2)
+    }
+
+    private func midiMenuKinds(current: MIDIButtonKind) -> [MIDIButtonKind] {
+        let allowed: [MIDIButtonKind] = store.selectedMIDILayer == .function
+            ? [.note, .chord, .noAction]
+            : MIDIButtonKind.allCases
+        return allowed.contains(current) ? allowed : [current] + allowed
+    }
+
+    private func wheelSummary(_ mapping: MIDIWheelMapping) -> String {
+        switch mapping.kind {
+        case .relativeCC:
+            return "CC\(mapping.controller) Ch\(mapping.channel) \(mapping.clockwiseValue)/\(mapping.counterClockwiseValue)"
+        case .absoluteCC: return "CC\(mapping.controller) Ch\(mapping.channel) step \(mapping.stepSize)"
+        case .pitchBendNudgeReturn: return "Ch\(mapping.channel) ±\(mapping.pitchBendStep) → 0"
+        case .transpose: return "\(mapping.transposeSemitones > 0 ? "+" : "")\(mapping.transposeSemitones) st"
+        case .drumBank: return "step \(mapping.drumBankStep)"
+        case .noAction: return "—"
+        }
+    }
+
+    /*
+     The standard key implementation is intentionally kept above in the
+     MIDI branch's fallback.  This overload is retained here so the remote
+     remains the same compact hardware view in Standard profiles.
+     */
+    private func standardKeyButton(_ control: RemoteControl, height: CGFloat) -> some View {
         Button {
             store.selectedControl = control
         } label: {

@@ -36,4 +36,48 @@ final class InputOverlayModelTests: XCTestCase {
 
         XCTAssertEqual(model.entries.last?.recognizedGesture, .doubleTap)
     }
+
+    @MainActor
+    func testMIDIOverlayShowsLockProfileLayerAndMessage() {
+        let model = InputOverlayModel()
+
+        model.showMIDI(
+            profileName: "Performance",
+            layer: .primary,
+            control: .k1,
+            summary: "K1 · Note 36 · Ch 1 · Vel 110"
+        )
+
+        XCTAssertEqual(model.midiPresentation?.lockTitle, "MIDI LOCK")
+        XCTAssertEqual(model.midiPresentation?.layerTitle, "PRIMARY")
+        XCTAssertEqual(model.midiPresentation?.profileName, "Performance")
+        XCTAssertEqual(model.midiPresentation?.control, .k1)
+        XCTAssertEqual(model.midiPresentation?.summary, "K1 · Note 36 · Ch 1 · Vel 110")
+    }
+
+    @MainActor
+    func testMIDIOverlayMarksFnLayerWithoutTreatingFnAsPlayedControl() {
+        let model = InputOverlayModel()
+
+        model.showMIDI(profileName: "Performance", layer: .function)
+
+        XCTAssertEqual(model.midiPresentation?.layerTitle, "FN LAYER")
+        XCTAssertNil(model.midiPresentation?.control)
+        XCTAssertNil(model.midiPresentation?.summary)
+    }
+
+    @MainActor
+    func testResetAndRealmClearRemoveMIDIOverlay() {
+        let model = InputOverlayModel()
+        model.showMIDI(profileName: "Performance", layer: .function, control: .k2, summary: "Note 60")
+
+        model.reset()
+
+        XCTAssertNil(model.midiPresentation)
+
+        model.showMIDI(profileName: "Performance", control: .k3, summary: "Note 62")
+        model.clearMIDI()
+
+        XCTAssertNil(model.midiPresentation)
+    }
 }

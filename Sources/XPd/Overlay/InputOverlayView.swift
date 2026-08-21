@@ -8,6 +8,9 @@ struct InputOverlayView: View {
             if let selection = model.profileSelection {
                 ProfileSelectorCard(selection: selection)
                     .transition(.scale(scale: 0.96).combined(with: .opacity))
+            } else if let midi = model.midiPresentation {
+                MIDILockCard(presentation: midi)
+                    .transition(.scale(scale: 0.97).combined(with: .opacity))
             } else {
                 if #available(macOS 26.0, *) {
                     GlassEffectContainer(spacing: 9) {
@@ -22,6 +25,7 @@ struct InputOverlayView: View {
         .padding(10)
         .animation(.spring(response: 0.34, dampingFraction: 0.86), value: model.visibleEntries.map(\.id))
         .animation(.spring(response: 0.3, dampingFraction: 0.88), value: model.profileSelection)
+        .animation(.spring(response: 0.3, dampingFraction: 0.88), value: model.midiPresentation)
     }
 
     private var entryStack: some View {
@@ -48,6 +52,64 @@ struct InputOverlayView: View {
                 ))
             }
         }
+    }
+}
+
+private struct MIDILockCard: View {
+    let presentation: MIDIOverlayPresentation
+
+    private var summaryText: String {
+        presentation.summary ?? "Ready for input"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            HStack(alignment: .top, spacing: 14) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(presentation.lockTitle)
+                        .font(.system(size: 9, weight: .semibold, design: .rounded))
+                        .tracking(1.1)
+                        .foregroundStyle(Color.cyan.opacity(0.88))
+                    Text(presentation.profileName)
+                        .font(.system(size: 22, weight: .semibold, design: .rounded))
+                        .foregroundStyle(Color.white.opacity(0.96))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 8)
+                Text(presentation.layerTitle)
+                    .font(.system(size: 9, weight: .semibold, design: .rounded))
+                    .tracking(0.8)
+                    .foregroundStyle(
+                        presentation.layer == .function
+                            ? Color.mint.opacity(0.94)
+                            : Color.white.opacity(0.56)
+                    )
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(Color.white.opacity(0.08), in: Capsule())
+            }
+
+            Rectangle()
+                .fill(Color.white.opacity(0.11))
+                .frame(height: 0.7)
+
+            HStack(spacing: 9) {
+                Image(systemName: presentation.control == nil ? "circle.dashed" : "waveform")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Color.cyan.opacity(0.78))
+                Text(summaryText)
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundStyle(Color.white.opacity(presentation.summary == nil ? 0.46 : 0.92))
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(16)
+        .frame(width: 290, height: 126, alignment: .leading)
+        .overlayGlassCard(cornerRadius: 18)
+        .shadow(color: Color.black.opacity(0.10), radius: 16, y: 8)
     }
 }
 

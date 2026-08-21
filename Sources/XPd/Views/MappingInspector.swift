@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct MappingInspector: View {
@@ -13,6 +14,10 @@ struct MappingInspector: View {
     }
 
     var body: some View {
+        Group {
+            if store.activeRealm == .midi {
+                midiEditorBody
+            } else {
         VStack(alignment: .leading, spacing: 18) {
             HStack(alignment: .bottom) {
                 VStack(alignment: .leading, spacing: 3) {
@@ -142,6 +147,8 @@ struct MappingInspector: View {
 
             Spacer(minLength: 0)
         }
+            }
+        }
         .onChange(of: store.selectedControl) { _, _ in
             endCommandEditing()
         }
@@ -156,6 +163,488 @@ struct MappingInspector: View {
                 isEditingCommand = false
             }
         }
+    }
+
+    // MARK: MIDI editor
+
+    @State private var chordDraft = ""
+    @State private var chordValidationMessage: String?
+
+    private var midiEditorBody: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .bottom) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("MIDI Lock")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(selectedControlTitle)
+                        .font(.title2.weight(.semibold))
+                }
+                Spacer()
+                Picker("Layer", selection: Bindable(store).selectedMIDILayer) {
+                    Text("Primary Layer").tag(MIDIMappingLayer.primary)
+                    Text("Fn Layer 2").tag(MIDIMappingLayer.function)
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 190)
+            }
+
+            Text(store.selectedMIDILayer == .function
+                ? "Hold the assigned Fn control to play Layer 2. All Fn mappings are momentary."
+                : "Primary MIDI mappings are available without holding Fn.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            fnAssignmentEditor
+
+            if store.selectedControl.isWheelRotation {
+                midiWheelEditor
+            } else if store.selectedControl == .wheelCenter {
+                Text("Select a K button or rotate the wheel to edit its MIDI mapping.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                midiButtonEditor
+            }
+
+            midiStatusEditor
+            midiMonitor
+
+            if let message = store.lastConfigurationResult.message {
+                Label(
+                    message,
+                    systemImage: store.lastConfigurationResult.isSuccess
+                        ? "checkmark.circle.fill"
+                        : "exclamationmark.triangle.fill"
+                )
+                .font(.caption)
+                .foregroundStyle(store.lastConfigurationResult.isSuccess ? Color.green : Color.orange)
+                .lineLimit(2)
+            }
+
+            midiLiveHID
+            midiInputHUD
+        }
+        .onAppear {
+            syncChordDraft()
+            store.refreshMIDIEndpointStatus()
+        }
+        .onChange(of: store.selectedMIDILayer) { _, _ in syncChordDraft() }
+        .onChange(of: store.selectedControl) { _, _ in syncChordDraft() }
+    }
+
+    private var midiButtonBinding: Binding<MIDIButtonMapping> {
+        Binding(
+            get: { store.midiButtonMapping(for: store.selectedControl, layer: store.selectedMIDILayer) },
+            set: { store.updateMIDIButtonMapping($0, for: store.selectedControl, layer: store.selectedMIDILayer) }
+        )
+    }
+
+    private var midiButtonEditor: some View {
+        GroupBox("Button MIDI output") {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Picker("Output", selection: midiButtonBinding.outputPort) {
+                        ForEach(MIDIOutputPort.allCases) { port in
+                            Text(port.displayName).tag(port)
+                        }
+                    }
+                    Picker("Type", selection: midiButtonBinding.kind) {
+                        ForEach(visibleButtonKinds) { kind in
+                            Text(kind.rawValue).tag(kind)
+                        }
+                    }
+                }
+
+                HStack {
+                    TextField("Channel", value: midiButtonBinding.channel, format: .number)
+                        .frame(width: 88)
+                    Text("Channel 1…16")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text(store.selectedMIDILayer == .function ? "Hold Fn → Layer 2" : "Layer 1")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                }
+
+                switch midiButtonBinding.wrappedValue.kind {
+                case .note:
+                    HStack {
+                        TextField("Note", value: midiButtonBinding.note, format: .number)
+                        TextField("Velocity", value: midiButtonBinding.velocity, format: .number)
+                        TextField("Release", value: midiButtonBinding.releaseVelocity, format: .number)
+                    }
+                    interactionPicker
+                case .cc:
+                    HStack {
+                        TextField("CC", value: midiButtonBinding.controller, format: .number)
+                        TextField("Press", value: midiButtonBinding.pressValue, format: .number)
+                        TextField("Release", value: midiButtonBinding.releaseValue, format: .number)
+                    }
+                    interactionPicker
+                case .program:
+                    TextField("Program", value: midiButtonBinding.program, format: .number)
+                case .chord:
+                    VStack(alignment: .leading, spacing: 4) {
+                        TextField("Chord notes (e.g. 60 64 67)", text: $chordDraft)
+                            .onSubmit(commitChord)
+                        Text("Enter 1…16 unique notes from 0…127.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        if let chordValidationMessage {
+                            Text(chordValidationMessage)
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
+                    }
+                    HStack {
+                        TextField("Velocity", value: midiButtonBinding.velocity, format: .number)
+                        TextField("Release", value: midiButtonBinding.releaseVelocity, format: .number)
+                    }
+                    interactionPicker
+                case .noAction:
+                    Text("This control will not emit a MIDI message.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                TextField("Label (optional)", text: midiButtonBinding.label)
+                HStack {
+                    Button {
+                        store.sendMIDITestMessage(for: store.selectedControl, layer: store.selectedMIDILayer)
+                    } label: {
+                        Label("Send Test Message", systemImage: "paperplane")
+                    }
+                    .disabled(midiButtonBinding.wrappedValue.kind == .noAction)
+                    Spacer()
+                    Text("Click the type or value on the remote preview to edit this control.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+            .textFieldStyle(.roundedBorder)
+            .padding(4)
+        }
+    }
+
+    private var visibleButtonKinds: [MIDIButtonKind] {
+        let allowed: [MIDIButtonKind] = store.selectedMIDILayer == .function
+            ? [.note, .chord, .noAction]
+            : MIDIButtonKind.allCases
+        let current = midiButtonBinding.wrappedValue.kind
+        return allowed.contains(current) ? allowed : [current] + allowed
+    }
+
+    private var interactionPicker: some View {
+        Picker("Interaction", selection: midiButtonBinding.interaction) {
+            ForEach(MIDIButtonInteraction.allCases) { interaction in
+                Text(interaction.rawValue).tag(interaction)
+            }
+        }
+        .pickerStyle(.segmented)
+    }
+
+    private var midiWheelBinding: Binding<MIDIWheelMapping> {
+        Binding(
+            get: { store.midiWheelMapping(for: store.selectedMIDILayer) },
+            set: { store.updateMIDIWheelMapping($0, layer: store.selectedMIDILayer) }
+        )
+    }
+
+    private var midiWheelEditor: some View {
+        GroupBox("Wheel MIDI output") {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Picker("Type", selection: midiWheelBinding.kind) {
+                        ForEach(MIDIWheelKind.allCases) { kind in Text(kind.rawValue).tag(kind) }
+                    }
+                    Picker("Output", selection: midiWheelBinding.outputPort) {
+                        ForEach(MIDIOutputPort.allCases) { port in Text(port.displayName).tag(port) }
+                    }
+                }
+
+                if midiWheelBinding.wrappedValue.kind != .noAction {
+                    HStack {
+                        TextField("Channel", value: midiWheelBinding.channel, format: .number)
+                        if midiWheelBinding.wrappedValue.kind != .pitchBendNudgeReturn {
+                            TextField("Controller", value: midiWheelBinding.controller, format: .number)
+                        }
+                    }
+                }
+
+                switch midiWheelBinding.wrappedValue.kind {
+                case .relativeCC:
+                    Picker("Relative encoding", selection: midiWheelBinding.relativeEncoding) {
+                        ForEach(MIDIRelativeEncoding.allCases) { value in Text(value.rawValue).tag(value) }
+                    }
+                    HStack {
+                        TextField("Clockwise", value: midiWheelBinding.clockwiseValue, format: .number)
+                        TextField("Counter-clockwise", value: midiWheelBinding.counterClockwiseValue, format: .number)
+                    }
+                case .absoluteCC:
+                    TextField("Step", value: midiWheelBinding.stepSize, format: .number)
+                case .pitchBendNudgeReturn:
+                    TextField("Pitch step", value: midiWheelBinding.pitchBendStep, format: .number)
+                    HStack {
+                        TextField("Return delay (s)", value: midiWheelBinding.returnDelay, format: .number)
+                        TextField("Return duration (s)", value: midiWheelBinding.returnDuration, format: .number)
+                    }
+                    Text("Set the musical bend range in the receiving instrument.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                case .transpose:
+                    TextField("Transpose step (semitones)", value: midiWheelBinding.transposeSemitones, format: .number)
+                case .drumBank:
+                    TextField("Drum bank step", value: midiWheelBinding.drumBankStep, format: .number)
+                case .noAction:
+                    Text("The wheel is inactive in this layer.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if midiWheelBinding.wrappedValue.kind != .noAction {
+                    Toggle("Reverse direction", isOn: midiWheelBinding.reversedDirection)
+                }
+                TextField("Label (optional)", text: midiWheelBinding.label)
+            }
+            .textFieldStyle(.roundedBorder)
+            .padding(4)
+        }
+    }
+
+    private var fnAssignmentEditor: some View {
+        GroupBox("Fn control") {
+            VStack(alignment: .leading, spacing: 10) {
+                Picker("Fn control", selection: fnSelectionBinding) {
+                    Text("None").tag("None")
+                    ForEach(RemoteControl.allCases.filter { $0.isMIDIEligibleFnControl }) { control in
+                        Text(control.rawValue).tag(control.rawValue)
+                    }
+                }
+                HStack {
+                    Text("Fn hold threshold")
+                    Spacer()
+                    Stepper(value: fnHoldThresholdBinding, in: 0.10...3.0, step: 0.05) {
+                        Text("\(fnHoldThresholdBinding.wrappedValue, specifier: "%.2f") s")
+                            .monospacedDigit()
+                    }
+                    .labelsHidden()
+                }
+                Text("A center-as-Fn press becomes Layer 2 after this momentary hold duration.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("Fn is momentary-only: hold it to activate Layer 2, then release to return to Primary.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if store.fnControl == .wheelCenter {
+                    Text("Center tap still opens the profile selector; a held center activates Fn. Reliable center hold/release still requires target-remote verification.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            }
+            .padding(4)
+        }
+    }
+
+    private var fnSelectionBinding: Binding<String> {
+        Binding(
+            get: { store.fnControl?.rawValue ?? "None" },
+            set: { rawValue in
+                _ = store.updateMIDIPracticeFnControl(RemoteControl(rawValue: rawValue))
+            }
+        )
+    }
+
+    private var fnHoldThresholdBinding: Binding<TimeInterval> {
+        Binding(
+            get: {
+                store.midiSettings?.fnHoldThreshold ?? MIDIProfileSettings.defaultFnHoldThreshold
+            },
+            set: { threshold in
+                _ = store.updateMIDIHoldThreshold(threshold)
+            }
+        )
+    }
+
+    private var midiStatusEditor: some View {
+        GroupBox("MIDI status") {
+            VStack(alignment: .leading, spacing: 7) {
+                ForEach(MIDIOutputPort.allCases) { port in
+                    let status = store.midiEndpointStatus[port]
+                    HStack(spacing: 7) {
+                        Circle()
+                            .fill(status?.isAvailable == true ? Color.green : Color.orange)
+                            .frame(width: 7, height: 7)
+                        Text(port.displayName)
+                            .font(.caption.weight(.medium))
+                        Text(status?.isAvailable == true ? "available" : (status?.error ?? "unavailable"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                        Spacer()
+                    }
+                }
+                if let message = store.lastMIDIMessage {
+                    Label("Last: \(message.summary)", systemImage: "waveform")
+                        .font(.caption)
+                        .lineLimit(2)
+                } else {
+                    Text("Last MIDI message: none")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if let error = store.lastMIDIError {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .lineLimit(2)
+                }
+                HStack {
+                    Button("Refresh endpoints") { store.refreshMIDIEndpointStatus() }
+                    Spacer()
+                    Button("Panic", role: .destructive) { store.panicMIDI() }
+                }
+            }
+            .padding(4)
+        }
+    }
+
+    private var midiMonitor: some View {
+        GroupBox("MIDI monitor") {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Newest first · actual XP[d] send attempts")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Copy") { copyMIDIMonitor() }
+                        .disabled(store.midiMonitorEvents.isEmpty)
+                    Button("Clear") { store.clearMIDIMonitor() }
+                        .disabled(store.midiMonitorEvents.isEmpty)
+                }
+
+                if store.midiMonitorEvents.isEmpty {
+                    ContentUnavailableView(
+                        "No MIDI messages yet",
+                        systemImage: "waveform",
+                        description: Text("Press the remote or use Send Test Message.")
+                    )
+                    .frame(maxWidth: .infinity, minHeight: 90)
+                } else {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 6) {
+                            ForEach(store.midiMonitorEvents) { event in
+                                midiMonitorRow(event)
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 190)
+                }
+            }
+            .padding(4)
+        }
+    }
+
+    private func midiMonitorRow(_ event: MIDIOutputService.MonitorEvent) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Text(event.timestamp, format: .dateTime.hour().minute().second())
+                    .foregroundStyle(.secondary)
+                Text(event.outcome.rawValue)
+                    .foregroundStyle(event.outcome == .sent ? Color.green : Color.orange)
+                Text(event.port == .control ? "CONTROL" : "PERFORMANCE")
+                    .foregroundStyle(.secondary)
+                Text(event.summary)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                Text(event.umpHex)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+            if let error = event.error {
+                Text(error)
+                    .foregroundStyle(.orange)
+                    .lineLimit(2)
+            }
+        }
+        .font(.caption.monospaced())
+        .padding(.vertical, 2)
+    }
+
+    private func copyMIDIMonitor() {
+        let text = store.midiMonitorEvents.map { event in
+            let error = event.error.map { " · \($0)" } ?? ""
+            return "\(event.timestamp.ISO8601Format()) · \(event.outcome.rawValue) · \(event.port.displayName) · \(event.summary) · \(event.umpHex)\(error)"
+        }.joined(separator: "\n")
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    private var midiLiveHID: some View {
+        GroupBox("Live HID") {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(store.hidBinding(for: store.selectedControl) ?? "No HID input learned")
+                    .font(.system(.body, design: .monospaced))
+                    .textSelection(.enabled)
+                    .lineLimit(1)
+                HStack {
+                    Button(store.learningControl == store.selectedControl ? "Waiting for input…" : "Learn selected control") {
+                        store.learnSelectedControl()
+                    }
+                    .disabled(!store.hid.isConnected || !store.hid.hasInputAccess || store.learningControl != nil)
+                    if store.hidBinding(for: store.selectedControl) != nil {
+                        Button("Clear", role: .destructive) { store.clearHIDBinding(for: store.selectedControl) }
+                    }
+                    Button("Input Monitoring") { store.hid.openInputMonitoringSettings() }
+                }
+                Text(store.hid.lastEvent)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .padding(4)
+        }
+    }
+
+    private var midiInputHUD: some View {
+        GroupBox("Input HUD") {
+            HStack(spacing: 10) {
+                Toggle("Show HUD", isOn: Bindable(store).showsInputOverlay)
+                Picker("Hide after", selection: Bindable(store).inputOverlayDuration) {
+                    ForEach(MappingStore.inputOverlayDurationOptions, id: \.self) { duration in
+                        Text("\(duration.formatted()) s").tag(duration)
+                    }
+                }
+                .pickerStyle(.menu)
+                Button("Preview") { store.previewInputOverlay() }
+                    .disabled(!store.showsInputOverlay)
+            }
+            .padding(4)
+        }
+    }
+
+    private func syncChordDraft() {
+        guard store.activeRealm == .midi, !store.selectedControl.isWheelRotation,
+              store.selectedControl != .wheelCenter else { return }
+        chordDraft = store.midiButtonMapping(for: store.selectedControl, layer: store.selectedMIDILayer).chord
+            .map(String.init).joined(separator: " ")
+        chordValidationMessage = nil
+    }
+
+    private func commitChord() {
+        let parts = chordDraft.split(whereSeparator: { $0 == " " || $0 == "," })
+        let notes = parts.compactMap { Int($0) }
+        guard !parts.isEmpty, parts.count <= MIDIButtonMapping.maxChordNotes,
+              notes.count == parts.count,
+              notes.allSatisfy({ (0...127).contains($0) }), Set(notes).count == notes.count else {
+            chordValidationMessage = "Use 1…16 unique integer notes from 0…127."
+            return
+        }
+        var mapping = midiButtonBinding.wrappedValue
+        mapping.chord = notes
+        store.updateMIDIButtonMapping(mapping, for: store.selectedControl, layer: store.selectedMIDILayer)
+        chordValidationMessage = nil
     }
 
     private var mappingEditor: some View {
