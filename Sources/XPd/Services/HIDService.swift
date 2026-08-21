@@ -31,6 +31,7 @@ final class HIDService {
     private(set) var recentReports: [String] = []
 
     var onInput: ((String?) -> Void)?
+    var onDisconnect: (() -> Void)?
 
     @ObservationIgnored private let resources = HIDResources()
     @ObservationIgnored private let bluetoothBatteryMonitor = ShortcutRemoteBatteryMonitor()
@@ -245,6 +246,11 @@ final class HIDService {
         batteryPercentage = nil
         lastBatteryRefresh = .distantPast
         bluetoothBatteryMonitor.stopMonitoring()
+        onDisconnect?()
+    }
+
+    func simulateDisconnectForTesting() {
+        handleDeviceRemoval()
     }
 
     private func refreshBatteryIfNeeded() {

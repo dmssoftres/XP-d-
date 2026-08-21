@@ -112,7 +112,7 @@ private struct SoftSlateCard: View {
     let now: Date
     let displayDuration: TimeInterval
 
-    private let holdThreshold: TimeInterval = 0.72
+    private let holdThreshold = ButtonGestureTiming.standard.holdThreshold
 
     private var elapsed: TimeInterval {
         max(0, (entry.releasedAt ?? now).timeIntervalSince(entry.pressedAt))
@@ -162,9 +162,21 @@ private struct SoftSlateCard: View {
                     .frame(width: 0.7, height: 70)
 
                 VStack(spacing: 5) {
-                    SoftSlateActionLine(label: "TAP", presentation: entry.tap, isActive: !isHolding)
-                    SoftSlateActionLine(label: "HOLD", presentation: entry.hold, isActive: isHolding)
-                    SoftSlateActionLine(label: "DOUBLE", presentation: entry.doubleTap, isActive: false)
+                    SoftSlateActionLine(
+                        label: "TAP",
+                        presentation: entry.tap,
+                        isActive: entry.recognizedGesture == .tap || (entry.recognizedGesture == nil && !isHolding)
+                    )
+                    SoftSlateActionLine(
+                        label: "HOLD",
+                        presentation: entry.hold,
+                        isActive: entry.recognizedGesture == .hold || (entry.recognizedGesture == nil && isHolding)
+                    )
+                    SoftSlateActionLine(
+                        label: "DOUBLE",
+                        presentation: entry.doubleTap,
+                        isActive: entry.recognizedGesture == .doubleTap
+                    )
                 }
                 .frame(maxWidth: .infinity)
             }

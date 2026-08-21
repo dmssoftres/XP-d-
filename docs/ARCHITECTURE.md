@@ -13,6 +13,7 @@ No backend, database, cloud account, telemetry service, or third-party package d
 | `XPdApp` / `AppDelegate` | Application lifecycle, menu-bar/window setup, initial input permission request | SwiftUI, AppKit, IOKit permission API | Unknown |
 | `HIDService` | Match `10429:514`, manage HID lifecycle, publish input reports/wheel values, and combine exact HID/BLE battery sources | IOKit HID callbacks/properties | Unknown |
 | `ShortcutRemoteBatteryMonitor` | Verify the target BLE PnP identity, enable its two notify-only vendor characteristics, and parse exact battery packets | CoreBluetooth | Unknown |
+| `ButtonGestureRecognizer` | Convert K1–K10 down/release reports into mutually exclusive Tap, Hold, and Double events with cancellable timing | Main-actor scheduler seam | Unknown |
 | `MappingStore` | Ordered dynamic profiles, active-profile mappings/HID bindings, migration, persistence, imports, selector state, action dispatch | SwiftUI observable state, `UserDefaults` | Unknown |
 | `ActionRunner` | Execute mapped shortcuts, scrolling, app actions, and commands; permission preflight/settings | Core Graphics, AppKit, ApplicationServices, process APIs | Unknown |
 | Configuration models/document | Codable configuration schema, validation, JSON import/export | Foundation, SwiftUI `FileDocument` | Unknown |
@@ -22,7 +23,7 @@ No backend, database, cloud account, telemetry service, or third-party package d
 
 ## Data flow
 
-Shortcut Remote HID value/report → `HIDService` → `MappingStore` control/gesture resolution → persisted mapping lookup → optional same-control Tap application resolution → `ActionRunner` side effect and input-overlay presentation. Inherited Hold/Double application targets are read at execution time; invalid Tap mappings stop before side effects.
+Shortcut Remote HID value/report → `HIDService` → `ButtonGestureRecognizer` for K1–K10 → `MappingStore` gesture resolution → persisted mapping lookup → optional same-control Tap application resolution → `ActionRunner` side effect and input-overlay presentation. Tap waits through the Double window; Hold and Double suppress Tap. Profile changes, imports, learning, disconnects, and displaced live controls cancel pending gestures. Inherited Hold/Double application targets are read at execution time; invalid Tap mappings stop before side effects.
 
 Configuration UI/profile-manager edits → `MappingStore` → one ordered version-3 profile collection in `UserDefaults`. Version-2 fixed-profile persistence migrates in Global/Finder/Logic Pro order; older shared mappings and HID bindings migrate into Global. Export builds a complete ordered JSON document; version-2 exports upgrade on decode, and imports validate Global, names, active profile, mappings, and bindings before one replacement.
 
@@ -47,6 +48,7 @@ The build script compiles `XPd`, assembles `dist/XP[d].app`, creates its Info.pl
 - Privacy approval stale after rebuild: the app may connect or post events incorrectly until the stable signed bundle is approved/relaunched.
 - Invalid import: reject atomically without replacing any in-memory or persisted profile state.
 - Unknown/changed HID report: learning or mapped control resolution fails; capture evidence before changing decoding.
+- Missing release or conflicting live-button reports: cancel the displaced/pending gesture rather than execute an ambiguous action.
 - Missing/mismatched BLE identity or notification: retain an exact HID property if available; otherwise show battery unavailable rather than estimating.
 - Wheel-center report changes or loses its device-specific standalone empty report-6 distinction: selector confirmation may regress and requires controlled real-hardware recapture.
 - Action target unavailable or permission denied: report a structured action failure without corrupting mappings.

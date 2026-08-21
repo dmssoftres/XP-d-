@@ -19,4 +19,21 @@ final class InputOverlayModelTests: XCTestCase {
         XCTAssertNil(model.profileSelection)
         XCTAssertEqual(visibilityChanges.last, false)
     }
+
+    @MainActor
+    func testRecognizedGestureUpdatesLatestMatchingEntry() {
+        let model = InputOverlayModel()
+        let presentation = InputOverlayPresentation(mapping: Mapping(action: .noAction))
+        model.press(
+            control: .k1,
+            tap: presentation,
+            hold: presentation,
+            doubleTap: presentation
+        )
+        model.release(control: .k1)
+
+        model.recognize(control: .k1, gesture: .doubleTap)
+
+        XCTAssertEqual(model.entries.last?.recognizedGesture, .doubleTap)
+    }
 }

@@ -75,6 +75,10 @@ final class InputOverlayController {
         model.release(control: control)
     }
 
+    func recognize(control: RemoteControl, gesture: GestureKind) {
+        model.recognize(control: control, gesture: gesture)
+    }
+
     func pulse(control: RemoteControl, tap: Mapping, hold: Mapping, doubleTap: Mapping) {
         press(control: control, tap: tap, hold: hold, doubleTap: doubleTap)
         // Common-mode timers keep firing while macOS is tracking the pointer.

@@ -34,6 +34,16 @@ the unified wheel action. The wheel scrolls vertically by default, with a
 persisted sensitivity setting from 1 through 10. Counter-clockwise scrolls up
 and clockwise scrolls down.
 
+## Button gestures
+
+K1–K10 recognize Tap, Hold, and Double from the verified button-down and
+generic-release HID stream. Tap waits 0.30 seconds so a second press can become
+Double; Hold fires once after 0.72 seconds while the button remains pressed.
+Pending gestures are cancelled when the profile/configuration changes, the
+remote disconnects, learning begins, or another live button displaces the
+current one. Wheel rotation and the device-specific wheel-center profile
+selector remain outside this timing path.
+
 ## Application actions
 
 Select a control, choose **Open application** or **Toggle application**, and enter

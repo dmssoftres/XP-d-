@@ -4,6 +4,11 @@ import Observation
 @Observable
 @MainActor
 final class MappingStore {
+    typealias ActionExecutionOverride = @MainActor (
+        _ mapping: Mapping,
+        _ completion: @escaping @MainActor (ActionExecutionResult) -> Void
+    ) -> Void
+
     private(set) var availableProfiles: [String] = XPdConfiguration.defaultProfileNames
 
     enum ProfileError: LocalizedError, Equatable {
@@ -71,6 +76,7 @@ final class MappingStore {
                 return
             }
             guard profileName != oldValue, !isReplacingConfiguration else { return }
+            cancelPendingButtonGestures()
             saveActiveProfile(named: oldValue)
             activateProfile(named: profileName)
             defaults.set(profileName, forKey: profileNameDefaultsKey)
@@ -148,15 +154,23 @@ final class MappingStore {
     private var liveInputGeneration = 0
     private var isProfileSelectorVisible = false
     private var pendingProfileName: String?
-    private var actionPressesInFlight: Set<RemoteControl> = []
     private var isReplacingConfiguration = false
     private var loadedProfileName: String?
     private let actionRunner = ActionRunner()
+    private let actionExecutionOverride: ActionExecutionOverride?
+    private let buttonGestureRecognizer: ButtonGestureRecognizer
     @ObservationIgnored private lazy var inputOverlay = InputOverlayController(displayDuration: inputOverlayDuration)
 
-    init(userDefaults: UserDefaults = .standard, startHardware: Bool = true) {
+    init(
+        userDefaults: UserDefaults = .standard,
+        startHardware: Bool = true,
+        gestureSchedule: @escaping ButtonGestureRecognizer.Schedule = ButtonGestureRecognizer.productionSchedule,
+        actionExecutionOverride: ActionExecutionOverride? = nil
+    ) {
         defaults = userDefaults
         hid = HIDService(startHardware: startHardware)
+        buttonGestureRecognizer = ButtonGestureRecognizer(schedule: gestureSchedule)
+        self.actionExecutionOverride = actionExecutionOverride
 
         let savedProfile = defaults.string(forKey: profileNameDefaultsKey)
         showsInputOverlay = defaults.object(forKey: inputOverlayDefaultsKey) as? Bool ?? true
@@ -179,6 +193,12 @@ final class MappingStore {
 
         hid.onInput = { [weak self] signature in
             self?.handleHIDInput(signature)
+        }
+        hid.onDisconnect = { [weak self] in
+            self?.cancelPendingButtonGestures()
+        }
+        buttonGestureRecognizer.onGesture = { [weak self] control, gesture in
+            self?.recognizedButtonGesture(control: control, gesture: gesture)
         }
     }
 
@@ -241,7 +261,11 @@ final class MappingStore {
     ) {
         switch resolvedMapping(for: control, gesture: gesture) {
         case let .success(mapping):
-            actionRunner.execute(mapping: mapping, completion: completion)
+            if let actionExecutionOverride {
+                actionExecutionOverride(mapping, completion)
+            } else {
+                actionRunner.execute(mapping: mapping, completion: completion)
+            }
         case let .failure(error):
             completion(.failure(error.localizedDescription))
         }
@@ -287,6 +311,7 @@ final class MappingStore {
     }
 
     func learnSelectedControl() {
+        cancelPendingButtonGestures()
         learningControl = selectedControl
         liveControl = nil
     }
@@ -394,6 +419,7 @@ final class MappingStore {
             return false
         }
 
+        cancelPendingButtonGestures()
         isReplacingConfiguration = true
         profileStates = importedStates
         availableProfiles = configuration.profiles.map(\.name)
@@ -403,7 +429,6 @@ final class MappingStore {
 
         learningControl = nil
         liveControl = nil
-        actionPressesInFlight.removeAll()
         closeProfileSelector()
         showsInputOverlay = configuration.showsInputOverlay
         defaults.set(profileName, forKey: profileNameDefaultsKey)
@@ -478,9 +503,11 @@ final class MappingStore {
         let generation = liveInputGeneration
 
         guard let signature else {
-            actionPressesInFlight.removeAll()
-            if let liveControl, showsInputOverlay {
-                inputOverlay.release(control: liveControl)
+            if let liveControl {
+                buttonGestureRecognizer.release(liveControl)
+                if showsInputOverlay {
+                    inputOverlay.release(control: liveControl)
+                }
             }
             liveControl = nil
             return
@@ -496,21 +523,19 @@ final class MappingStore {
             hidBindings[learningControl] = signature
             selectedControl = learningControl
             liveControl = learningControl
-            actionPressesInFlight.insert(learningControl)
             self.learningControl = nil
             saveHIDBindings()
             showOverlayPress(for: learningControl)
-
-            if learningControl == .wheelCW || learningControl == .wheelCCW {
-                Task { @MainActor [weak self] in
-                    try? await Task.sleep(for: .milliseconds(180))
-                    self?.actionPressesInFlight.remove(learningControl)
-                }
-            }
             return
         }
 
         guard let matched = hidBindings.first(where: { $0.value == signature })?.key else { return }
+        if let displacedControl = liveControl, displacedControl != matched {
+            buttonGestureRecognizer.cancel(displacedControl)
+            if showsInputOverlay, !displacedControl.isWheelRotation {
+                inputOverlay.release(control: displacedControl)
+            }
+        }
         selectedControl = matched
         liveControl = matched
 
@@ -537,26 +562,24 @@ final class MappingStore {
         }
 
         showOverlayPress(for: matched)
+        buttonGestureRecognizer.press(matched)
+    }
 
-        if !actionPressesInFlight.contains(matched) {
-            actionPressesInFlight.insert(matched)
-            executeMapping(for: matched, gesture: .tap) { [weak self] result in
-                self?.lastActionResult = result
-            }
+    private func recognizedButtonGesture(control: RemoteControl, gesture: GestureKind) {
+        if showsInputOverlay {
+            inputOverlay.recognize(control: control, gesture: gesture)
         }
+        executeMapping(for: control, gesture: gesture) { [weak self] result in
+            self?.lastActionResult = result
+        }
+    }
 
-        // Wheel rotation reports do not expose a held state in the UI.
-        if matched == .wheelCW || matched == .wheelCCW {
-            if showsInputOverlay {
-                inputOverlay.release(control: matched)
-            }
-            Task { @MainActor [weak self] in
-                try? await Task.sleep(for: .milliseconds(180))
-                guard let self, self.liveInputGeneration == generation else { return }
-                self.actionPressesInFlight.remove(matched)
-                self.liveControl = nil
-            }
+    private func cancelPendingButtonGestures() {
+        buttonGestureRecognizer.cancelAll()
+        if let liveControl, showsInputOverlay, !liveControl.isWheelRotation {
+            inputOverlay.release(control: liveControl)
         }
+        liveControl = nil
     }
 
     private func releaseWheelAfterDelay(generation: Int) {

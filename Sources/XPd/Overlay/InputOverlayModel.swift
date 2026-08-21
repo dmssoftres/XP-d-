@@ -75,6 +75,7 @@ struct InputOverlayEntry: Identifiable, Equatable {
     let doubleTap: InputOverlayPresentation
     let pressedAt: Date
     var releasedAt: Date?
+    var recognizedGesture: GestureKind?
 
     var isPressed: Bool { releasedAt == nil }
 }
@@ -115,7 +116,8 @@ final class InputOverlayModel {
             tap: tap,
             hold: hold,
             doubleTap: doubleTap,
-            pressedAt: Date()
+            pressedAt: Date(),
+            recognizedGesture: nil
         ))
         if entries.count > 12 {
             entries.removeFirst(entries.count - 12)
@@ -137,6 +139,11 @@ final class InputOverlayModel {
             }
         }
         RunLoop.main.add(expirationTimer, forMode: .common)
+    }
+
+    func recognize(control: RemoteControl, gesture: GestureKind) {
+        guard let index = entries.lastIndex(where: { $0.control == control }) else { return }
+        entries[index].recognizedGesture = gesture
     }
 
     func setDisplayDuration(_ duration: TimeInterval) {
