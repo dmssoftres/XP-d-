@@ -245,9 +245,9 @@ final class MappingStore {
         )
     }
 
-    func requestAccessibilityAccess() {
-        if actionRunner.requestAccessibilityAccess() {
-            lastActionResult = .success("Accessibility access is enabled")
+    func requestScrollingAccess() {
+        if actionRunner.requestScrollingAccess() {
+            lastActionResult = .success("Scrolling access is enabled")
         } else {
             lastActionResult = .failure("Enable XP[d] in Accessibility, then relaunch")
         }

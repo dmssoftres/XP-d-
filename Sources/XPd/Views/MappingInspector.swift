@@ -246,7 +246,7 @@ struct MappingInspector: View {
 
                 Label(
                     store.canPostScrollEvents
-                        ? "Accessibility access is enabled for scrolling"
+                        ? "Scrolling access is enabled"
                         : "Allow XP[d] in Accessibility to enable scrolling",
                     systemImage: store.canPostScrollEvents
                         ? "checkmark.circle.fill"
@@ -256,8 +256,8 @@ struct MappingInspector: View {
                 .foregroundStyle(store.canPostScrollEvents ? Color.green : Color.orange)
 
                 HStack(spacing: 10) {
-                    Button("Request Accessibility Access") {
-                        store.requestAccessibilityAccess()
+                    Button("Request Scrolling Access") {
+                        store.requestScrollingAccess()
                     }
                     Button("Open Accessibility Settings") {
                         store.openAccessibilitySettings()

@@ -51,6 +51,12 @@ complete XP[d] setup as readable JSON. The file contains every control's Tap,
 Hold, and Double mapping, HID bindings, the current profile name, and the overlay
 preference. Imports are validated completely before the current setup is replaced.
 
-## Development relaunches
+## Development permissions and relaunches
 
-Input Monitoring approval is tied to the app's code signature. This repository uses standard ad-hoc signing because no Apple Development identity is configured on the current Mac. Rebuilding may therefore require `./script/build_and_run.sh --reset-input-monitoring` and one fresh approval. Once approved, use `./script/build_and_run.sh --relaunch` to restart the existing bundle without changing its signature.
+Accessibility and Input Monitoring approval are tied to the app's code signature. This repository uses standard ad-hoc signing because no Apple Development identity is configured on the current Mac. If permissions become stale after a rebuild, run:
+
+```sh
+./script/build_and_run.sh --reset-permissions
+```
+
+This stops XP[d], resets its Accessibility and Input Monitoring records, opens the Accessibility settings page, and launches the already-built bundle so it can be approved. Approve XP[d] in Accessibility, then use `./script/build_and_run.sh --relaunch` to restart the same bundle without rebuilding or changing its signature. The older `--reset-input-monitoring` mode remains available when only Input Monitoring needs to be reset.

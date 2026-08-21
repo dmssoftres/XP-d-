@@ -10,10 +10,15 @@ struct ContentView: View {
             HStack(alignment: .top, spacing: 28) {
                 RemoteView(store: store)
                     .frame(width: 300)
-                MappingInspector(store: store)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                ScrollView(.vertical) {
+                    MappingInspector(store: store)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
-            .padding(24)
+            .frame(maxHeight: .infinity, alignment: .top)
+            .padding(.horizontal, 24)
+            .padding(.vertical, 12)
         }
         .background(.regularMaterial)
     }

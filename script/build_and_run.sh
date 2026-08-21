@@ -27,12 +27,16 @@ stop_app() {
   return 1
 }
 
+require_built_app() {
+  if [[ ! -x "$APP/Contents/MacOS/$APP_NAME" ]]; then
+    echo "XP[d] has not been built yet; run $0 first." >&2
+    exit 1
+  fi
+}
+
 case "$MODE" in
   --relaunch|relaunch)
-    if [[ ! -x "$APP/Contents/MacOS/$APP_NAME" ]]; then
-      echo "XP[d] has not been built yet; run $0 first." >&2
-      exit 1
-    fi
+    require_built_app
     stop_app
     open_app
     sleep 1
@@ -41,15 +45,22 @@ case "$MODE" in
     exit 0
     ;;
   --reset-input-monitoring|reset-input-monitoring)
-    if [[ ! -x "$APP/Contents/MacOS/$APP_NAME" ]]; then
-      echo "XP[d] has not been built yet; run $0 first." >&2
-      exit 1
-    fi
+    require_built_app
     stop_app
     /usr/bin/tccutil reset ListenEvent "$BUNDLE_ID"
     /usr/bin/open 'x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent'
     open_app
     echo "Reset XP[d]'s stale Input Monitoring record. Enable XP[d], then use --relaunch."
+    exit 0
+    ;;
+  --reset-permissions|reset-permissions)
+    require_built_app
+    stop_app
+    /usr/bin/tccutil reset Accessibility "$BUNDLE_ID"
+    /usr/bin/tccutil reset ListenEvent "$BUNDLE_ID"
+    /usr/bin/open 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility'
+    open_app
+    echo "Reset XP[d]'s Accessibility and Input Monitoring records. Approve XP[d] in Accessibility, then use --relaunch."
     exit 0
     ;;
 esac
@@ -117,7 +128,7 @@ case "$MODE" in
     echo "XP[d] launched successfully."
     ;;
   *)
-    echo "usage: $0 [run|--debug|--logs|--telemetry|--verify|--relaunch|--reset-input-monitoring]" >&2
+    echo "usage: $0 [run|--debug|--logs|--telemetry|--verify|--relaunch|--reset-permissions|--reset-input-monitoring]" >&2
     exit 2
     ;;
 esac

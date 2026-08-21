@@ -10,7 +10,7 @@ struct XPdApp: App {
     var body: some Scene {
         WindowGroup("XP[d]", id: "main") {
             ContentView(store: store)
-                .frame(minWidth: 860, minHeight: 560)
+                .frame(minWidth: 860, minHeight: 640)
         }
         .defaultSize(width: 980, height: 650)
 

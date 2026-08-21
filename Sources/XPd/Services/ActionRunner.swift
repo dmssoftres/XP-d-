@@ -105,14 +105,10 @@ final class ActionRunner {
         completion(.success(direction == .up ? "Scrolled up" : "Scrolled down"))
     }
 
-    func requestAccessibilityAccess() -> Bool {
+    func requestScrollingAccess() -> Bool {
         // This is only called by the explicit inspector button.  It is the
         // sole place where XP[d] asks macOS to show an access prompt.
-        let postEventAccess = requestPostEventAccess()
-        let windowAccess = AXIsProcessTrustedWithOptions([
-            "AXTrustedCheckOptionPrompt": true
-        ] as CFDictionary)
-        return postEventAccess && windowAccess
+        return requestPostEventAccess()
     }
 
     func openAccessibilitySettings() {
