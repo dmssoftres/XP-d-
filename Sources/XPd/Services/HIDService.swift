@@ -45,8 +45,10 @@ final class HIDService {
     ]
     private static let batteryRefreshInterval: TimeInterval = 15
 
-    init() {
-        start()
+    init(startHardware: Bool = true) {
+        if startHardware {
+            start()
+        }
     }
 
     func openInputMonitoringSettings() {

@@ -95,7 +95,7 @@ struct MappingInspector: View {
             }
 
             if store.selectedControl == .wheelCenter {
-                Label("Wheel-center input remains unresolved because the remote has not exposed a unique HID report for it.", systemImage: "ladybug")
+                Label("Press once to open the profile selector, rotate to highlight, then press again to confirm.", systemImage: "dial.medium")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .padding(12)

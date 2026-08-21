@@ -20,8 +20,9 @@ Initial target device:
 - A click-through Key Stack overlay shows recent remote inputs and hold progress
   in the top-right corner. It can be disabled from the XP[d] menu-bar menu.
 
-The wheel-center button remains unresolved because the remote has not exposed a
-unique HID report for it.
+The target remote's standalone empty report 6 is treated as the wheel-center
+press. Press once to open the persistent profile selector, rotate to highlight
+a profile without activating it, and press again to confirm.
 
 ## HID learning
 
@@ -47,9 +48,10 @@ shell command is required.
 ## Configuration files
 
 Use **Import** and **Export** in the mapping inspector to move or back up the
-complete XP[d] setup as readable JSON. The file contains every control's Tap,
-Hold, and Double mapping, HID bindings, the current profile name, and the overlay
-preference. Imports are validated completely before the current setup is replaced.
+complete XP[d] setup as readable JSON. The version 2 file contains Global,
+Finder, and Logic Pro, with each profile's complete Tap, Hold, and Double
+mappings and HID bindings, plus the active profile and overlay preference.
+Imports are validated completely before the current setup is replaced.
 
 ## Development permissions and relaunches
 

@@ -21,17 +21,17 @@
 ## Imported configuration is rejected
 
 - **Observed behavior:** import reports failure and current mappings remain unchanged.
-- **Likely causes:** invalid JSON, unsupported schema content, duplicate/missing mappings, or out-of-range settings.
+- **Likely causes:** invalid JSON, unsupported schema version, missing/unknown/duplicate profiles, duplicate mapping keys, or invalid HID bindings.
 - **Verification:** inspect the structured import result and validate against `XPdConfiguration` requirements.
 - **Fix:** correct the exported JSON or migrate the schema deliberately with tests.
 - **Do not:** partially apply invalid content or bypass validation.
 - **Related files/decisions:** `Sources/XPd/Models/XPdConfiguration.swift`, `Tests/XPdTests/XPdConfigurationTests.swift`
 
-## Wheel-center press cannot be mapped
+## Wheel-center profile selector does not open
 
-- **Observed behavior:** pressing the center does not produce a unique learnable event.
-- **Likely causes:** current hardware/driver path exposes no distinct HID report.
-- **Verification:** capture controlled raw HID evidence while isolating keyboard-release and wheel events.
-- **Fix:** Unknown until a unique signal or safe alternate integration is verified.
-- **Do not:** infer center presses from ambiguous empty/release reports in the production app.
+- **Observed behavior:** the first center press does not keep the profile selector visible, or the second press does not activate the highlighted profile.
+- **Likely causes:** the device's standalone empty report 6 is no longer distinguished from release reports, or the active profile lost its wheel-center/rotation bindings.
+- **Verification:** confirm the active profile contains `wheel:center`, `wheel:+`, and `wheel:-`; then capture controlled reports for center, rotation, and releases.
+- **Fix:** restore the profile's default wheel bindings or correct report decoding only from new device evidence.
+- **Do not:** treat every empty/release report as center or change device matching speculatively.
 - **Related files/decisions:** `README.md`, `Sources/XPd/Services/HIDService.swift`
