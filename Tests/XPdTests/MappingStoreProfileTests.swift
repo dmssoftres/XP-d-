@@ -204,6 +204,28 @@ final class MappingStoreProfileTests: XCTestCase {
             XCTAssertEqual(target.standardButtonTitle(for: .k1), "Keep me")
             XCTAssertEqual(target.profileName, "Global")
         }
+
+        for legacyVersion in [XPdConfiguration.legacyVersion, XPdConfiguration.previousVersion] {
+            let legacy = XPdConfiguration(
+                version: legacyVersion,
+                profiles: XPdConfiguration.defaultProfileNames.map { name in
+                    XPdConfiguration.Profile(
+                        name: name,
+                        mappings: [],
+                        hidBindings: [],
+                        standardButtonTitles: name == "Global"
+                            ? [.init(control: .k1, title: "Unsupported")]
+                            : []
+                    )
+                },
+                profileName: "Global",
+                showsInputOverlay: true
+            )
+
+            XCTAssertFalse(target.importConfiguration(try JSONEncoder().encode(legacy)))
+            XCTAssertEqual(target.standardButtonTitle(for: .k1), "Keep me")
+            XCTAssertEqual(target.profileName, "Global")
+        }
     }
 
     func testWheelCenterSelectorConfirmsHighlightedProfileOnRelease() {

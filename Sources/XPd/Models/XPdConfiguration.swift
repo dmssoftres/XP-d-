@@ -427,7 +427,10 @@ struct XPdConfiguration: Codable, Equatable {
             throw ValidationError.invalidActiveProfile(profileName)
         }
 
-        try validateEntries()
+        try validateEntries(
+            allowMIDISettings: false,
+            allowStandardButtonTitles: false
+        )
     }
 
     /// Version 3 added dynamic profile names but no MIDI realm or workspace
@@ -457,7 +460,10 @@ struct XPdConfiguration: Codable, Equatable {
         guard profiles.contains(where: { $0.name == profileName }) else {
             throw ValidationError.invalidActiveProfile(profileName)
         }
-        try validateEntries(allowMIDISettings: false)
+        try validateEntries(
+            allowMIDISettings: false,
+            allowStandardButtonTitles: false
+        )
     }
 
     /// Version 4 predates Standard button titles.  Keep its realm/MIDI

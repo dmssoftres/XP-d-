@@ -93,6 +93,33 @@ final class XPdConfigurationTests: XCTestCase {
         XCTAssertEqual(upgraded.profileName, "Finder")
     }
 
+    func testLegacyVersionsRejectUnsupportedStandardButtonTitles() throws {
+        for version in [XPdConfiguration.legacyVersion, XPdConfiguration.previousVersion] {
+            let legacy = XPdConfiguration(
+                version: version,
+                profiles: XPdConfiguration.defaultProfileNames.map { name in
+                    XPdConfiguration.Profile(
+                        name: name,
+                        mappings: [],
+                        hidBindings: [],
+                        standardButtonTitles: name == "Global"
+                            ? [.init(control: .k1, title: "Unsupported")]
+                            : []
+                    )
+                },
+                profileName: "Global",
+                showsInputOverlay: true
+            )
+
+            XCTAssertThrowsError(try XPdConfiguration.decode(JSONEncoder().encode(legacy))) { error in
+                XCTAssertEqual(
+                    error as? XPdConfiguration.ValidationError,
+                    .standardButtonTitlesInLegacyProfile("Global")
+                )
+            }
+        }
+    }
+
     func testStandardButtonTitleValidationRejectsDuplicateNonButtonAndLongEntries() {
         let duplicate = XPdConfiguration(
             profiles: [
