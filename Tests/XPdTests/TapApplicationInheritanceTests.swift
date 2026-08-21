@@ -66,6 +66,38 @@ final class TapApplicationInheritanceTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(try? store.resolvedMapping(for: .k1, gesture: .hold).get()).command, "Calculator")
     }
 
+    func testHUDPresentationUsesResolvedInheritedApplication() {
+        let store = makeStore()
+        store.update(Mapping(action: .openApplication, command: "/Applications/Finder.app"), for: .k1, gesture: .tap)
+        store.update(
+            Mapping(action: .toggleApplication, command: "Stale hidden target", usesTapApplication: true),
+            for: .k1,
+            gesture: .hold
+        )
+
+        let presentation = InputOverlayPresentation(
+            mapping: store.overlayMapping(for: .k1, gesture: .hold)
+        )
+        XCTAssertEqual(presentation.title, "Finder")
+        XCTAssertTrue(presentation.isConfigured)
+    }
+
+    func testHUDPresentationDoesNotExposeStaleTargetWhenInheritanceIsInvalid() {
+        let store = makeStore()
+        store.update(Mapping(action: .noAction), for: .k1, gesture: .tap)
+        store.update(
+            Mapping(action: .toggleApplication, command: "Stale hidden target", usesTapApplication: true),
+            for: .k1,
+            gesture: .doubleTap
+        )
+
+        let presentation = InputOverlayPresentation(
+            mapping: store.overlayMapping(for: .k1, gesture: .doubleTap)
+        )
+        XCTAssertEqual(presentation.title, "Not set")
+        XCTAssertFalse(presentation.isConfigured)
+    }
+
     func testMissingNonApplicationAndBlankTapTargetsFailSafely() {
         let store = makeStore()
         let hold = Mapping(action: .toggleApplication, command: "Ignored", usesTapApplication: true)
@@ -162,6 +194,37 @@ final class TapApplicationInheritanceTests: XCTestCase {
         XCTAssertEqual(
             ActionRunner.toggleOperation(applicationIsActive: false, targetWindowIsMinimized: false),
             .restore
+        )
+    }
+
+    func testApplicationPathMatchingDoesNotResolveAnUnrelatedRunningApp() {
+        let runningURL = URL(fileURLWithPath: "/Applications/Finder.app")
+        XCTAssertTrue(
+            ActionRunner.applicationPathsMatch(
+                requestedPath: "/Applications/Utilities/../Finder.app",
+                runningURL: runningURL
+            )
+        )
+        XCTAssertFalse(
+            ActionRunner.applicationPathsMatch(
+                requestedPath: "/Applications/Calculator.app",
+                runningURL: runningURL
+            )
+        )
+        XCTAssertFalse(
+            ActionRunner.allowsBundleIdentifierFallback(
+                for: "/Applications/XP[d].app"
+            )
+        )
+        XCTAssertFalse(
+            ActionRunner.allowsBundleIdentifierFallback(
+                for: "/tmp/development/XP[d].app"
+            )
+        )
+        XCTAssertTrue(
+            ActionRunner.allowsBundleIdentifierFallback(
+                for: "com.dmssoftres.xpd"
+            )
         )
     }
 

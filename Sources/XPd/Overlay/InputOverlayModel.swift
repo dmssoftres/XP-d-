@@ -19,7 +19,7 @@ struct InputOverlayPresentation: Equatable {
             isConfigured = true
         } else if !command.isEmpty {
             shortcutTokens = []
-            if mapping.action == .openApplication {
+            if mapping.action == .openApplication || mapping.action == .toggleApplication {
                 title = URL(fileURLWithPath: command)
                     .deletingPathExtension()
                     .lastPathComponent

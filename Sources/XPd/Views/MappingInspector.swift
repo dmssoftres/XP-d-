@@ -359,6 +359,8 @@ struct MappingInspector: View {
                         .foregroundStyle(.orange)
                         .lineLimit(2)
                 }
+            } else {
+                commandEditor
             }
         }
     }

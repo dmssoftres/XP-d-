@@ -437,10 +437,20 @@ final class MappingStore {
         guard showsInputOverlay else { return }
         inputOverlay.pulse(
             control: selectedControl,
-            tap: mapping(for: selectedControl, gesture: .tap),
-            hold: mapping(for: selectedControl, gesture: .hold),
-            doubleTap: mapping(for: selectedControl, gesture: .doubleTap)
+            tap: overlayMapping(for: selectedControl, gesture: .tap),
+            hold: overlayMapping(for: selectedControl, gesture: .hold),
+            doubleTap: overlayMapping(for: selectedControl, gesture: .doubleTap)
         )
+    }
+
+    func overlayMapping(for control: RemoteControl, gesture: GestureKind) -> Mapping {
+        switch resolvedMapping(for: control, gesture: gesture) {
+        case .success(let resolved):
+            return resolved
+        case .failure:
+            let unresolved = mapping(for: control, gesture: gesture)
+            return Mapping(action: unresolved.action)
+        }
     }
 
     func requestScrollingAccess() {
@@ -597,9 +607,9 @@ final class MappingStore {
         guard showsInputOverlay else { return }
         inputOverlay.press(
             control: control,
-            tap: mapping(for: control, gesture: .tap),
-            hold: mapping(for: control, gesture: .hold),
-            doubleTap: mapping(for: control, gesture: .doubleTap)
+            tap: overlayMapping(for: control, gesture: .tap),
+            hold: overlayMapping(for: control, gesture: .hold),
+            doubleTap: overlayMapping(for: control, gesture: .doubleTap)
         )
     }
 

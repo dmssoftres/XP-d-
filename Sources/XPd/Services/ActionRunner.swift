@@ -45,6 +45,17 @@ final class ActionRunner {
         applicationIsActive && targetWindowIsMinimized != true ? .minimize : .restore
     }
 
+    static func applicationPathsMatch(requestedPath: String, runningURL: URL) -> Bool {
+        let expandedPath = (requestedPath as NSString).expandingTildeInPath
+        let requestedURL = URL(fileURLWithPath: expandedPath)
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+        let normalizedRunningURL = runningURL
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+        return requestedURL == normalizedRunningURL
+    }
+
     func execute(
         mapping: Mapping,
         completion: @escaping @MainActor (ActionExecutionResult) -> Void
@@ -147,6 +158,22 @@ final class ActionRunner {
         let applications = NSWorkspace.shared.runningApplications
         let normalizedName = normalized(requestedName)
 
+        if !Self.allowsBundleIdentifierFallback(for: requestedName) {
+            if let byExactBundlePath = applications.first(where: {
+                guard let runningURL = $0.bundleURL else { return false }
+                return Self.applicationPathsMatch(
+                    requestedPath: requestedName,
+                    runningURL: runningURL
+                )
+            }) {
+                return byExactBundlePath
+            }
+
+            // An explicit path identifies one exact app copy. Falling back to
+            // its bundle ID could target another installed/development copy.
+            return nil
+        }
+
         if let byBundleIdentifier = applications.first(where: {
             $0.bundleIdentifier?.caseInsensitiveCompare(requestedName) == .orderedSame
         }) {
@@ -158,6 +185,10 @@ final class ActionRunner {
             return normalized(localizedName) == normalizedName
                 || normalized(localizedName + ".app") == normalizedName
         })
+    }
+
+    static func allowsBundleIdentifierFallback(for requestedName: String) -> Bool {
+        !requestedName.contains("/")
     }
 
     private func applicationURL(for requestedName: String) -> URL? {
