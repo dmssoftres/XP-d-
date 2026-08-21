@@ -8,6 +8,10 @@ enum RemoteControl: String, CaseIterable, Codable, Identifiable {
     case wheelCenter = "Wheel Center"
 
     var id: String { rawValue }
+
+    var isWheelRotation: Bool {
+        self == .wheelCW || self == .wheelCCW
+    }
 }
 
 enum GestureKind: String, CaseIterable, Codable, Identifiable {

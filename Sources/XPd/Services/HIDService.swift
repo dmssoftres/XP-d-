@@ -32,6 +32,7 @@ final class HIDService {
     var onInput: ((String?) -> Void)?
 
     @ObservationIgnored private let resources = HIDResources()
+    @ObservationIgnored private var report6ControlIsActive = false
     private let logger = Logger(subsystem: "com.dmssoftres.xpd", category: "HID")
 
     init() {
@@ -142,9 +143,33 @@ final class HIDService {
             payloadBytes = bytes
         }
 
-        if payloadBytes.allSatisfy({ $0 == 0 }) {
+        let isEmptyReport = payloadBytes.allSatisfy({ $0 == 0 })
+
+        // The ACK05 center switch is unusual: unlike the other controls, its
+        // press arrives as an otherwise empty report 6. An empty report after
+        // a regular report 6 remains the release for that regular control.
+        if reportID == 6, isEmptyReport, !report6ControlIsActive {
+            lastEvent = "wheel:center"
+            recentReports.insert(lastEvent, at: 0)
+            recentReports = Array(recentReports.prefix(8))
+            logger.info("HID wheel center")
+            onInput?("wheel:center")
+            return
+        }
+
+        if reportID == 6, isEmptyReport {
+            report6ControlIsActive = false
             onInput?(nil)
             return
+        }
+
+        if isEmptyReport {
+            onInput?(nil)
+            return
+        }
+
+        if reportID == 6 {
+            report6ControlIsActive = true
         }
 
         if reportID == 6, payloadBytes.count >= 2, payloadBytes[0] == 0x01 {

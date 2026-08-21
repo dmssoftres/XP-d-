@@ -4,6 +4,8 @@ import Observation
 @Observable
 @MainActor
 final class MappingStore {
+    static let availableProfiles = ["Global", "Finder", "Logic Pro"]
+
     enum PersistenceResult: Equatable {
         case idle
         case saved
@@ -48,20 +50,54 @@ final class MappingStore {
             lastPersistenceResult = .saved
         }
     }
+    var inputOverlayDuration: Double {
+        didSet {
+            let supportedDuration = Self.closestInputOverlayDuration(to: inputOverlayDuration)
+            if supportedDuration != inputOverlayDuration {
+                inputOverlayDuration = supportedDuration
+                return
+            }
+            UserDefaults.standard.set(inputOverlayDuration, forKey: inputOverlayDurationDefaultsKey)
+            inputOverlay.setDisplayDuration(inputOverlayDuration)
+            lastPersistenceResult = .saved
+        }
+    }
+    var wheelSensitivity: Double {
+        didSet {
+            let clamped = WheelScrollSettings.clamped(wheelSensitivity)
+            if clamped != wheelSensitivity {
+                wheelSensitivity = clamped
+                return
+            }
+            UserDefaults.standard.set(wheelSensitivity, forKey: wheelSensitivityDefaultsKey)
+            lastPersistenceResult = .saved
+        }
+    }
     let hid = HIDService()
+
+    static let inputOverlayDurationOptions: [Double] = [2, 4, 6, 8]
 
     private let defaultsKey = "XPd.mappings.v1"
     private let hidBindingsKey = "XPd.hidBindings.v1"
     private let profileNameDefaultsKey = "XPd.profileName.v1"
     private let inputOverlayDefaultsKey = "XPd.showsInputOverlay.v1"
+    private let inputOverlayDurationDefaultsKey = "XPd.inputOverlayDuration.v1"
+    private let wheelSensitivityDefaultsKey = "XPd.wheelSensitivity.v1"
     private var liveInputGeneration = 0
+    private var profileSelectorGeneration = 0
+    private var isProfileSelectorVisible = false
     private var actionPressesInFlight: Set<RemoteControl> = []
     private let actionRunner = ActionRunner()
-    @ObservationIgnored private lazy var inputOverlay = InputOverlayController()
+    @ObservationIgnored private lazy var inputOverlay = InputOverlayController(displayDuration: inputOverlayDuration)
 
     init() {
         profileName = UserDefaults.standard.string(forKey: profileNameDefaultsKey) ?? "Global"
         showsInputOverlay = UserDefaults.standard.object(forKey: inputOverlayDefaultsKey) as? Bool ?? true
+        let savedDuration = UserDefaults.standard.object(forKey: inputOverlayDurationDefaultsKey) as? Double ?? 4
+        inputOverlayDuration = Self.closestInputOverlayDuration(to: savedDuration)
+        let savedWheelSensitivity = UserDefaults.standard.object(forKey: wheelSensitivityDefaultsKey) as? Double
+            ?? WheelScrollSettings.defaultSensitivity
+        wheelSensitivity = WheelScrollSettings.clamped(savedWheelSensitivity)
         load()
         loadHIDBindings()
         hidBindings = hidBindings.mapValues(Self.migrateHIDSignature)
@@ -249,7 +285,30 @@ final class MappingStore {
         guard let matched = hidBindings.first(where: { $0.value == signature })?.key else { return }
         selectedControl = matched
         liveControl = matched
+
+        if matched == .wheelCenter {
+            toggleProfileSelector()
+            return
+        }
+
+        if isProfileSelectorVisible, matched == .wheelCW || matched == .wheelCCW {
+            rotateProfile(matched == .wheelCW ? 1 : -1)
+            liveControl = nil
+            return
+        }
+
         showOverlayPress(for: matched)
+
+        if matched.isWheelRotation {
+            actionRunner.scroll(
+                direction: matched == .wheelCW ? .down : .up,
+                sensitivity: wheelSensitivity
+            ) { [weak self] result in
+                self?.lastActionResult = result
+            }
+            releaseWheelAfterDelay(matched, generation: generation)
+            return
+        }
 
         if !actionPressesInFlight.contains(matched) {
             actionPressesInFlight.insert(matched)
@@ -270,6 +329,60 @@ final class MappingStore {
                 self.actionPressesInFlight.remove(matched)
                 self.liveControl = nil
             }
+        }
+    }
+
+    private func releaseWheelAfterDelay(_ control: RemoteControl, generation: Int) {
+        if showsInputOverlay {
+            inputOverlay.release(control: control)
+        }
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(180))
+            guard let self, self.liveInputGeneration == generation else { return }
+            self.liveControl = nil
+        }
+    }
+
+    private func toggleProfileSelector() {
+        profileSelectorGeneration += 1
+        if isProfileSelectorVisible {
+            isProfileSelectorVisible = false
+            inputOverlay.hideProfileSelector()
+            liveControl = nil
+        } else {
+            isProfileSelectorVisible = true
+            inputOverlay.showProfileSelector(
+                profiles: Self.availableProfiles,
+                selectedProfile: profileName
+            )
+            scheduleProfileSelectorDismissal()
+        }
+    }
+
+    private func rotateProfile(_ direction: Int) {
+        guard !Self.availableProfiles.isEmpty else { return }
+        let currentIndex = Self.availableProfiles.firstIndex(of: profileName) ?? 0
+        let count = Self.availableProfiles.count
+        let nextIndex = (currentIndex + direction + count) % count
+        profileName = Self.availableProfiles[nextIndex]
+        inputOverlay.showProfileSelector(
+            profiles: Self.availableProfiles,
+            selectedProfile: profileName
+        )
+        profileSelectorGeneration += 1
+        scheduleProfileSelectorDismissal()
+    }
+
+    private func scheduleProfileSelectorDismissal() {
+        let generation = profileSelectorGeneration
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(2.4))
+            guard let self,
+                  self.isProfileSelectorVisible,
+                  self.profileSelectorGeneration == generation else { return }
+            self.isProfileSelectorVisible = false
+            self.inputOverlay.hideProfileSelector()
+            self.liveControl = nil
         }
     }
 
@@ -337,10 +450,15 @@ final class MappingStore {
         .k9: "r6:00 2C 00 00 00 00 00",
         .k10: "r6:03 1D 00 00 00 00 00",
         .wheelCW: "wheel:+",
-        .wheelCCW: "wheel:-"
+        .wheelCCW: "wheel:-",
+        .wheelCenter: "wheel:center"
     ]
 
     private static func migrateHIDSignature(_ signature: String) -> String {
         signature.replacingOccurrences(of: "r6:06 ", with: "r6:", options: .anchored)
+    }
+
+    private static func closestInputOverlayDuration(to duration: Double) -> Double {
+        inputOverlayDurationOptions.min(by: { abs($0 - duration) < abs($1 - duration) }) ?? 4
     }
 }

@@ -3,11 +3,12 @@ import SwiftUI
 
 @MainActor
 final class InputOverlayController {
-    private let model = InputOverlayModel()
+    private let model: InputOverlayModel
     private let panel: NSPanel
 
-    init() {
-        let size = NSSize(width: 378, height: 404)
+    init(displayDuration: TimeInterval = 4) {
+        model = InputOverlayModel(displayDuration: displayDuration)
+        let size = NSSize(width: 316, height: 324)
         panel = NSPanel(
             contentRect: NSRect(origin: .zero, size: size),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -24,6 +25,16 @@ final class InputOverlayController {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         panel.isReleasedWhenClosed = false
 
+        model.visibilityDidChange = { [weak panel] hasVisibleEntries in
+            guard let panel else { return }
+            if hasVisibleEntries {
+                panel.contentView?.needsLayout = true
+                panel.contentView?.needsDisplay = true
+            } else {
+                panel.orderOut(nil)
+            }
+        }
+
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
             object: nil,
@@ -39,8 +50,14 @@ final class InputOverlayController {
             ensureVisible()
         } else {
             model.reset()
-            panel.orderOut(nil)
+            if model.profileSelection == nil {
+                panel.orderOut(nil)
+            }
         }
+    }
+
+    func setDisplayDuration(_ duration: TimeInterval) {
+        model.setDisplayDuration(duration)
     }
 
     func press(control: RemoteControl, tap: Mapping, hold: Mapping, doubleTap: Mapping) {
@@ -60,10 +77,24 @@ final class InputOverlayController {
 
     func pulse(control: RemoteControl, tap: Mapping, hold: Mapping, doubleTap: Mapping) {
         press(control: control, tap: tap, hold: hold, doubleTap: doubleTap)
-        Task { @MainActor [weak self] in
-            // Keep previews alive long enough to demonstrate the hold state.
-            try? await Task.sleep(for: .milliseconds(1_050))
-            self?.release(control: control)
+        // Common-mode timers keep firing while macOS is tracking the pointer.
+        let releaseTimer = Timer(timeInterval: 1.05, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.release(control: control)
+            }
+        }
+        RunLoop.main.add(releaseTimer, forMode: .common)
+    }
+
+    func showProfileSelector(profiles: [String], selectedProfile: String) {
+        ensureVisible()
+        model.showProfiles(profiles, selectedProfile: selectedProfile)
+    }
+
+    func hideProfileSelector() {
+        model.hideProfiles()
+        if !model.isEnabled {
+            panel.orderOut(nil)
         }
     }
 

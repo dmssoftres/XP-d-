@@ -79,11 +79,23 @@ struct InputOverlayEntry: Identifiable, Equatable {
     var isPressed: Bool { releasedAt == nil }
 }
 
+struct ProfileOverlaySelection: Equatable {
+    let profiles: [String]
+    let selectedProfile: String
+}
+
 @Observable
 @MainActor
 final class InputOverlayModel {
     private(set) var entries: [InputOverlayEntry] = []
+    private(set) var profileSelection: ProfileOverlaySelection?
     var isEnabled = true
+    private(set) var displayDuration: TimeInterval
+    @ObservationIgnored var visibilityDidChange: ((Bool) -> Void)?
+
+    init(displayDuration: TimeInterval = 4) {
+        self.displayDuration = displayDuration
+    }
 
     var visibleEntries: [InputOverlayEntry] {
         Array(entries.suffix(3).reversed())
@@ -108,20 +120,42 @@ final class InputOverlayModel {
         if entries.count > 12 {
             entries.removeFirst(entries.count - 12)
         }
+        visibilityDidChange?(true)
     }
 
     func release(control: RemoteControl) {
         guard let index = entries.lastIndex(where: { $0.control == control && $0.isPressed }) else { return }
         let id = entries[index].id
         entries[index].releasedAt = Date()
+        let duration = displayDuration
 
-        Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .milliseconds(1_350))
-            self?.entries.removeAll { $0.id == id }
+        let expirationTimer = Timer(timeInterval: duration, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.entries.removeAll { $0.id == id }
+                self.visibilityDidChange?(!self.entries.isEmpty)
+            }
         }
+        RunLoop.main.add(expirationTimer, forMode: .common)
+    }
+
+    func setDisplayDuration(_ duration: TimeInterval) {
+        displayDuration = max(1, duration)
+    }
+
+    func showProfiles(_ profiles: [String], selectedProfile: String) {
+        profileSelection = ProfileOverlaySelection(
+            profiles: profiles,
+            selectedProfile: selectedProfile
+        )
+    }
+
+    func hideProfiles() {
+        profileSelection = nil
     }
 
     func reset() {
         entries.removeAll()
+        visibilityDidChange?(false)
     }
 }

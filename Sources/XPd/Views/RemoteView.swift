@@ -174,7 +174,7 @@ struct RemoteView: View {
 
     private func wheelDirectionColor(_ control: RemoteControl) -> Color {
         if store.liveControl == control { return .green }
-        if store.selectedControl == control { return .white.opacity(0.82) }
+        if store.selectedControl.isWheelRotation { return .white.opacity(0.82) }
         return .white.opacity(0.18)
     }
 

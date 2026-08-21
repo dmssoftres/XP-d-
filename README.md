@@ -27,7 +27,11 @@ unique HID report for it.
 
 Select a control in the remote drawing, choose **Learn selected control**, then press the matching physical control. XP[d] stores the raw report signature locally and highlights the matching visual control when that report is received again.
 
-The dial is captured through its relative HID Wheel/AC Pan value rather than the button report path. Learn clockwise and counter-clockwise separately by selecting each visual wheel direction and turning the physical dial once.
+The dial is captured through its relative HID Wheel/AC Pan value rather than
+the button report path. Select either rotation side of the visual wheel to edit
+the unified wheel action. The wheel scrolls vertically by default, with a
+persisted sensitivity setting from 1 through 10. Counter-clockwise scrolls up
+and clockwise scrolls down.
 
 ## Application actions
 

@@ -5,6 +5,8 @@ struct MappingInspector: View {
     @State private var isImportingConfiguration = false
     @State private var isExportingConfiguration = false
     @State private var exportDocument = XPdConfigurationDocument()
+    @State private var isEditingCommand = false
+    @FocusState private var isCommandFieldFocused: Bool
 
     private var binding: Binding<Mapping> {
         Binding(
@@ -20,77 +22,21 @@ struct MappingInspector: View {
                     Text("Selected control")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Text(store.selectedControl.rawValue)
+                    Text(selectedControlTitle)
                         .font(.title2.weight(.semibold))
                 }
                 Spacer()
-                Button {
-                    store.previewInputOverlay()
-                } label: {
-                    Label("Preview", systemImage: "play.fill")
-                }
-                .controlSize(.small)
-                .disabled(!store.showsInputOverlay)
-                Text(store.selectedGesture.rawValue)
+                Text(store.selectedControl.isWheelRotation ? "Rotate" : store.selectedGesture.rawValue)
                     .font(.caption.weight(.medium))
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
                     .background(.quaternary, in: Capsule())
             }
 
-            GroupBox {
-                VStack(alignment: .leading, spacing: 16) {
-                    Picker("Action", selection: binding.action) {
-                        ForEach(ActionKind.allCases) { action in
-                            Text(action.rawValue).tag(action)
-                        }
-                    }
-
-                    TextField(commandPlaceholder, text: binding.command)
-
-                    if isApplicationAction {
-                        Text("Use an app name, bundle ID, or .app path. Toggle application requires Accessibility permission.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    if let result = store.lastActionResult {
-                        Label(
-                            result.message,
-                            systemImage: result.succeeded
-                                ? "checkmark.circle.fill"
-                                : "exclamationmark.triangle.fill"
-                        )
-                        .font(.caption)
-                        .foregroundStyle(result.succeeded ? Color.green : Color.orange)
-                        .lineLimit(2)
-                    }
-
-                    VStack(alignment: .leading, spacing: 7) {
-                        Text("Gesture")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Picker("Gesture", selection: Bindable(store).selectedGesture) {
-                            ForEach(GestureKind.allCases) { gesture in
-                                Text(gesture.rawValue).tag(gesture)
-                            }
-                        }
-                        .labelsHidden()
-                        .pickerStyle(.segmented)
-                    }
-
-                    if let message = store.lastPersistenceResult.message {
-                        Label(
-                            message,
-                            systemImage: store.lastPersistenceResult.succeeded
-                                ? "checkmark.circle.fill"
-                                : "exclamationmark.triangle.fill"
-                        )
-                        .font(.caption)
-                        .foregroundStyle(store.lastPersistenceResult.succeeded ? Color.green : Color.orange)
-                    }
-                }
-                .padding(4)
+            if store.selectedControl.isWheelRotation {
+                wheelScrollEditor
+            } else {
+                mappingEditor
             }
 
             HStack(spacing: 12) {
@@ -156,7 +102,38 @@ struct MappingInspector: View {
                     .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
             }
 
-            Spacer()
+            GroupBox("Input HUD") {
+                HStack(spacing: 14) {
+                    Toggle("Show HUD", isOn: Bindable(store).showsInputOverlay)
+
+                    Divider()
+                        .frame(height: 20)
+
+                    Text("Disappear after")
+                        .foregroundStyle(.secondary)
+
+                    Picker("Disappear after", selection: Bindable(store).inputOverlayDuration) {
+                        ForEach(MappingStore.inputOverlayDurationOptions, id: \.self) { duration in
+                            Text("\(duration.formatted()) seconds").tag(duration)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(width: 92)
+
+                    Spacer()
+
+                    Button {
+                        store.previewInputOverlay()
+                    } label: {
+                        Label("Preview", systemImage: "play.fill")
+                    }
+                    .disabled(!store.showsInputOverlay)
+                }
+                .padding(4)
+            }
+
+            Spacer(minLength: 0)
         }
         .fileImporter(
             isPresented: $isImportingConfiguration,
@@ -171,6 +148,184 @@ struct MappingInspector: View {
             defaultFilename: exportFilename,
             onCompletion: exportConfigurationCompleted
         )
+        .onChange(of: store.selectedControl) { _, _ in
+            endCommandEditing()
+        }
+        .onChange(of: store.selectedGesture) { _, _ in
+            endCommandEditing()
+        }
+        .onChange(of: selectedAction) { _, _ in
+            endCommandEditing()
+        }
+        .onChange(of: isCommandFieldFocused) { _, isFocused in
+            if !isFocused {
+                isEditingCommand = false
+            }
+        }
+    }
+
+    private var mappingEditor: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 16) {
+                Picker("Action", selection: binding.action) {
+                    ForEach(ActionKind.allCases) { action in
+                        Text(action.rawValue).tag(action)
+                    }
+                }
+
+                commandEditor
+
+                if isApplicationAction {
+                    Text("Use an app name, bundle ID, or .app path. Toggle application requires Accessibility permission.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                actionResult
+
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("Gesture")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Picker("Gesture", selection: Bindable(store).selectedGesture) {
+                        ForEach(GestureKind.allCases) { gesture in
+                            Text(gesture.rawValue).tag(gesture)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                }
+
+                persistenceResult
+            }
+            .padding(4)
+        }
+    }
+
+    private var wheelScrollEditor: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 18) {
+                HStack {
+                    Text("Action")
+                    Spacer()
+                    Text("Scroll up and down")
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 10)
+                        .frame(height: 24)
+                        .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Sensitivity")
+                            .font(.headline)
+                        Spacer()
+                        Text(Int(store.wheelSensitivity).formatted())
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+
+                    Slider(
+                        value: Bindable(store).wheelSensitivity,
+                        in: WheelScrollSettings.minimumSensitivity...WheelScrollSettings.maximumSensitivity,
+                        step: 1
+                    )
+
+                    HStack {
+                        Text("Less")
+                        Spacer()
+                        Text("More")
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+
+                Text("Counter-clockwise scrolls up. Clockwise scrolls down.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                actionResult
+                persistenceResult
+            }
+            .padding(4)
+        }
+    }
+
+    @ViewBuilder
+    private var actionResult: some View {
+        if let result = store.lastActionResult {
+            Label(
+                result.message,
+                systemImage: result.succeeded
+                    ? "checkmark.circle.fill"
+                    : "exclamationmark.triangle.fill"
+            )
+            .font(.caption)
+            .foregroundStyle(result.succeeded ? Color.green : Color.orange)
+            .lineLimit(2)
+        }
+    }
+
+    @ViewBuilder
+    private var persistenceResult: some View {
+        if let message = store.lastPersistenceResult.message {
+            Label(
+                message,
+                systemImage: store.lastPersistenceResult.succeeded
+                    ? "checkmark.circle.fill"
+                    : "exclamationmark.triangle.fill"
+            )
+            .font(.caption)
+            .foregroundStyle(store.lastPersistenceResult.succeeded ? Color.green : Color.orange)
+        }
+    }
+
+    @ViewBuilder
+    private var commandEditor: some View {
+        if isEditingCommand {
+            TextField(commandPlaceholder, text: binding.command)
+                .focused($isCommandFieldFocused)
+                .onSubmit(endCommandEditing)
+                .onExitCommand(perform: endCommandEditing)
+        } else {
+            Button(action: beginCommandEditing) {
+                HStack(spacing: 0) {
+                    Text(commandDisplayValue)
+                        .foregroundStyle(binding.wrappedValue.command.isEmpty ? .secondary : .primary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 8)
+                }
+                .padding(.horizontal, 7)
+                .frame(height: 22)
+                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 5))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 5)
+                        .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Edit command")
+            .help("Click to edit")
+        }
+    }
+
+    private var commandDisplayValue: String {
+        let command = binding.wrappedValue.command
+        return command.isEmpty ? commandPlaceholder : command
+    }
+
+    private func beginCommandEditing() {
+        isEditingCommand = true
+        Task { @MainActor in
+            isCommandFieldFocused = true
+        }
+    }
+
+    private func endCommandEditing() {
+        isCommandFieldFocused = false
+        isEditingCommand = false
     }
 
     private var configurationControls: some View {
@@ -260,6 +415,10 @@ struct MappingInspector: View {
 
     private var selectedAction: ActionKind {
         store.mapping(for: store.selectedControl, gesture: store.selectedGesture).action
+    }
+
+    private var selectedControlTitle: String {
+        store.selectedControl.isWheelRotation ? "Wheel" : store.selectedControl.rawValue
     }
 
     private var isApplicationAction: Bool {

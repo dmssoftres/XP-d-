@@ -71,6 +71,34 @@ final class ActionRunner {
         }
     }
 
+    func scroll(
+        direction: WheelScrollDirection,
+        sensitivity: Double,
+        completion: @escaping @MainActor (ActionExecutionResult) -> Void
+    ) {
+        guard hasAccessibilityAccess(prompt: true) else {
+            completion(.failure("Allow XP[d] in Accessibility, then rotate again"))
+            return
+        }
+
+        let settings = WheelScrollSettings(sensitivity: sensitivity)
+        let delta = settings.delta(for: direction)
+        guard let event = CGEvent(
+            scrollWheelEvent2Source: nil,
+            units: .line,
+            wheelCount: 1,
+            wheel1: delta,
+            wheel2: 0,
+            wheel3: 0
+        ) else {
+            completion(.failure("Could not create a scroll event"))
+            return
+        }
+
+        event.post(tap: .cghidEventTap)
+        completion(.success(direction == .up ? "Scrolled up" : "Scrolled down"))
+    }
+
     private func runningApplication(matching requestedName: String) -> NSRunningApplication? {
         let applications = NSWorkspace.shared.runningApplications
         let normalizedName = normalized(requestedName)

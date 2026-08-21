@@ -32,9 +32,9 @@ struct ContentView: View {
             }
             Spacer()
             Picker("Profile", selection: Bindable(store).profileName) {
-                Text("Global").tag("Global")
-                Text("Finder").tag("Finder")
-                Text("Logic Pro").tag("Logic Pro")
+                ForEach(MappingStore.availableProfiles, id: \.self) { profile in
+                    Text(profile).tag(profile)
+                }
             }
             .pickerStyle(.menu)
             .frame(width: 180)

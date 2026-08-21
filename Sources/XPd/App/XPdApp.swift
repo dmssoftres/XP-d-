@@ -38,6 +38,11 @@ private struct MenuBarView: View {
         Text(store.hid.isConnected ? "Shortcut Remote connected" : "Shortcut Remote disconnected")
         Divider()
         Toggle("Show Input Overlay", isOn: Bindable(store).showsInputOverlay)
+        Picker("Hide Overlay After", selection: Bindable(store).inputOverlayDuration) {
+            ForEach(MappingStore.inputOverlayDurationOptions, id: \.self) { duration in
+                Text("\(duration.formatted()) seconds").tag(duration)
+            }
+        }
         Button("Preview Input Overlay") {
             store.previewInputOverlay()
         }
