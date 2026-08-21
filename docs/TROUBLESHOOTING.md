@@ -46,7 +46,7 @@
 
 ## Wheel-center profile selector does not open
 
-- **Observed behavior:** the first center press does not keep the profile selector visible, or the second press does not activate the highlighted profile.
+- **Observed behavior:** holding the center does not keep the profile selector visible, or releasing it does not activate the highlighted profile.
 - **Likely causes:** the device's standalone empty report 6 is no longer distinguished from release reports, or the active profile lost its wheel-center/rotation bindings.
 - **Verification:** confirm the active profile contains `wheel:center`, `wheel:+`, and `wheel:-`; then capture controlled reports for center, rotation, and releases.
 - **Fix:** restore the profile's default wheel bindings or correct report decoding only from new device evidence.

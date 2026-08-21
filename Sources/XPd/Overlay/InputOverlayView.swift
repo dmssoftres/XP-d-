@@ -94,7 +94,7 @@ private struct ProfileSelectorCard: View {
             HStack {
                 Text("ROTATE TO CHOOSE")
                 Spacer()
-                Text("PRESS TO SELECT")
+                Text("RELEASE TO SELECT")
             }
             .font(.system(size: 8, weight: .semibold, design: .rounded))
             .tracking(0.7)

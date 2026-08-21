@@ -36,6 +36,7 @@ final class HIDService {
     @ObservationIgnored private let resources = HIDResources()
     @ObservationIgnored private let bluetoothBatteryMonitor = ShortcutRemoteBatteryMonitor()
     @ObservationIgnored private var report6ControlIsActive = false
+    @ObservationIgnored private var wheelCenterIsHeld = false
     @ObservationIgnored private var connectedDevice: IOHIDDevice?
     @ObservationIgnored private var hidBatteryPercentage: Int?
     @ObservationIgnored private var bluetoothBatteryPercentage: Int?
@@ -87,6 +88,8 @@ final class HIDService {
             guard let context else { return }
             MainActor.assumeIsolated {
                 let service = Unmanaged<HIDService>.fromOpaque(context).takeUnretainedValue()
+                service.report6ControlIsActive = false
+                service.wheelCenterIsHeld = false
                 service.connectedDevice = device
                 service.registerInputReports(for: device)
                 service.isConnected = true
@@ -171,10 +174,34 @@ final class HIDService {
 
         let isEmptyReport = payloadBytes.allSatisfy({ $0 == 0 })
 
-        // The ACK05 center switch is unusual: unlike the other controls, its
-        // press arrives as an otherwise empty report 6. An empty report after
-        // a regular report 6 remains the release for that regular control.
-        if reportID == 6, isEmptyReport, !report6ControlIsActive {
+        if reportID == 6, isEmptyReport {
+            if report6ControlIsActive {
+                // A report-6 empty packet immediately after a wheel detent is
+                // that detent's release. While center is held, it must not
+                // confirm the profile selector; the next standalone empty
+                // report is the center release.
+                report6ControlIsActive = false
+                if wheelCenterIsHeld {
+                    return
+                }
+                onInput?(nil)
+                return
+            }
+
+            if wheelCenterIsHeld {
+                wheelCenterIsHeld = false
+                lastEvent = "wheel:center released"
+                recentReports.insert(lastEvent, at: 0)
+                recentReports = Array(recentReports.prefix(8))
+                logger.info("HID wheel center released")
+                onInput?(nil)
+                return
+            }
+
+            // The ACK05 center switch is unusual: its press arrives as an
+            // otherwise empty report 6. Keep the center held until the next
+            // standalone empty report, which is the physical release.
+            wheelCenterIsHeld = true
             lastEvent = "wheel:center"
             recentReports.insert(lastEvent, at: 0)
             recentReports = Array(recentReports.prefix(8))
@@ -183,13 +210,13 @@ final class HIDService {
             return
         }
 
-        if reportID == 6, isEmptyReport {
-            report6ControlIsActive = false
-            onInput?(nil)
-            return
-        }
-
         if isEmptyReport {
+            if wheelCenterIsHeld {
+                // Do not let an unrelated release from a rollover sequence
+                // terminate the center-held selector. The verified center
+                // release is a standalone empty report 6 handled above.
+                return
+            }
             onInput?(nil)
             return
         }
@@ -241,6 +268,8 @@ final class HIDService {
     private func handleDeviceRemoval() {
         isConnected = false
         connectedDevice = nil
+        report6ControlIsActive = false
+        wheelCenterIsHeld = false
         hidBatteryPercentage = nil
         bluetoothBatteryPercentage = nil
         batteryPercentage = nil
@@ -251,6 +280,12 @@ final class HIDService {
 
     func simulateDisconnectForTesting() {
         handleDeviceRemoval()
+    }
+
+    /// Internal test seam for exercising report-6 center and wheel-release
+    /// decoding without opening a real HID manager.
+    func simulateInputReportForTesting(reportID: UInt32, bytes: [UInt8]) {
+        received(reportID: reportID, bytes: bytes)
     }
 
     private func refreshBatteryIfNeeded() {

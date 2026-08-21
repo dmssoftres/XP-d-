@@ -27,7 +27,7 @@ Shortcut Remote HID value/report → `HIDService` → `ButtonGestureRecognizer` 
 
 Configuration UI/profile-manager edits → `MappingStore` → one ordered version-3 profile collection in `UserDefaults`. Version-2 fixed-profile persistence migrates in Global/Finder/Logic Pro order; older shared mappings and HID bindings migrate into Global. Export builds a complete ordered JSON document; version-2 exports upgrade on decode, and imports validate Global, names, active profile, mappings, and bindings before one replacement.
 
-Wheel center → open persistent selector with current profile order → wheel rotation updates only the pending highlight → second center press activates the highlighted profile and loads its mappings/HID bindings. Adding, deleting, or importing profiles closes stale selector state.
+Wheel-center hold → open selector with current profile order → wheel rotation updates only the pending highlight → center release activates the highlighted profile and loads its mappings/HID bindings. Adding, deleting, or importing profiles closes stale selector state.
 
 Matching HID connection → BLE PnP read/verification → notify-only FFE0/0002 plus FFE0/0003 subscription → validated `02 F2 01 <percent>` packet → `HIDService` battery state → header and menu-bar UI. Disconnect, identity mismatch, Bluetooth loss, or invalid data clears/withholds the BLE value.
 

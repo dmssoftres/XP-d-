@@ -130,7 +130,7 @@ final class MappingStoreProfileTests: XCTestCase {
         XCTAssertEqual(reloaded.mapping(for: .k1, gesture: .tap).command, "global")
     }
 
-    func testWheelCenterSelectorConfirmsPendingProfileOnlyOnSecondPress() {
+    func testWheelCenterSelectorConfirmsHighlightedProfileOnRelease() {
         let store = makeStore()
         store.update(Mapping(action: .noAction, command: "global"), for: .k1, gesture: .tap)
 
@@ -145,7 +145,7 @@ final class MappingStoreProfileTests: XCTestCase {
         XCTAssertEqual(store.profileName, "Global")
         XCTAssertEqual(store.mapping(for: .k1, gesture: .tap).command, "global")
 
-        store.simulateHIDInputForTesting("wheel:center")
+        store.simulateHIDInputForTesting(nil)
         XCTAssertFalse(store.isProfileSelectorVisibleForTesting)
         XCTAssertEqual(store.profileName, "Finder")
         XCTAssertEqual(store.mapping(for: .k1, gesture: .tap).command, "ChatGPT")
@@ -153,6 +153,52 @@ final class MappingStoreProfileTests: XCTestCase {
         store.simulateHIDInputForTesting("wheel:center")
         XCTAssertTrue(store.isProfileSelectorVisibleForTesting)
         XCTAssertEqual(store.profileName, "Finder")
+
+        store.simulateHIDInputForTesting(nil)
+        XCTAssertFalse(store.isProfileSelectorVisibleForTesting)
+        XCTAssertEqual(store.profileName, "Finder")
+    }
+
+    func testHIDCenterReleaseWaitsThroughWheelDetentRelease() {
+        let store = makeStore()
+        let emptyReport = Array(repeating: UInt8(0), count: 7)
+        let clockwiseReport: [UInt8] = [0x01, 0x57, 0, 0, 0, 0, 0]
+
+        store.hid.simulateInputReportForTesting(reportID: 6, bytes: emptyReport)
+        XCTAssertTrue(store.isProfileSelectorVisibleForTesting)
+
+        store.hid.simulateInputReportForTesting(reportID: 6, bytes: clockwiseReport)
+        XCTAssertEqual(store.pendingProfileNameForTesting, "Finder")
+        XCTAssertEqual(store.profileName, "Global")
+
+        // The empty report immediately after a detent releases the wheel
+        // action, not the physically held center switch.
+        store.hid.simulateInputReportForTesting(reportID: 6, bytes: emptyReport)
+        XCTAssertTrue(store.isProfileSelectorVisibleForTesting)
+        XCTAssertEqual(store.profileName, "Global")
+
+        // The next standalone empty report is center release and confirms.
+        store.hid.simulateInputReportForTesting(reportID: 6, bytes: emptyReport)
+        XCTAssertFalse(store.isProfileSelectorVisibleForTesting)
+        XCTAssertEqual(store.profileName, "Finder")
+    }
+
+    func testHIDDisconnectWhileCenterHeldClearsSelectorWithoutSwitchingProfile() {
+        let store = makeStore()
+        let emptyReport = Array(repeating: UInt8(0), count: 7)
+        let clockwiseReport: [UInt8] = [0x01, 0x57, 0, 0, 0, 0, 0]
+
+        store.hid.simulateInputReportForTesting(reportID: 6, bytes: emptyReport)
+        store.hid.simulateInputReportForTesting(reportID: 6, bytes: clockwiseReport)
+        XCTAssertTrue(store.isProfileSelectorVisibleForTesting)
+        XCTAssertEqual(store.pendingProfileNameForTesting, "Finder")
+        XCTAssertEqual(store.profileName, "Global")
+
+        store.hid.simulateDisconnectForTesting()
+
+        XCTAssertFalse(store.isProfileSelectorVisibleForTesting)
+        XCTAssertNil(store.pendingProfileNameForTesting)
+        XCTAssertEqual(store.profileName, "Global")
     }
 
     func testNewProfilesTrimAndPersistIndependentState() throws {
@@ -288,9 +334,8 @@ final class MappingStoreProfileTests: XCTestCase {
         XCTAssertEqual(store.pendingProfileNameForTesting, "Studio")
         XCTAssertEqual(store.profileName, "Logic Pro")
 
-        store.simulateHIDInputForTesting("wheel:center")
+        store.simulateHIDInputForTesting(nil)
         XCTAssertEqual(store.profileName, "Studio")
-        store.simulateHIDInputForTesting("wheel:center")
         try store.deleteProfile(named: "Studio")
         XCTAssertFalse(store.isProfileSelectorVisibleForTesting)
         XCTAssertNil(store.pendingProfileNameForTesting)

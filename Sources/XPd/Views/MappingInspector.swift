@@ -102,7 +102,7 @@ struct MappingInspector: View {
             }
 
             if store.selectedControl == .wheelCenter {
-                Label("Press once to open the profile selector, rotate to highlight, then press again to confirm.", systemImage: "dial.medium")
+                Label("Hold the center, rotate to highlight a profile, then release to confirm.", systemImage: "dial.medium")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .padding(12)

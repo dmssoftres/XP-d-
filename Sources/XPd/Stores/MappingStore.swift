@@ -153,6 +153,7 @@ final class MappingStore {
     private var profileStates: [String: ProfileState] = [:]
     private var liveInputGeneration = 0
     private var isProfileSelectorVisible = false
+    private var isWheelCenterHeld = false
     private var pendingProfileName: String?
     private var isReplacingConfiguration = false
     private var loadedProfileName: String?
@@ -196,6 +197,7 @@ final class MappingStore {
         }
         hid.onDisconnect = { [weak self] in
             self?.cancelPendingButtonGestures()
+            self?.closeProfileSelector()
         }
         buttonGestureRecognizer.onGesture = { [weak self] control, gesture in
             self?.recognizedButtonGesture(control: control, gesture: gesture)
@@ -503,6 +505,11 @@ final class MappingStore {
         let generation = liveInputGeneration
 
         guard let signature else {
+            if isWheelCenterHeld {
+                isWheelCenterHeld = false
+                confirmProfileSelection()
+                return
+            }
             if let liveControl {
                 buttonGestureRecognizer.release(liveControl)
                 if showsInputOverlay {
@@ -540,7 +547,8 @@ final class MappingStore {
         liveControl = matched
 
         if matched == .wheelCenter {
-            toggleProfileSelector()
+            isWheelCenterHeld = true
+            openProfileSelector()
             return
         }
 
@@ -590,20 +598,22 @@ final class MappingStore {
         }
     }
 
-    private func toggleProfileSelector() {
-        if isProfileSelectorVisible {
-            if let pendingProfileName {
-                profileName = pendingProfileName
-            }
-            closeProfileSelector()
-        } else {
-            isProfileSelectorVisible = true
-            pendingProfileName = profileName
-            inputOverlay.showProfileSelector(
-                profiles: availableProfiles,
-                selectedProfile: profileName
-            )
+    private func openProfileSelector() {
+        guard !isProfileSelectorVisible else { return }
+        isProfileSelectorVisible = true
+        pendingProfileName = profileName
+        inputOverlay.showProfileSelector(
+            profiles: availableProfiles,
+            selectedProfile: profileName
+        )
+    }
+
+    private func confirmProfileSelection() {
+        guard isProfileSelectorVisible else { return }
+        if let pendingProfileName {
+            profileName = pendingProfileName
         }
+        closeProfileSelector()
     }
 
     private func rotateProfile(_ direction: Int) {
@@ -621,6 +631,7 @@ final class MappingStore {
 
     private func closeProfileSelector() {
         isProfileSelectorVisible = false
+        isWheelCenterHeld = false
         pendingProfileName = nil
         inputOverlay.hideProfileSelector()
         liveControl = nil

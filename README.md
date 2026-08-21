@@ -21,8 +21,8 @@ Initial target device:
   in the top-right corner. It can be disabled from the XP[d] menu-bar menu.
 
 The target remote's standalone empty report 6 is treated as the wheel-center
-press. Press once to open the persistent profile selector, rotate to highlight
-a profile without activating it, and press again to confirm.
+press. Hold the center while rotating to highlight a profile, then release the
+center to confirm it. Rotation previews a profile without activating it.
 
 ## HID learning
 
