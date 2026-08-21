@@ -11,6 +11,9 @@ struct InputOverlayView: View {
             } else if let midi = model.midiPresentation {
                 MIDILockCard(presentation: midi)
                     .transition(.scale(scale: 0.97).combined(with: .opacity))
+            } else if let notice = model.statusNotice {
+                StatusNoticeCard(notice: notice)
+                    .transition(.scale(scale: 0.97).combined(with: .opacity))
             } else {
                 if #available(macOS 26.0, *) {
                     GlassEffectContainer(spacing: 9) {
@@ -26,6 +29,7 @@ struct InputOverlayView: View {
         .animation(.spring(response: 0.34, dampingFraction: 0.86), value: model.visibleEntries.map(\.id))
         .animation(.spring(response: 0.3, dampingFraction: 0.88), value: model.profileSelection)
         .animation(.spring(response: 0.3, dampingFraction: 0.88), value: model.midiPresentation)
+        .animation(.spring(response: 0.3, dampingFraction: 0.88), value: model.statusNotice)
     }
 
     private var entryStack: some View {
@@ -52,6 +56,33 @@ struct InputOverlayView: View {
                 ))
             }
         }
+    }
+}
+
+private struct StatusNoticeCard: View {
+    let notice: InputOverlayStatusNotice
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: notice.systemImage)
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(Color.mint.opacity(0.92))
+                .frame(width: 28)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(notice.title)
+                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                    .tracking(1)
+                    .foregroundStyle(Color.mint.opacity(0.88))
+                Text(notice.message)
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Color.white.opacity(0.94))
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(16)
+        .frame(width: 290, height: 78, alignment: .leading)
+        .overlayGlassCard(cornerRadius: 18)
+        .shadow(color: Color.black.opacity(0.10), radius: 16, y: 8)
     }
 }
 

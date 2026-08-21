@@ -19,7 +19,7 @@ final class MappingStoreMIDITests: XCTestCase {
         super.tearDown()
     }
 
-    func testV3PersistedProfilesMigrateToStandardV4() throws {
+    func testV3PersistedProfilesMigrateToCurrentStandardSchema() throws {
         struct LegacyState: Codable {
             let mappings: [MappingKey: Mapping]
             let hidBindings: [RemoteControl: String]
@@ -79,7 +79,7 @@ final class MappingStoreMIDITests: XCTestCase {
 
         let data = try XCTUnwrap(source.exportConfiguration())
         let decoded = try XPdConfiguration.decode(data)
-        XCTAssertEqual(decoded.version, 4)
+        XCTAssertEqual(decoded.version, XPdConfiguration.currentVersion)
         XCTAssertEqual(decoded.activeRealm, .midi)
         XCTAssertEqual(decoded.profiles.first(where: { $0.name == "Drum Pads" })?.realm, .midi)
         XCTAssertEqual(decoded.profiles.first(where: { $0.name == "Drum Pads" })?.midiSettings, settings)

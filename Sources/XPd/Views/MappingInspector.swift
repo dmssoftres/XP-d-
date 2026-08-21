@@ -4,6 +4,7 @@ import SwiftUI
 struct MappingInspector: View {
     let store: MappingStore
     @State private var isEditingCommand = false
+    @State private var shortcutCaptureCancellation = 0
     @FocusState private var isCommandFieldFocused: Bool
 
     private var binding: Binding<Mapping> {
@@ -653,6 +654,11 @@ struct MappingInspector: View {
     private var mappingEditor: some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 16) {
+                if isStandardButtonTitleEligible {
+                    TextField("Button title (optional)", text: standardButtonTitleBinding)
+                        .textFieldStyle(.roundedBorder)
+                }
+
                 Picker("Action", selection: binding.action) {
                     ForEach(ActionKind.allCases) { action in
                         Text(action.rawValue).tag(action)
@@ -792,7 +798,14 @@ struct MappingInspector: View {
 
     @ViewBuilder
     private var commandEditor: some View {
-        if isEditingCommand {
+        if selectedAction == .keyboardShortcut {
+            KeyboardShortcutCaptureField(
+                command: binding.command,
+                cancellationGeneration: shortcutCaptureCancellation,
+                beginRemoteCapture: store.beginKeyboardShortcutCapture,
+                endRemoteCapture: store.endKeyboardShortcutCapture
+            )
+        } else if isEditingCommand {
             TextField(commandPlaceholder, text: binding.command)
                 .focused($isCommandFieldFocused)
                 .onSubmit(endCommandEditing)
@@ -872,6 +885,7 @@ struct MappingInspector: View {
     private func endCommandEditing() {
         isCommandFieldFocused = false
         isEditingCommand = false
+        shortcutCaptureCancellation &+= 1
     }
 
     private func statusCard(title: String, value: String, detail: String) -> some View {
@@ -891,6 +905,17 @@ struct MappingInspector: View {
 
     private var selectedControlTitle: String {
         store.selectedControl.isWheelRotation ? "Wheel" : store.selectedControl.rawValue
+    }
+
+    private var isStandardButtonTitleEligible: Bool {
+        store.activeRealm == .standard && store.selectedControl.isMIDIButton
+    }
+
+    private var standardButtonTitleBinding: Binding<String> {
+        Binding(
+            get: { store.standardButtonTitle(for: store.selectedControl) },
+            set: { store.updateStandardButtonTitle($0, for: store.selectedControl) }
+        )
     }
 
     private var isApplicationAction: Bool {

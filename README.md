@@ -59,6 +59,28 @@ Restoring and minimizing another app's windows requires XP[d] to be enabled once
 in **System Settings › Privacy & Security › Accessibility**. No AppleScript or
 shell command is required.
 
+## Keyboard shortcut capture
+
+Choose **Keyboard shortcut** for a K-button gesture, then click the shortcut
+field to start recording. Press keyboard keys and/or remote K1–K10 buttons in
+the desired order, then click the field again to save. Press Escape, switch the
+selected control or gesture, or choose another action to cancel without changing
+the existing mapping. Command, Control, Option, Shift, and Fn are each
+captured on press. Remove an individual input from its chip while recording, or
+use the clear button to empty the draft or an already-saved sequence. Capture
+records up to 12 inputs and consumes remote K-button presses while active, so
+they do not run their normal mappings.
+
+**Current limitation:** XP[d] records and persists these shortcut sequences,
+but `ActionRunner` does not yet replay keyboard shortcuts or remote-key
+sequences. This capture flow fixes configuration entry only; playback requires
+a separately defined execution design.
+
+In Standard profiles, select K1–K10 to set an optional **Button title**. The
+title appears as one compact line at the top of that button and is shared by
+its Tap, Hold, and Double mappings. Titles are profile-specific, limited to 24
+characters, and do not appear in MIDI profiles.
+
 ## MIDI profiles
 
 Create a profile with the MIDI realm to edit Note, CC, Program Change, Chord,
@@ -79,13 +101,12 @@ share the newest 100 entries or **Clear** before a focused hardware test.
 Use **Import** and **Export** in the mapping inspector to move or back up the
 complete XP[d] setup as readable JSON. Use the profile-management button beside
 the header picker to add, rename, or remove profiles. Global cannot be renamed
-or removed. The
-version 4 file preserves profile order and contains every profile's realm,
-complete
-Tap, Hold, and Double mappings and HID bindings, plus the active profile and
-overlay preference. MIDI profiles additionally contain typed primary/Fn
-mappings. Version 2 and 3 exports upgrade on import, and invalid imports are
-rejected before the current setup is replaced.
+or removed. The version 5 file preserves profile order and contains every
+profile's realm, complete Tap, Hold, and Double mappings and HID bindings,
+optional Standard button titles, plus the active profile and overlay
+preference. MIDI profiles additionally contain typed primary/Fn mappings.
+Version 2, 3, and 4 exports upgrade on import, and invalid imports are rejected
+before the current setup is replaced.
 
 ## Remote battery
 

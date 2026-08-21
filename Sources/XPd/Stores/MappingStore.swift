@@ -132,6 +132,9 @@ final class MappingStore {
     }
     private(set) var mappings: [MappingKey: Mapping] = [:]
     private(set) var hidBindings: [RemoteControl: String] = [:]
+    /// Optional labels for Standard-mode K buttons. MIDI profiles never
+    /// populate this dictionary; titles are shared across gestures.
+    private(set) var standardButtonTitles: [RemoteControl: String] = [:]
     private(set) var learningControl: RemoteControl?
     private(set) var liveControl: RemoteControl?
     private(set) var lastActionResult: ActionExecutionResult?
@@ -227,17 +230,20 @@ final class MappingStore {
     private struct ProfileState: Codable, Equatable {
         var mappings: [MappingKey: Mapping]
         var hidBindings: [RemoteControl: String]
+        var standardButtonTitles: [RemoteControl: String]
         var realm: ProfileRealm
         var midiSettings: MIDIProfileSettings?
 
         init(
             mappings: [MappingKey: Mapping],
             hidBindings: [RemoteControl: String],
+            standardButtonTitles: [RemoteControl: String] = [:],
             realm: ProfileRealm = .standard,
             midiSettings: MIDIProfileSettings? = nil
         ) {
             self.mappings = mappings
             self.hidBindings = hidBindings
+            self.standardButtonTitles = standardButtonTitles
             self.realm = realm
             self.midiSettings = midiSettings
         }
@@ -246,12 +252,13 @@ final class MappingStore {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             mappings = try container.decodeIfPresent([MappingKey: Mapping].self, forKey: .mappings) ?? [:]
             hidBindings = try container.decodeIfPresent([RemoteControl: String].self, forKey: .hidBindings) ?? [:]
+            standardButtonTitles = try container.decodeIfPresent([RemoteControl: String].self, forKey: .standardButtonTitles) ?? [:]
             realm = try container.decodeIfPresent(ProfileRealm.self, forKey: .realm) ?? .standard
             midiSettings = try container.decodeIfPresent(MIDIProfileSettings.self, forKey: .midiSettings)
         }
 
         private enum CodingKeys: String, CodingKey {
-            case mappings, hidBindings, realm, midiSettings
+            case mappings, hidBindings, standardButtonTitles, realm, midiSettings
         }
     }
 
@@ -310,10 +317,11 @@ final class MappingStore {
     }
 
     private let defaults: UserDefaults
-    private let profilesDefaultsKey = "XPd.profiles.v4"
-    private let previousProfilesDefaultsKey = "XPd.profiles.v3"
-    private let legacyProfilesDefaultsKey = "XPd.profiles.v2"
-    private let profilesMigrationKey = "XPd.profiles.v4.migrated"
+    private let profilesDefaultsKey = "XPd.profiles.v5"
+    private let previousProfilesDefaultsKey = "XPd.profiles.v4"
+    private let legacyProfilesDefaultsKey = "XPd.profiles.v3"
+    private let legacyLegacyProfilesDefaultsKey = "XPd.profiles.v2"
+    private let profilesMigrationKey = "XPd.profiles.v5.migrated"
     private let defaultsKey = "XPd.mappings.v1"
     private let hidBindingsKey = "XPd.hidBindings.v1"
     private let profileNameDefaultsKey = "XPd.profileName.v1"
@@ -341,6 +349,10 @@ final class MappingStore {
     private var midiControlLayers: [RemoteControl: Int] = [:]
     private var centerFnHoldTask: Task<Void, Never>?
     private var centerFnHoldGeneration = 0
+    /// The keyboard-shortcut editor temporarily owns K-button input while it
+    /// records a sequence.  Keeping this at the store/HID boundary prevents a
+    /// captured press from also executing its configured mapping.
+    private var shortcutCaptureHandler: ((RemoteControl) -> Void)?
     private let midiOutputService: MIDIOutputService
     private let midiCommandTail = MIDICommandTail()
     private let midiShutdownGate = MIDIShutdownGate()
@@ -434,6 +446,30 @@ final class MappingStore {
 
     func mapping(for control: RemoteControl, gesture: GestureKind) -> Mapping {
         mappings[MappingKey(control: control, gesture: gesture)] ?? Mapping()
+    }
+
+    /// Returns the optional title for a Standard-mode K button. Titles are
+    /// intentionally hidden while a MIDI profile is active and never apply to
+    /// wheel controls.
+    func standardButtonTitle(for control: RemoteControl) -> String {
+        guard activeRealm == .standard, control.isMIDIButton else { return "" }
+        return standardButtonTitles[control] ?? ""
+    }
+
+    /// Persists an optional Standard-mode title shared by the button's
+    /// Tap/Hold/Double mappings. Empty or whitespace-only values remove the
+    /// entry; invalid controls are ignored, while values over 24 trimmed
+    /// characters are bounded before persistence.
+    func updateStandardButtonTitle(_ title: String, for control: RemoteControl) {
+        guard activeRealm == .standard, control.isMIDIButton else { return }
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let bounded = String(trimmed.prefix(24))
+        if bounded.isEmpty {
+            standardButtonTitles.removeValue(forKey: control)
+        } else {
+            standardButtonTitles[control] = bounded
+        }
+        save()
     }
 
     // MARK: MIDI profile state
@@ -710,6 +746,17 @@ final class MappingStore {
         save()
     }
 
+    func beginKeyboardShortcutCapture(onRemoteButton: @escaping (RemoteControl) -> Void) {
+        cancelLearning()
+        cancelPendingButtonGestures()
+        closeProfileSelector()
+        shortcutCaptureHandler = onRemoteButton
+    }
+
+    func endKeyboardShortcutCapture() {
+        shortcutCaptureHandler = nil
+    }
+
     /// Executes a mapping after resolving any same-control Tap inheritance.
     /// Hold/Double gesture recognition remains intentionally outside this
     /// method; current HID input calls it for Tap only.
@@ -899,7 +946,8 @@ final class MappingStore {
                 mappings: Self.mappingEntries(from: state.mappings),
                 hidBindings: Self.hidBindingEntries(from: state.hidBindings),
                 realm: state.realm,
-                midiSettings: state.midiSettings
+                midiSettings: state.midiSettings,
+                standardButtonTitles: Self.standardButtonTitleEntries(from: state.standardButtonTitles)
             )
         }
         let configuration = XPdConfiguration(
@@ -953,9 +1001,17 @@ final class MappingStore {
             for entry in profile.hidBindings {
                 importedHIDBindings[entry.control] = entry.signature
             }
+            var importedStandardButtonTitles: [RemoteControl: String] = [:]
+            for entry in profile.standardButtonTitles {
+                let title = entry.title.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !title.isEmpty {
+                    importedStandardButtonTitles[entry.control] = title
+                }
+            }
             importedStates[profile.name] = ProfileState(
                 mappings: importedMappings,
                 hidBindings: importedHIDBindings,
+                standardButtonTitles: importedStandardButtonTitles,
                 realm: profile.realm,
                 midiSettings: profile.midiSettings
             )
@@ -1062,6 +1118,16 @@ final class MappingStore {
     private func handleHIDInput(_ signature: String?) {
         liveInputGeneration += 1
         let generation = liveInputGeneration
+
+        if let shortcutCaptureHandler {
+            guard let signature,
+                  let matched = hidBindings.first(where: { $0.value == signature })?.key,
+                  matched.isMIDIButton else {
+                return
+            }
+            shortcutCaptureHandler(matched)
+            return
+        }
 
         guard let signature else {
             if activeRealm == .midi, let liveControl {
@@ -1674,15 +1740,18 @@ final class MappingStore {
         profileStates[name] = ProfileState(
             mappings: mappings,
             hidBindings: hidBindings,
+            standardButtonTitles: activeRealm == .standard ? standardButtonTitles : [:],
             realm: activeRealm,
             midiSettings: activeRealm == .midi ? midiSettings : nil
         )
     }
 
     private func activateProfile(named name: String) {
+        let previousRealm = activeRealm
         guard let state = profileStates[name] else {
             mappings = [:]
             hidBindings = [:]
+            standardButtonTitles = [:]
             activeRealm = .standard
             midiSettings = nil
             syncMIDIOverlay()
@@ -1690,6 +1759,7 @@ final class MappingStore {
         }
         mappings = state.mappings
         hidBindings = state.hidBindings
+        standardButtonTitles = state.standardButtonTitles
         activeRealm = state.realm
         midiSettings = state.midiSettings
         if activeRealm == .midi {
@@ -1700,6 +1770,13 @@ final class MappingStore {
             midiLocked = false
         }
         syncMIDIOverlay()
+        if previousRealm == .midi, activeRealm == .standard {
+            inputOverlay.showStatusNotice(
+                title: "XP[d] UNLOCKED",
+                message: "Standard mappings active",
+                systemImage: "lock.open"
+            )
+        }
     }
 
     private func saveAllProfiles() {
@@ -1743,11 +1820,58 @@ final class MappingStore {
             return false
         }
 
+        // v4 persisted the current dynamic profile/realm shape but predates
+        // Standard button titles. ProfileState's compatibility decoder gives
+        // every migrated state an empty title dictionary, then saveAllProfiles
+        // writes the explicit v5 payload.
+        if let data = defaults.data(forKey: previousProfilesDefaultsKey),
+           let decoded = try? JSONDecoder().decode(PersistedProfiles.self, from: data),
+           decoded.version == XPdConfiguration.preTitlesVersion {
+            availableProfiles = decoded.profiles.map(\.name)
+            profileStates = Dictionary(uniqueKeysWithValues: decoded.profiles.map { profile in
+                (
+                    profile.name,
+                    ProfileState(
+                        mappings: profile.state.mappings,
+                        hidBindings: profile.state.hidBindings,
+                        standardButtonTitles: [:],
+                        realm: profile.state.realm,
+                        midiSettings: profile.state.midiSettings
+                    )
+                )
+            })
+            let upgraded = PersistedProfiles(
+                version: XPdConfiguration.currentVersion,
+                profiles: availableProfiles.compactMap { name in
+                    profileStates[name].map { PersistedProfile(name: name, state: $0) }
+                },
+                activeProfileName: decoded.activeProfileName,
+                activeRealm: decoded.activeRealm,
+                lastStandardProfileName: decoded.lastStandardProfileName,
+                lastMIDIProfileName: decoded.lastMIDIProfileName,
+                midiLocked: decoded.midiLocked,
+                workspaceLockControl: decoded.workspaceLockControl
+            )
+            guard isValidPersistedProfiles(upgraded) else {
+                availableProfiles = XPdConfiguration.defaultProfileNames
+                profileStates = Self.defaultProfileStates()
+                return false
+            }
+            loadedProfileName = decoded.activeProfileName
+            loadedActiveRealm = decoded.activeRealm
+            loadedLastStandardProfileName = decoded.lastStandardProfileName
+            loadedLastMIDIProfileName = decoded.lastMIDIProfileName
+            loadedMIDIIsLocked = decoded.midiLocked
+            loadedWorkspaceLockControl = decoded.workspaceLockControl
+            saveAllProfiles()
+            return false
+        }
+
         // v3 persisted dynamic profiles had the same mapping/HID shape but
         // no realm or MIDI fields. Decode them through the compatibility
         // defaults in ProfileState and explicitly upgrade every profile to
         // the standard realm.
-        if let data = defaults.data(forKey: previousProfilesDefaultsKey),
+        if let data = defaults.data(forKey: legacyProfilesDefaultsKey),
            let decoded = try? JSONDecoder().decode(PersistedProfiles.self, from: data),
            decoded.version == XPdConfiguration.previousVersion {
             availableProfiles = decoded.profiles.map(\.name)
@@ -1780,7 +1904,7 @@ final class MappingStore {
         // Version 2 persisted profile state as a dictionary with the exact
         // historical three-profile set. Restore that canonical order while
         // preserving every stored mapping and HID binding.
-        if let data = defaults.data(forKey: legacyProfilesDefaultsKey),
+        if let data = defaults.data(forKey: legacyLegacyProfilesDefaultsKey),
            let decoded = try? JSONDecoder().decode([String: ProfileState].self, from: data),
            let migrated = migrateLegacyPersistedProfiles(decoded) {
             availableProfiles = migrated.order
@@ -1831,7 +1955,10 @@ final class MappingStore {
                     mappings: Self.mappingEntries(from: profile.state.mappings),
                     hidBindings: Self.hidBindingEntries(from: profile.state.hidBindings),
                     realm: profile.state.realm,
-                    midiSettings: profile.state.midiSettings
+                    midiSettings: profile.state.midiSettings,
+                    standardButtonTitles: profile.state.standardButtonTitles.map {
+                        XPdConfiguration.StandardButtonTitleEntry(control: $0.key, title: $0.value)
+                    }
                 )
             },
             profileName: persisted.activeProfileName,
@@ -1916,6 +2043,27 @@ final class MappingStore {
                 )
             }
         }
+    }
+
+    private static func standardButtonTitleEntries(
+        from titles: [RemoteControl: String]
+    ) -> [XPdConfiguration.StandardButtonTitleEntry] {
+        let controlIndex: (RemoteControl) -> Int = {
+            RemoteControl.allCases.firstIndex(of: $0) ?? Int.max
+        }
+        return titles
+            .filter { control, title in
+                control.isMIDIButton && !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+            .sorted { lhs, rhs in
+                controlIndex(lhs.key) < controlIndex(rhs.key)
+            }
+            .map { control, title in
+                XPdConfiguration.StandardButtonTitleEntry(
+                    control: control,
+                    title: title.trimmingCharacters(in: .whitespacesAndNewlines)
+                )
+            }
     }
 
     private static func hidBindingEntries(from bindings: [RemoteControl: String]) -> [XPdConfiguration.HIDBindingEntry] {

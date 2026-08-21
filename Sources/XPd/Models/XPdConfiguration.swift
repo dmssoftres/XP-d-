@@ -6,9 +6,13 @@ import Foundation
 /// meaningful to the wheel selector, while mapping/HID entries can be sorted
 /// before encoding for stable diffs.
 struct XPdConfiguration: Codable, Equatable {
-    static let currentVersion = 4
+    static let currentVersion = 5
     static let legacyVersion = 2
     static let previousVersion = 3
+    /// Version 4 is the immediately previous schema.  It had no
+    /// Standard-mode button-title entries, so decoding it upgrades every
+    /// profile with an empty title collection.
+    static let preTitlesVersion = 4
     static let defaultProfileNames = ["Global", "Finder", "Logic Pro"]
     static let defaultWorkspaceLockControl: RemoteControl = .k3
 
@@ -29,6 +33,7 @@ struct XPdConfiguration: Codable, Equatable {
         let hidBindings: [HIDBindingEntry]
         let realm: ProfileRealm
         let midiSettings: MIDIProfileSettings?
+        let standardButtonTitles: [StandardButtonTitleEntry]
 
         var id: String { name }
 
@@ -41,13 +46,15 @@ struct XPdConfiguration: Codable, Equatable {
             mappings: [MappingEntry],
             hidBindings: [HIDBindingEntry],
             realm: ProfileRealm = .standard,
-            midiSettings: MIDIProfileSettings? = nil
+            midiSettings: MIDIProfileSettings? = nil,
+            standardButtonTitles: [StandardButtonTitleEntry] = []
         ) {
             self.name = name
             self.mappings = mappings
             self.hidBindings = hidBindings
             self.realm = realm
             self.midiSettings = midiSettings
+            self.standardButtonTitles = standardButtonTitles
         }
 
         init(
@@ -55,14 +62,16 @@ struct XPdConfiguration: Codable, Equatable {
             mappings: [MappingEntry],
             hidBindings: [HIDBindingEntry],
             profileRealm: ProfileRealm,
-            midiSettings: MIDIProfileSettings? = nil
+            midiSettings: MIDIProfileSettings? = nil,
+            standardButtonTitles: [StandardButtonTitleEntry] = []
         ) {
             self.init(
                 name: name,
                 mappings: mappings,
                 hidBindings: hidBindings,
                 realm: profileRealm,
-                midiSettings: midiSettings
+                midiSettings: midiSettings,
+                standardButtonTitles: standardButtonTitles
             )
         }
 
@@ -73,6 +82,7 @@ struct XPdConfiguration: Codable, Equatable {
             hidBindings = try container.decodeIfPresent([HIDBindingEntry].self, forKey: .hidBindings) ?? []
             realm = try container.decodeIfPresent(ProfileRealm.self, forKey: .realm) ?? .standard
             midiSettings = try container.decodeIfPresent(MIDIProfileSettings.self, forKey: .midiSettings)
+            standardButtonTitles = try container.decodeIfPresent([StandardButtonTitleEntry].self, forKey: .standardButtonTitles) ?? []
         }
 
         func encode(to encoder: Encoder) throws {
@@ -82,10 +92,11 @@ struct XPdConfiguration: Codable, Equatable {
             try container.encode(hidBindings, forKey: .hidBindings)
             try container.encode(realm, forKey: .realm)
             try container.encodeIfPresent(midiSettings, forKey: .midiSettings)
+            try container.encode(standardButtonTitles, forKey: .standardButtonTitles)
         }
 
         private enum CodingKeys: String, CodingKey {
-            case name, mappings, hidBindings, realm, midiSettings
+            case name, mappings, hidBindings, realm, midiSettings, standardButtonTitles
         }
     }
 
@@ -111,6 +122,19 @@ struct XPdConfiguration: Codable, Equatable {
         }
     }
 
+    /// An optional label shown above a Standard-mode K-button in the hardware
+    /// preview.  Titles are profile-scoped and intentionally independent of
+    /// the Tap/Hold/Double mapping entries.
+    struct StandardButtonTitleEntry: Codable, Equatable {
+        let control: RemoteControl
+        let title: String
+
+        init(control: RemoteControl, title: String) {
+            self.control = control
+            self.title = title
+        }
+    }
+
     enum ValidationError: LocalizedError, Equatable {
         case unsupportedVersion(Int)
         case duplicateProfileName(String)
@@ -127,6 +151,11 @@ struct XPdConfiguration: Codable, Equatable {
         case duplicateHIDControl(profile: String, control: RemoteControl)
         case duplicateHIDSignature(profile: String, signature: String)
         case emptyHIDSignature(profile: String, control: RemoteControl)
+        case standardButtonTitlesInLegacyProfile(String)
+        case standardButtonTitlesOnMIDIProfile(String)
+        case invalidStandardButtonTitleControl(profile: String, control: RemoteControl)
+        case duplicateStandardButtonTitle(profile: String, control: RemoteControl)
+        case standardButtonTitleTooLong(profile: String, control: RemoteControl)
 
         var errorDescription: String? {
             switch self {
@@ -160,6 +189,16 @@ struct XPdConfiguration: Codable, Equatable {
                 return "Duplicate HID signature in \(profile): \(signature)."
             case let .emptyHIDSignature(profile, control):
                 return "HID signature in \(profile) for \(control.rawValue) cannot be empty."
+            case let .standardButtonTitlesInLegacyProfile(profile):
+                return "Standard button titles are unsupported in the legacy profile schema: \(profile)."
+            case let .standardButtonTitlesOnMIDIProfile(profile):
+                return "MIDI profile \(profile) cannot contain Standard button titles."
+            case let .invalidStandardButtonTitleControl(profile, control):
+                return "Standard button title in \(profile) must target a K button: \(control.rawValue)."
+            case let .duplicateStandardButtonTitle(profile, control):
+                return "Duplicate Standard button title in \(profile) for \(control.rawValue)."
+            case let .standardButtonTitleTooLong(profile, control):
+                return "Standard button title in \(profile) for \(control.rawValue) must be at most 24 characters."
             }
         }
     }
@@ -253,8 +292,10 @@ struct XPdConfiguration: Codable, Equatable {
     }
 
     /// Decodes and validates the entire document before returning it. Versions
-    /// 2 and 3 are decoded through their published shape and upgraded to v4;
-    /// every migrated profile is explicitly marked as standard.
+    /// 2 and 3 are decoded through their published shape and upgraded to v5;
+    /// every migrated profile is explicitly marked as standard. Version 4 is
+    /// the current-realm schema and gains empty title collections during the
+    /// upgrade.
     static func decode(_ data: Data) throws -> XPdConfiguration {
         let decoder = JSONDecoder()
         let version = try decoder.decode(VersionEnvelope.self, from: data).version
@@ -263,6 +304,29 @@ struct XPdConfiguration: Codable, Equatable {
             let configuration = try decoder.decode(XPdConfiguration.self, from: data)
             try configuration.validate()
             return configuration
+        case preTitlesVersion:
+            let legacy = try decoder.decode(XPdConfiguration.self, from: data)
+            try legacy.validateV4()
+            return XPdConfiguration(
+                version: currentVersion,
+                profiles: legacy.profiles.map {
+                    Profile(
+                        name: $0.name,
+                        mappings: $0.mappings,
+                        hidBindings: $0.hidBindings,
+                        realm: $0.realm,
+                        midiSettings: $0.midiSettings,
+                        standardButtonTitles: []
+                    )
+                },
+                profileName: legacy.profileName,
+                showsInputOverlay: legacy.showsInputOverlay,
+                activeRealm: legacy.activeRealm,
+                lastStandardProfileName: legacy.lastStandardProfileName,
+                lastMIDIProfileName: legacy.lastMIDIProfileName,
+                midiLocked: legacy.midiLocked,
+                workspaceLockControl: legacy.workspaceLockControl
+            )
         case legacyVersion, previousVersion:
             let legacy = try decoder.decode(XPdConfiguration.self, from: data)
             if version == legacyVersion {
@@ -278,7 +342,8 @@ struct XPdConfiguration: Codable, Equatable {
                         mappings: $0.mappings,
                         hidBindings: $0.hidBindings,
                         realm: .standard,
-                        midiSettings: nil
+                        midiSettings: nil,
+                        standardButtonTitles: []
                     )
                 },
                 profileName: legacy.profileName,
@@ -395,6 +460,53 @@ struct XPdConfiguration: Codable, Equatable {
         try validateEntries(allowMIDISettings: false)
     }
 
+    /// Version 4 predates Standard button titles.  Keep its realm/MIDI
+    /// validation intact while rejecting title fields that do not belong to
+    /// that schema.
+    private func validateV4() throws {
+        guard version == Self.preTitlesVersion else {
+            throw ValidationError.unsupportedVersion(version)
+        }
+        try validateCurrentProfileShape()
+        try validateEntries(allowStandardButtonTitles: false)
+    }
+
+    private func validateCurrentProfileShape() throws {
+        guard !profiles.isEmpty else {
+            throw ValidationError.missingProfileName("Global")
+        }
+
+        var profileNames = Set<String>()
+        for profile in profiles {
+            let trimmedName = profile.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedName.isEmpty, trimmedName.count <= 40, trimmedName == profile.name else {
+                throw ValidationError.invalidProfileName(profile.name)
+            }
+            let foldedName = Self.profileNameComparisonKey(trimmedName)
+            guard profileNames.insert(foldedName).inserted else {
+                throw ValidationError.duplicateProfileName(profile.name)
+            }
+        }
+
+        guard profiles.contains(where: { $0.name == "Global" }) else {
+            throw ValidationError.missingProfileName("Global")
+        }
+        guard profiles.contains(where: { $0.name == profileName }) else {
+            throw ValidationError.invalidActiveProfile(profileName)
+        }
+        guard profiles.first(where: { $0.name == profileName })?.realm == activeRealm else {
+            throw ValidationError.invalidActiveProfile(profileName)
+        }
+        guard workspaceLockControl.isMIDIButton else {
+            throw ValidationError.invalidWorkspaceLockControl(workspaceLockControl)
+        }
+        guard !midiLocked || activeRealm == .midi else {
+            throw ValidationError.invalidMIDIWorkspaceState
+        }
+        try validateRememberedProfile(lastStandardProfileName, realm: .standard)
+        try validateRememberedProfile(lastMIDIProfileName, realm: .midi)
+    }
+
     private func validateRememberedProfile(_ name: String?, realm: ProfileRealm) throws {
         guard let name else { return }
         guard profiles.contains(where: { $0.name == name && $0.realm == realm }) else {
@@ -403,6 +515,13 @@ struct XPdConfiguration: Codable, Equatable {
     }
 
     private func validateEntries(allowMIDISettings: Bool = true) throws {
+        try validateEntries(allowMIDISettings: allowMIDISettings, allowStandardButtonTitles: true)
+    }
+
+    private func validateEntries(
+        allowMIDISettings: Bool = true,
+        allowStandardButtonTitles: Bool
+    ) throws {
         for profile in profiles {
             if profile.realm == .standard, profile.midiSettings != nil {
                 throw ValidationError.midiSettingsOnStandardProfile(profile.name)
@@ -412,6 +531,33 @@ struct XPdConfiguration: Codable, Equatable {
             }
             if allowMIDISettings, let midiSettings = profile.midiSettings {
                 try midiSettings.validate()
+            }
+            if !allowStandardButtonTitles, !profile.standardButtonTitles.isEmpty {
+                throw ValidationError.standardButtonTitlesInLegacyProfile(profile.name)
+            }
+            if profile.realm == .midi, !profile.standardButtonTitles.isEmpty {
+                throw ValidationError.standardButtonTitlesOnMIDIProfile(profile.name)
+            }
+            var titleControls = Set<RemoteControl>()
+            for entry in profile.standardButtonTitles {
+                guard entry.control.isMIDIButton else {
+                    throw ValidationError.invalidStandardButtonTitleControl(
+                        profile: profile.name,
+                        control: entry.control
+                    )
+                }
+                guard titleControls.insert(entry.control).inserted else {
+                    throw ValidationError.duplicateStandardButtonTitle(
+                        profile: profile.name,
+                        control: entry.control
+                    )
+                }
+                guard entry.title.trimmingCharacters(in: .whitespacesAndNewlines).count <= 24 else {
+                    throw ValidationError.standardButtonTitleTooLong(
+                        profile: profile.name,
+                        control: entry.control
+                    )
+                }
             }
             var mappingKeys = Set<MappingKey>()
             for entry in profile.mappings {
@@ -459,6 +605,8 @@ struct XPdConfiguration: Codable, Equatable {
             try validateV2()
         case Self.previousVersion:
             try validateV3()
+        case Self.preTitlesVersion:
+            try validateV4()
         case Self.currentVersion:
             try validate()
         default:
@@ -483,7 +631,10 @@ struct XPdConfiguration: Codable, Equatable {
                         Self.controlIndex($0.control) < Self.controlIndex($1.control)
                     },
                     realm: profile.realm,
-                    midiSettings: Self.sortedMIDISettings(profile.midiSettings)
+                    midiSettings: Self.sortedMIDISettings(profile.midiSettings),
+                    standardButtonTitles: profile.standardButtonTitles.sorted {
+                        Self.controlIndex($0.control) < Self.controlIndex($1.control)
+                    }
                 )
             },
             profileName: profileName,

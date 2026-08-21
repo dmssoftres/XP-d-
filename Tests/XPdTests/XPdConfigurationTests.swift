@@ -46,6 +46,117 @@ final class XPdConfigurationTests: XCTestCase {
         XCTAssertTrue(decoded.showsInputOverlay)
     }
 
+    func testStandardButtonTitlesRoundTripAndSortByControl() throws {
+        let configuration = XPdConfiguration(
+            profiles: [
+                .init(
+                    name: "Global",
+                    mappings: [],
+                    hidBindings: [],
+                    standardButtonTitles: [
+                        .init(control: .k8, title: " Logic Pro "),
+                        .init(control: .k1, title: "Chrome")
+                    ]
+                ),
+                .init(name: "Finder", mappings: [], hidBindings: []),
+                .init(name: "Logic Pro", mappings: [], hidBindings: [])
+            ],
+            profileName: "Global",
+            showsInputOverlay: true
+        )
+
+        let first = try configuration.encodedData()
+        let decoded = try XPdConfiguration.decode(first)
+        XCTAssertEqual(
+            decoded.profiles[0].standardButtonTitles.map(\.control),
+            [.k1, .k8]
+        )
+        XCTAssertEqual(decoded.profiles[0].standardButtonTitles[1].title, " Logic Pro ")
+        XCTAssertEqual(first, try decoded.encodedData())
+    }
+
+    func testVersionFourMigratesToEmptyStandardButtonTitles() throws {
+        let legacy = XPdConfiguration(
+            version: XPdConfiguration.preTitlesVersion,
+            profiles: [
+                .init(name: "Global", mappings: [], hidBindings: []),
+                .init(name: "Finder", mappings: [], hidBindings: [])
+            ],
+            profileName: "Finder",
+            showsInputOverlay: false
+        )
+
+        let upgraded = try XPdConfiguration.decode(JSONEncoder().encode(legacy))
+        XCTAssertEqual(upgraded.version, XPdConfiguration.currentVersion)
+        XCTAssertEqual(upgraded.profiles.map(\.name), ["Global", "Finder"])
+        XCTAssertTrue(upgraded.profiles.allSatisfy { $0.standardButtonTitles.isEmpty })
+        XCTAssertEqual(upgraded.profileName, "Finder")
+    }
+
+    func testStandardButtonTitleValidationRejectsDuplicateNonButtonAndLongEntries() {
+        let duplicate = XPdConfiguration(
+            profiles: [
+                .init(
+                    name: "Global",
+                    mappings: [],
+                    hidBindings: [],
+                    standardButtonTitles: [
+                        .init(control: .k1, title: "One"),
+                        .init(control: .k1, title: "Two")
+                    ]
+                )
+            ],
+            profileName: "Global",
+            showsInputOverlay: true
+        )
+        XCTAssertThrowsError(try duplicate.validate()) { error in
+            XCTAssertEqual(
+                error as? XPdConfiguration.ValidationError,
+                .duplicateStandardButtonTitle(profile: "Global", control: .k1)
+            )
+        }
+
+        let nonButton = XPdConfiguration(
+            profiles: [
+                .init(
+                    name: "Global",
+                    mappings: [],
+                    hidBindings: [],
+                    standardButtonTitles: [.init(control: .wheelCW, title: "Wheel")]
+                )
+            ],
+            profileName: "Global",
+            showsInputOverlay: true
+        )
+        XCTAssertThrowsError(try nonButton.validate()) { error in
+            XCTAssertEqual(
+                error as? XPdConfiguration.ValidationError,
+                .invalidStandardButtonTitleControl(profile: "Global", control: .wheelCW)
+            )
+        }
+
+        let tooLong = XPdConfiguration(
+            profiles: [
+                .init(
+                    name: "Global",
+                    mappings: [],
+                    hidBindings: [],
+                    standardButtonTitles: [
+                        .init(control: .k1, title: String(repeating: "x", count: 25))
+                    ]
+                )
+            ],
+            profileName: "Global",
+            showsInputOverlay: true
+        )
+        XCTAssertThrowsError(try tooLong.validate()) { error in
+            XCTAssertEqual(
+                error as? XPdConfiguration.ValidationError,
+                .standardButtonTitleTooLong(profile: "Global", control: .k1)
+            )
+        }
+    }
+
     func testConfigurationRejectsDuplicateHIDSignatures() {
         let configuration = XPdConfiguration(
             profiles: [

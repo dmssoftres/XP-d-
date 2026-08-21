@@ -34,6 +34,44 @@ final class MappingStoreProfileTests: XCTestCase {
         XCTAssertEqual(store.mapping(for: .k1, gesture: .tap), finder)
     }
 
+    func testStandardButtonTitlesAreProfileSpecificAndReload() {
+        let store = makeStore()
+        store.updateStandardButtonTitle("  Chrome  ", for: .k1)
+        XCTAssertEqual(store.standardButtonTitle(for: .k1), "Chrome")
+
+        store.profileName = "Finder"
+        XCTAssertEqual(store.standardButtonTitle(for: .k1), "")
+        store.updateStandardButtonTitle("Files", for: .k1)
+        XCTAssertEqual(store.standardButtonTitle(for: .k1), "Files")
+
+        let reloaded = makeStore()
+        XCTAssertEqual(reloaded.profileName, "Finder")
+        XCTAssertEqual(reloaded.standardButtonTitle(for: .k1), "Files")
+        reloaded.profileName = "Global"
+        XCTAssertEqual(reloaded.standardButtonTitle(for: .k1), "Chrome")
+    }
+
+    func testStandardButtonTitleEmptyRemovesAndWheelOrMIDIUpdatesAreNoOps() throws {
+        let store = makeStore()
+        store.updateStandardButtonTitle("Chrome", for: .k1)
+        store.updateStandardButtonTitle("   \n", for: .k1)
+        XCTAssertEqual(store.standardButtonTitle(for: .k1), "")
+
+        store.updateStandardButtonTitle("Wheel", for: .wheelCW)
+        XCTAssertEqual(store.standardButtonTitle(for: .wheelCW), "")
+
+        store.updateStandardButtonTitle(String(repeating: "x", count: 25), for: .k1)
+        XCTAssertEqual(store.standardButtonTitle(for: .k1), String(repeating: "x", count: 24))
+
+        _ = try store.addMIDIProfile(named: "Pads")
+        XCTAssertEqual(store.activeRealm, .midi)
+        store.updateStandardButtonTitle("Should not persist", for: .k1)
+        XCTAssertEqual(store.standardButtonTitle(for: .k1), "")
+
+        store.profileName = "Global"
+        XCTAssertEqual(store.standardButtonTitle(for: .k1), String(repeating: "x", count: 24))
+    }
+
     func testAutosaveIsolatedForMappingsAndHIDBindings() {
         let store = makeStore()
         let global = Mapping(action: .noAction, command: "global")
@@ -85,8 +123,10 @@ final class MappingStoreProfileTests: XCTestCase {
 
     func testMultiProfileExportImportAndInvalidImportAreAtomic() throws {
         let source = makeStore()
+        source.updateStandardButtonTitle("Global title", for: .k1)
         source.update(Mapping(action: .noAction, command: "global"), for: .k1, gesture: .tap)
         source.profileName = "Finder"
+        source.updateStandardButtonTitle("Finder title", for: .k1)
         source.update(Mapping(action: .noAction, command: "finder"), for: .k1, gesture: .tap)
         source.selectedControl = .k3
         source.learnSelectedControl()
@@ -102,8 +142,10 @@ final class MappingStoreProfileTests: XCTestCase {
         XCTAssertEqual(target.profileName, "Finder")
         XCTAssertEqual(target.mapping(for: .k1, gesture: .tap).command, "finder")
         XCTAssertEqual(target.hidBinding(for: .k3), "finder-k3")
+        XCTAssertEqual(target.standardButtonTitle(for: .k1), "Finder title")
         target.profileName = "Global"
         XCTAssertEqual(target.mapping(for: .k1, gesture: .tap).command, "global")
+        XCTAssertEqual(target.standardButtonTitle(for: .k1), "Global title")
 
         let invalidGlobal = XPdConfiguration.Profile(
             name: "Global",
@@ -128,6 +170,40 @@ final class MappingStoreProfileTests: XCTestCase {
         let reloaded = makeStore()
         XCTAssertEqual(reloaded.profileName, "Global")
         XCTAssertEqual(reloaded.mapping(for: .k1, gesture: .tap).command, "global")
+        XCTAssertEqual(reloaded.standardButtonTitle(for: .k1), "Global title")
+    }
+
+    func testImportRejectsInvalidStandardButtonTitlesAtomically() throws {
+        let target = makeStore()
+        target.updateStandardButtonTitle("Keep me", for: .k1)
+
+        func invalidData(_ titles: [XPdConfiguration.StandardButtonTitleEntry]) throws -> Data {
+            let profiles = [
+                XPdConfiguration.Profile(name: "Global", mappings: [], hidBindings: [], standardButtonTitles: titles),
+                XPdConfiguration.Profile(name: "Finder", mappings: [], hidBindings: []),
+                XPdConfiguration.Profile(name: "Logic Pro", mappings: [], hidBindings: [])
+            ]
+            return try JSONEncoder().encode(XPdConfiguration(
+                profiles: profiles,
+                profileName: "Global",
+                showsInputOverlay: true
+            ))
+        }
+
+        let invalidPayloads = [
+            try invalidData([
+                .init(control: .k1, title: "One"),
+                .init(control: .k1, title: "Two")
+            ]),
+            try invalidData([.init(control: .wheelCW, title: "Wheel")]),
+            try invalidData([.init(control: .k1, title: String(repeating: "x", count: 25))])
+        ]
+
+        for data in invalidPayloads {
+            XCTAssertFalse(target.importConfiguration(data))
+            XCTAssertEqual(target.standardButtonTitle(for: .k1), "Keep me")
+            XCTAssertEqual(target.profileName, "Global")
+        }
     }
 
     func testWheelCenterSelectorConfirmsHighlightedProfileOnRelease() {
@@ -335,6 +411,59 @@ final class MappingStoreProfileTests: XCTestCase {
         XCTAssertEqual(reloaded.availableProfiles, ["Global", "Finder", "Logic Pro"])
         XCTAssertEqual(reloaded.profileName, "Finder")
         XCTAssertEqual(reloaded.mapping(for: .k1, gesture: .tap), finderMapping)
+    }
+
+    func testVersionFourPersistedProfilesMigrateWithEmptyTitles() throws {
+        struct LegacyState: Codable {
+            let mappings: [MappingKey: Mapping]
+            let hidBindings: [RemoteControl: String]
+            let realm: ProfileRealm
+            let midiSettings: MIDIProfileSettings?
+        }
+        struct LegacyProfile: Codable {
+            let name: String
+            let state: LegacyState
+        }
+        struct LegacyDocument: Codable {
+            let version: Int
+            let profiles: [LegacyProfile]
+            let activeProfileName: String
+            let activeRealm: ProfileRealm
+            let lastStandardProfileName: String?
+            let lastMIDIProfileName: String?
+            let midiLocked: Bool
+            let workspaceLockControl: RemoteControl
+        }
+
+        let legacy = LegacyDocument(
+            version: XPdConfiguration.preTitlesVersion,
+            profiles: XPdConfiguration.defaultProfileNames.map {
+                LegacyProfile(
+                    name: $0,
+                    state: LegacyState(
+                        mappings: [:],
+                        hidBindings: [:],
+                        realm: .standard,
+                        midiSettings: nil
+                    )
+                )
+            },
+            activeProfileName: "Finder",
+            activeRealm: .standard,
+            lastStandardProfileName: "Finder",
+            lastMIDIProfileName: nil,
+            midiLocked: false,
+            workspaceLockControl: .k3
+        )
+        defaults.set(try JSONEncoder().encode(legacy), forKey: "XPd.profiles.v4")
+
+        let store = makeStore()
+        XCTAssertEqual(store.profileName, "Finder")
+        XCTAssertEqual(store.standardButtonTitle(for: .k1), "")
+        store.updateStandardButtonTitle("Migrated", for: .k1)
+
+        let reloaded = makeStore()
+        XCTAssertEqual(reloaded.standardButtonTitle(for: .k1), "Migrated")
     }
 
     func testDynamicImportExportAndVersionTwoDocumentUpgrade() throws {

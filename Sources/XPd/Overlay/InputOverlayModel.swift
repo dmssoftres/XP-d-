@@ -101,17 +101,25 @@ struct MIDIOverlayPresentation: Equatable {
     }
 }
 
+struct InputOverlayStatusNotice: Equatable {
+    let title: String
+    let message: String
+    let systemImage: String
+}
+
 @Observable
 @MainActor
 final class InputOverlayModel {
     private(set) var entries: [InputOverlayEntry] = []
     private(set) var profileSelection: ProfileOverlaySelection?
     private(set) var midiPresentation: MIDIOverlayPresentation?
+    private(set) var statusNotice: InputOverlayStatusNotice?
     var midiState: MIDIOverlayPresentation? { midiPresentation }
     var isEnabled = true
     private(set) var displayDuration: TimeInterval
     @ObservationIgnored var visibilityDidChange: ((Bool) -> Void)?
     @ObservationIgnored private var midiDismissalTimer: Timer?
+    @ObservationIgnored private var statusNoticeDismissalTimer: Timer?
 
     init(displayDuration: TimeInterval = 4) {
         self.displayDuration = displayDuration
@@ -189,6 +197,9 @@ final class InputOverlayModel {
         summary: String? = nil
     ) {
         guard isEnabled else { return }
+        statusNoticeDismissalTimer?.invalidate()
+        statusNoticeDismissalTimer = nil
+        statusNotice = nil
         midiPresentation = MIDIOverlayPresentation(
             profileName: profileName,
             layer: layer,
@@ -207,16 +218,45 @@ final class InputOverlayModel {
         visibilityDidChange?(hasVisibleContent)
     }
 
+    func showStatusNotice(title: String, message: String, systemImage: String) {
+        guard isEnabled else { return }
+        statusNotice = InputOverlayStatusNotice(
+            title: title,
+            message: message,
+            systemImage: systemImage
+        )
+        visibilityDidChange?(true)
+        statusNoticeDismissalTimer?.invalidate()
+        let timer = Timer(timeInterval: displayDuration, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.clearStatusNotice()
+            }
+        }
+        statusNoticeDismissalTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    func clearStatusNotice() {
+        guard statusNotice != nil else { return }
+        statusNoticeDismissalTimer?.invalidate()
+        statusNoticeDismissalTimer = nil
+        statusNotice = nil
+        visibilityDidChange?(hasVisibleContent)
+    }
+
     func reset() {
         entries.removeAll()
         midiDismissalTimer?.invalidate()
         midiDismissalTimer = nil
         midiPresentation = nil
+        statusNoticeDismissalTimer?.invalidate()
+        statusNoticeDismissalTimer = nil
+        statusNotice = nil
         visibilityDidChange?(hasVisibleContent)
     }
 
     private var hasVisibleContent: Bool {
-        profileSelection != nil || midiPresentation != nil || !entries.isEmpty
+        profileSelection != nil || midiPresentation != nil || statusNotice != nil || !entries.isEmpty
     }
 
     private func scheduleMIDIDismissal() {

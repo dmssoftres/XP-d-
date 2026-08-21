@@ -354,7 +354,8 @@ struct RemoteView: View {
      remains the same compact hardware view in Standard profiles.
      */
     private func standardKeyButton(_ control: RemoteControl, height: CGFloat) -> some View {
-        Button {
+        let title = store.standardButtonTitle(for: control)
+        return Button {
             store.selectedControl = control
         } label: {
             ZStack(alignment: .bottom) {
@@ -362,6 +363,23 @@ struct RemoteView: View {
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(keyLabelColor(control))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                if !title.isEmpty {
+                    VStack(spacing: 0) {
+                        Text(title)
+                            .font(.system(size: 8.5, weight: .semibold))
+                            .foregroundStyle(keyLabelColor(control))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .minimumScaleFactor(0.65)
+                            .frame(maxWidth: .infinity)
+                            .padding(.horizontal, 3)
+                            .padding(.top, 4)
+
+                        Spacer(minLength: 0)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                }
 
                 if let appIcon = loadedApplicationIcon(for: control) {
                     Image(nsImage: appIcon)
@@ -379,7 +397,7 @@ struct RemoteView: View {
             selected: store.selectedControl == control,
             live: store.liveControl == control
         ))
-        .accessibilityLabel(control.rawValue)
+        .accessibilityLabel(title.isEmpty ? control.rawValue : control.rawValue + ", " + title)
     }
 
     private func keyLabelColor(_ control: RemoteControl) -> Color {

@@ -80,4 +80,23 @@ final class InputOverlayModelTests: XCTestCase {
 
         XCTAssertNil(model.midiPresentation)
     }
+
+    @MainActor
+    func testStatusNoticeShowsAndClears() {
+        let model = InputOverlayModel()
+
+        model.showStatusNotice(
+            title: "XP[d] UNLOCKED",
+            message: "Standard mappings active",
+            systemImage: "lock.open"
+        )
+
+        XCTAssertEqual(model.statusNotice?.title, "XP[d] UNLOCKED")
+        XCTAssertEqual(model.statusNotice?.message, "Standard mappings active")
+        XCTAssertEqual(model.statusNotice?.systemImage, "lock.open")
+
+        model.clearStatusNotice()
+
+        XCTAssertNil(model.statusNotice)
+    }
 }

@@ -146,6 +146,26 @@ final class MappingStoreGestureTests: XCTestCase {
         XCTAssertEqual(executed, ["hold"])
     }
 
+    func testKeyboardShortcutCaptureConsumesRemoteKPressesWithoutExecutingMappings() {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeStore(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+        store.update(Mapping(action: .openApplication, command: "normal mapping"), for: .k1, gesture: .tap)
+        var captured: [RemoteControl] = []
+
+        store.beginKeyboardShortcutCapture { captured.append($0) }
+        store.simulateHIDInputForTesting(k1Signature)
+        store.simulateHIDInputForTesting(nil)
+        scheduler.advance(by: 1)
+        store.endKeyboardShortcutCapture()
+
+        XCTAssertEqual(captured, [.k1])
+        XCTAssertTrue(executed.isEmpty)
+    }
+
     func testDifferentDownReportCancelsDisplacedLiveButton() {
         let scheduler = TestScheduler()
         var executed: [String] = []

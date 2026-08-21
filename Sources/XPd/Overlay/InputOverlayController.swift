@@ -120,6 +120,12 @@ final class InputOverlayController {
         }
     }
 
+    func showStatusNotice(title: String, message: String, systemImage: String) {
+        guard model.isEnabled else { return }
+        ensureVisible()
+        model.showStatusNotice(title: title, message: message, systemImage: systemImage)
+    }
+
     private func ensureVisible() {
         visibilityGeneration &+= 1
         panel.alphaValue = 1
