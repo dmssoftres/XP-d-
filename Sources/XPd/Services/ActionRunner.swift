@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import CoreGraphics
 import Foundation
 
 struct ActionExecutionResult: Equatable {
@@ -76,7 +77,12 @@ final class ActionRunner {
         sensitivity: Double,
         completion: @escaping @MainActor (ActionExecutionResult) -> Void
     ) {
-        guard hasAccessibilityAccess(prompt: true) else {
+        // Posting a synthetic scroll event is a different capability from
+        // reading another application's AX window tree.  Do not use
+        // AXIsProcessTrustedWithOptions here: it can cause the system access
+        // prompt to be evaluated for every wheel detent.  The preflight check
+        // is silent and is the API that matches CGEvent.post's permission.
+        guard hasPostEventAccess else {
             completion(.failure("Allow XP[d] in Accessibility, then rotate again"))
             return
         }
@@ -97,6 +103,31 @@ final class ActionRunner {
 
         event.post(tap: .cghidEventTap)
         completion(.success(direction == .up ? "Scrolled up" : "Scrolled down"))
+    }
+
+    func requestAccessibilityAccess() -> Bool {
+        // This is only called by the explicit inspector button.  It is the
+        // sole place where XP[d] asks macOS to show an access prompt.
+        let postEventAccess = requestPostEventAccess()
+        let windowAccess = AXIsProcessTrustedWithOptions([
+            "AXTrustedCheckOptionPrompt": true
+        ] as CFDictionary)
+        return postEventAccess && windowAccess
+    }
+
+    func openAccessibilitySettings() {
+        guard let url = URL(
+            string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+        ) else { return }
+        workspace.open(url)
+    }
+
+    var canPostScrollEvents: Bool {
+        hasPostEventAccess
+    }
+
+    var canControlApplicationWindows: Bool {
+        hasAccessibilityAccess(prompt: false)
     }
 
     private func runningApplication(matching requestedName: String) -> NSRunningApplication? {
@@ -150,7 +181,10 @@ final class ActionRunner {
         _ application: NSRunningApplication,
         requestedName: String
     ) -> ActionExecutionResult {
-        guard hasAccessibilityAccess(prompt: true) else {
+        // A physical button press is not an explicit permission request.  A
+        // failed preflight should produce a stable status message, not a
+        // repeated system prompt on every press.
+        guard hasAccessibilityAccess(prompt: false) else {
             return .failure("Allow XP[d] in Accessibility, then press again")
         }
 
@@ -164,7 +198,7 @@ final class ActionRunner {
         _ application: NSRunningApplication,
         requestedName: String
     ) -> ActionExecutionResult {
-        guard hasAccessibilityAccess(prompt: true) else {
+        guard hasAccessibilityAccess(prompt: false) else {
             return .failure("Allow XP[d] in Accessibility, then press again")
         }
 
@@ -185,7 +219,10 @@ final class ActionRunner {
         promptForAccess: Bool
     ) -> ActionExecutionResult {
         let name = displayName(for: application, fallback: requestedName)
-        let hasAccess = hasAccessibilityAccess(prompt: promptForAccess)
+        // Restoration may be reached from a physical button press.  Keep the
+        // check silent for all action execution; the inspector's explicit
+        // access button is the only place that may prompt macOS.
+        let hasAccess = hasAccessibilityAccess(prompt: false)
         var restoreFailed = false
 
         if hasAccess, case .failure = setMinimized(false, for: application) {
@@ -210,6 +247,17 @@ final class ActionRunner {
             "AXTrustedCheckOptionPrompt": prompt
         ] as CFDictionary
         return AXIsProcessTrustedWithOptions(options)
+    }
+
+    private var hasPostEventAccess: Bool {
+        CGPreflightPostEventAccess()
+    }
+
+    private func requestPostEventAccess() -> Bool {
+        if hasPostEventAccess {
+            return true
+        }
+        return CGRequestPostEventAccess()
     }
 
     private func setMinimized(

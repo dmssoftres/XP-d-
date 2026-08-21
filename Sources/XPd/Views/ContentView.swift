@@ -21,11 +21,17 @@ struct ContentView: View {
     private var header: some View {
         HStack(spacing: 12) {
             Circle()
-                .fill(store.hid.isConnected ? Color.green : Color.secondary.opacity(0.35))
+                .fill(connectionColor)
                 .frame(width: 9, height: 9)
+                .accessibilityLabel(deviceStatus)
             VStack(alignment: .leading, spacing: 2) {
-                Text("XP[d]")
-                    .font(.headline)
+                HStack(alignment: .firstTextBaseline, spacing: 5) {
+                    Text("XP[d]")
+                        .font(.headline)
+                    Text("v\(appVersion)")
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.secondary)
+                }
                 Text(deviceStatus)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -47,5 +53,16 @@ struct ContentView: View {
         if !store.hid.isConnected { return "Waiting for Shortcut Remote" }
         if !store.hid.hasInputAccess { return "Input Monitoring permission required" }
         return "Shortcut Remote connected"
+    }
+
+    private var connectionColor: Color {
+        if !store.hid.isConnected { return .red }
+        if !store.hid.hasInputAccess { return .orange }
+        return .green
+    }
+
+    private var appVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            ?? "0.1.0"
     }
 }

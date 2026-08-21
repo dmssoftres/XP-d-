@@ -133,7 +133,7 @@ final class InputOverlayModel {
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.entries.removeAll { $0.id == id }
-                self.visibilityDidChange?(!self.entries.isEmpty)
+                self.visibilityDidChange?(self.hasVisibleContent)
             }
         }
         RunLoop.main.add(expirationTimer, forMode: .common)
@@ -148,14 +148,20 @@ final class InputOverlayModel {
             profiles: profiles,
             selectedProfile: selectedProfile
         )
+        visibilityDidChange?(true)
     }
 
     func hideProfiles() {
         profileSelection = nil
+        visibilityDidChange?(hasVisibleContent)
     }
 
     func reset() {
         entries.removeAll()
-        visibilityDidChange?(false)
+        visibilityDidChange?(hasVisibleContent)
+    }
+
+    private var hasVisibleContent: Bool {
+        profileSelection != nil || !entries.isEmpty
     }
 }

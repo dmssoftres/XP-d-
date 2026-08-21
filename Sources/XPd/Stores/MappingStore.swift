@@ -84,8 +84,8 @@ final class MappingStore {
     private let inputOverlayDurationDefaultsKey = "XPd.inputOverlayDuration.v1"
     private let wheelSensitivityDefaultsKey = "XPd.wheelSensitivity.v1"
     private var liveInputGeneration = 0
-    private var profileSelectorGeneration = 0
     private var isProfileSelectorVisible = false
+    private var pendingProfileName: String?
     private var actionPressesInFlight: Set<RemoteControl> = []
     private let actionRunner = ActionRunner()
     @ObservationIgnored private lazy var inputOverlay = InputOverlayController(displayDuration: inputOverlayDuration)
@@ -245,6 +245,26 @@ final class MappingStore {
         )
     }
 
+    func requestAccessibilityAccess() {
+        if actionRunner.requestAccessibilityAccess() {
+            lastActionResult = .success("Accessibility access is enabled")
+        } else {
+            lastActionResult = .failure("Enable XP[d] in Accessibility, then relaunch")
+        }
+    }
+
+    func openAccessibilitySettings() {
+        actionRunner.openAccessibilitySettings()
+    }
+
+    var canPostScrollEvents: Bool {
+        actionRunner.canPostScrollEvents
+    }
+
+    var canControlApplicationWindows: Bool {
+        actionRunner.canControlApplicationWindows
+    }
+
     private func handleHIDInput(_ signature: String?) {
         liveInputGeneration += 1
         let generation = liveInputGeneration
@@ -297,8 +317,6 @@ final class MappingStore {
             return
         }
 
-        showOverlayPress(for: matched)
-
         if matched.isWheelRotation {
             actionRunner.scroll(
                 direction: matched == .wheelCW ? .down : .up,
@@ -306,9 +324,11 @@ final class MappingStore {
             ) { [weak self] result in
                 self?.lastActionResult = result
             }
-            releaseWheelAfterDelay(matched, generation: generation)
+            releaseWheelAfterDelay(generation: generation)
             return
         }
+
+        showOverlayPress(for: matched)
 
         if !actionPressesInFlight.contains(matched) {
             actionPressesInFlight.insert(matched)
@@ -332,10 +352,7 @@ final class MappingStore {
         }
     }
 
-    private func releaseWheelAfterDelay(_ control: RemoteControl, generation: Int) {
-        if showsInputOverlay {
-            inputOverlay.release(control: control)
-        }
+    private func releaseWheelAfterDelay(generation: Int) {
         Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(180))
             guard let self, self.liveInputGeneration == generation else { return }
@@ -344,46 +361,35 @@ final class MappingStore {
     }
 
     private func toggleProfileSelector() {
-        profileSelectorGeneration += 1
         if isProfileSelectorVisible {
+            if let pendingProfileName {
+                profileName = pendingProfileName
+            }
             isProfileSelectorVisible = false
+            pendingProfileName = nil
             inputOverlay.hideProfileSelector()
             liveControl = nil
         } else {
             isProfileSelectorVisible = true
+            pendingProfileName = profileName
             inputOverlay.showProfileSelector(
                 profiles: Self.availableProfiles,
                 selectedProfile: profileName
             )
-            scheduleProfileSelectorDismissal()
         }
     }
 
     private func rotateProfile(_ direction: Int) {
         guard !Self.availableProfiles.isEmpty else { return }
-        let currentIndex = Self.availableProfiles.firstIndex(of: profileName) ?? 0
+        let highlightedProfile = pendingProfileName ?? profileName
+        let currentIndex = Self.availableProfiles.firstIndex(of: highlightedProfile) ?? 0
         let count = Self.availableProfiles.count
         let nextIndex = (currentIndex + direction + count) % count
-        profileName = Self.availableProfiles[nextIndex]
+        pendingProfileName = Self.availableProfiles[nextIndex]
         inputOverlay.showProfileSelector(
             profiles: Self.availableProfiles,
-            selectedProfile: profileName
+            selectedProfile: pendingProfileName ?? profileName
         )
-        profileSelectorGeneration += 1
-        scheduleProfileSelectorDismissal()
-    }
-
-    private func scheduleProfileSelectorDismissal() {
-        let generation = profileSelectorGeneration
-        Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(2.4))
-            guard let self,
-                  self.isProfileSelectorVisible,
-                  self.profileSelectorGeneration == generation else { return }
-            self.isProfileSelectorVisible = false
-            self.inputOverlay.hideProfileSelector()
-            self.liveControl = nil
-        }
     }
 
     private func showOverlayPress(for control: RemoteControl) {
