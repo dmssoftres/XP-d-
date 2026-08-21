@@ -35,6 +35,15 @@
 - **Do not:** partially apply invalid content or bypass validation.
 - **Related files/decisions:** `Sources/XPd/Models/XPdConfiguration.swift`, `Tests/XPdTests/XPdConfigurationTests.swift`
 
+## A profile cannot be added or removed
+
+- **Observed behavior:** Add reports an error, or a delete control is unavailable.
+- **Likely causes:** the name is empty, longer than 40 characters, or duplicates another profile case-insensitively; Global is intentionally protected.
+- **Verification:** trim the proposed name and compare it with the existing profile list; confirm the target is not Global.
+- **Fix:** choose a unique valid name, or delete a non-Global profile after confirmation.
+- **Do not:** edit `UserDefaults` manually or remove Global from exported JSON.
+- **Related files/decisions:** `Sources/XPd/Stores/MappingStore.swift`, `Sources/XPd/Views/ContentView.swift`
+
 ## Wheel-center profile selector does not open
 
 - **Observed behavior:** the first center press does not keep the profile selector visible, or the second press does not activate the highlighted profile.

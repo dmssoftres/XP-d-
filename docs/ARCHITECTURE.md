@@ -13,7 +13,7 @@ No backend, database, cloud account, telemetry service, or third-party package d
 | `XPdApp` / `AppDelegate` | Application lifecycle, menu-bar/window setup, initial input permission request | SwiftUI, AppKit, IOKit permission API | Unknown |
 | `HIDService` | Match `10429:514`, manage HID lifecycle, publish input reports/wheel values, and combine exact HID/BLE battery sources | IOKit HID callbacks/properties | Unknown |
 | `ShortcutRemoteBatteryMonitor` | Verify the target BLE PnP identity, enable its two notify-only vendor characteristics, and parse exact battery packets | CoreBluetooth | Unknown |
-| `MappingStore` | Central active-profile state, independent profile mappings/HID bindings, migration, persistence, imports, action dispatch | SwiftUI observable state, `UserDefaults` | Unknown |
+| `MappingStore` | Ordered dynamic profiles, active-profile mappings/HID bindings, migration, persistence, imports, selector state, action dispatch | SwiftUI observable state, `UserDefaults` | Unknown |
 | `ActionRunner` | Execute mapped shortcuts, scrolling, app actions, and commands; permission preflight/settings | Core Graphics, AppKit, ApplicationServices, process APIs | Unknown |
 | Configuration models/document | Codable configuration schema, validation, JSON import/export | Foundation, SwiftUI `FileDocument` | Unknown |
 | `ContentView`, `RemoteView`, `MappingInspector` | Hardware editor, mapping controls, live status, import/export | SwiftUI | Unknown |
@@ -24,9 +24,9 @@ No backend, database, cloud account, telemetry service, or third-party package d
 
 Shortcut Remote HID value/report → `HIDService` → `MappingStore` control/gesture resolution → persisted mapping lookup → `ActionRunner` side effect and input-overlay presentation.
 
-Configuration UI edits → active profile in `MappingStore` → one version-2 profile collection in `UserDefaults`. A one-time migration places legacy shared mappings and HID bindings into Global. Export builds a complete three-profile JSON document; import validates the exact profile set and every profile's entries before one replacement.
+Configuration UI/profile-manager edits → `MappingStore` → one ordered version-3 profile collection in `UserDefaults`. Version-2 fixed-profile persistence migrates in Global/Finder/Logic Pro order; older shared mappings and HID bindings migrate into Global. Export builds a complete ordered JSON document; version-2 exports upgrade on decode, and imports validate Global, names, active profile, mappings, and bindings before one replacement.
 
-Wheel center → open persistent selector → wheel rotation updates only the pending highlight → second center press activates the highlighted profile and loads its mappings/HID bindings.
+Wheel center → open persistent selector with current profile order → wheel rotation updates only the pending highlight → second center press activates the highlighted profile and loads its mappings/HID bindings. Adding, deleting, or importing profiles closes stale selector state.
 
 Matching HID connection → BLE PnP read/verification → notify-only FFE0/0002 plus FFE0/0003 subscription → validated `02 F2 01 <percent>` packet → `HIDService` battery state → header and menu-bar UI. Disconnect, identity mismatch, Bluetooth loss, or invalid data clears/withholds the BLE value.
 

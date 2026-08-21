@@ -94,7 +94,7 @@ final class MappingStoreProfileTests: XCTestCase {
 
         let data = try XCTUnwrap(source.exportConfiguration())
         let decoded = try XPdConfiguration.decode(data)
-        XCTAssertEqual(decoded.profiles.map(\.name), MappingStore.availableProfiles)
+        XCTAssertEqual(decoded.profiles.map(\.name), source.availableProfiles)
         XCTAssertEqual(decoded.profiles.first(where: { $0.name == "Finder" })?.hidBindings.count, 13)
 
         let target = makeStore()
@@ -153,6 +153,154 @@ final class MappingStoreProfileTests: XCTestCase {
         store.simulateHIDInputForTesting("wheel:center")
         XCTAssertTrue(store.isProfileSelectorVisibleForTesting)
         XCTAssertEqual(store.profileName, "Finder")
+    }
+
+    func testNewProfilesTrimAndPersistIndependentState() throws {
+        let store = makeStore()
+        let addedName = try store.addProfile(named: "  Studio  ")
+        XCTAssertEqual(addedName, "Studio")
+        XCTAssertEqual(store.availableProfiles, ["Global", "Finder", "Logic Pro", "Studio"])
+        XCTAssertEqual(store.profileName, "Studio")
+
+        let studioMapping = Mapping(action: .noAction, command: "studio")
+        store.update(studioMapping, for: .k1, gesture: .tap)
+        store.selectedControl = .k2
+        store.learnSelectedControl()
+        store.simulateHIDInputForTesting("studio-k2")
+
+        store.profileName = "Global"
+        XCTAssertNotEqual(store.mapping(for: .k1, gesture: .tap), studioMapping)
+        XCTAssertNotEqual(store.hidBinding(for: .k2), "studio-k2")
+
+        let reloaded = makeStore()
+        XCTAssertEqual(reloaded.availableProfiles, ["Global", "Finder", "Logic Pro", "Studio"])
+        reloaded.profileName = "Studio"
+        XCTAssertEqual(reloaded.mapping(for: .k1, gesture: .tap), studioMapping)
+        XCTAssertEqual(reloaded.hidBinding(for: .k2), "studio-k2")
+    }
+
+    func testProfileNameValidationAndGlobalProtection() throws {
+        let store = makeStore()
+        XCTAssertThrowsError(try store.addProfile(named: "   ")) { error in
+            XCTAssertEqual(error as? MappingStore.ProfileError, .invalidName("   "))
+        }
+        XCTAssertThrowsError(try store.addProfile(named: String(repeating: "x", count: 41)))
+        _ = try store.addProfile(named: "Studio")
+        XCTAssertThrowsError(try store.addProfile(named: " studio ")) { error in
+            XCTAssertEqual(error as? MappingStore.ProfileError, .duplicateName("studio"))
+        }
+        XCTAssertThrowsError(try store.deleteProfile(named: "Global")) { error in
+            XCTAssertEqual(error as? MappingStore.ProfileError, .cannotDeleteGlobal)
+        }
+    }
+
+    func testDeletingInactiveAndActiveProfilesPreservesFallback() throws {
+        let store = makeStore()
+        _ = try store.addProfile(named: "Inactive")
+        store.profileName = "Global"
+        let globalMapping = Mapping(action: .noAction, command: "global")
+        store.update(globalMapping, for: .k1, gesture: .tap)
+        try store.deleteProfile(named: "Inactive")
+        XCTAssertEqual(store.profileName, "Global")
+        XCTAssertEqual(store.mapping(for: .k1, gesture: .tap), globalMapping)
+
+        _ = try store.addProfile(named: "Active")
+        XCTAssertEqual(store.profileName, "Active")
+        try store.deleteProfile(named: "Active")
+        XCTAssertEqual(store.profileName, "Global")
+        XCTAssertEqual(store.mapping(for: .k1, gesture: .tap), globalMapping)
+        XCTAssertFalse(store.availableProfiles.contains("Active"))
+
+        let reloaded = makeStore()
+        XCTAssertEqual(reloaded.profileName, "Global")
+        XCTAssertFalse(reloaded.availableProfiles.contains("Active"))
+    }
+
+    func testVersionTwoPersistedProfilesMigrateInOrderAndKeepActiveProfile() throws {
+        struct LegacyState: Codable {
+            let mappings: [MappingKey: Mapping]
+            let hidBindings: [RemoteControl: String]
+        }
+        let globalMapping = Mapping(action: .noAction, command: "legacy-global")
+        let finderMapping = Mapping(action: .noAction, command: "legacy-finder")
+        let payload = [
+            "Finder": LegacyState(mappings: [MappingKey(control: .k1, gesture: .tap): finderMapping], hidBindings: [.k1: "finder"]),
+            "Global": LegacyState(mappings: [MappingKey(control: .k1, gesture: .tap): globalMapping], hidBindings: [.k1: "global"]),
+            "Logic Pro": LegacyState(mappings: [:], hidBindings: [:])
+        ]
+        defaults.set(try JSONEncoder().encode(payload), forKey: "XPd.profiles.v2")
+        defaults.set("Finder", forKey: "XPd.profileName.v1")
+
+        let store = makeStore()
+        XCTAssertEqual(store.availableProfiles, ["Global", "Finder", "Logic Pro"])
+        XCTAssertEqual(store.profileName, "Finder")
+        XCTAssertEqual(store.mapping(for: .k1, gesture: .tap), finderMapping)
+        XCTAssertEqual(store.hidBinding(for: .k1), "finder")
+        store.profileName = "Global"
+        XCTAssertEqual(store.mapping(for: .k1, gesture: .tap), globalMapping)
+
+        store.profileName = "Finder"
+        let reloaded = makeStore()
+        XCTAssertEqual(reloaded.availableProfiles, ["Global", "Finder", "Logic Pro"])
+        XCTAssertEqual(reloaded.profileName, "Finder")
+        XCTAssertEqual(reloaded.mapping(for: .k1, gesture: .tap), finderMapping)
+    }
+
+    func testDynamicImportExportAndVersionTwoDocumentUpgrade() throws {
+        let source = makeStore()
+        try source.addProfile(named: "Studio")
+        source.update(Mapping(action: .noAction, command: "studio"), for: .k4, gesture: .tap)
+        let data = try XCTUnwrap(source.exportConfiguration())
+        let decoded = try XPdConfiguration.decode(data)
+        XCTAssertEqual(decoded.version, XPdConfiguration.currentVersion)
+        XCTAssertEqual(decoded.profiles.map(\.name), source.availableProfiles)
+        XCTAssertEqual(decoded.profiles.last?.name, "Studio")
+
+        defaults.removePersistentDomain(forName: suiteName)
+        let target = makeStore()
+        XCTAssertTrue(target.importConfiguration(data))
+        XCTAssertEqual(target.availableProfiles, ["Global", "Finder", "Logic Pro", "Studio"])
+        XCTAssertEqual(target.profileName, "Studio")
+        XCTAssertEqual(target.mapping(for: .k4, gesture: .tap).command, "studio")
+
+        let v2 = XPdConfiguration(
+            version: XPdConfiguration.legacyVersion,
+            profiles: XPdConfiguration.defaultProfileNames.map {
+                .init(name: $0, mappings: [], hidBindings: [])
+            },
+            profileName: "Finder",
+            showsInputOverlay: false
+        )
+        let upgraded = try XPdConfiguration.decode(JSONEncoder().encode(v2))
+        XCTAssertEqual(upgraded.version, XPdConfiguration.currentVersion)
+        XCTAssertEqual(upgraded.profiles.map(\.name), XPdConfiguration.defaultProfileNames)
+        XCTAssertEqual(upgraded.profileName, "Finder")
+    }
+
+    func testDynamicWheelOrderAndStructuralChangesResetSelector() throws {
+        let store = makeStore()
+        _ = try store.addProfile(named: "Studio")
+        store.profileName = "Logic Pro"
+
+        store.simulateHIDInputForTesting("wheel:center")
+        store.simulateHIDInputForTesting("wheel:+")
+        XCTAssertTrue(store.isProfileSelectorVisibleForTesting)
+        XCTAssertEqual(store.pendingProfileNameForTesting, "Studio")
+        XCTAssertEqual(store.profileName, "Logic Pro")
+
+        store.simulateHIDInputForTesting("wheel:center")
+        XCTAssertEqual(store.profileName, "Studio")
+        store.simulateHIDInputForTesting("wheel:center")
+        try store.deleteProfile(named: "Studio")
+        XCTAssertFalse(store.isProfileSelectorVisibleForTesting)
+        XCTAssertNil(store.pendingProfileNameForTesting)
+        XCTAssertEqual(store.profileName, "Global")
+
+        store.simulateHIDInputForTesting("wheel:center")
+        _ = try store.addProfile(named: "Editing")
+        XCTAssertFalse(store.isProfileSelectorVisibleForTesting)
+        XCTAssertNil(store.pendingProfileNameForTesting)
+        XCTAssertEqual(store.profileName, "Editing")
     }
 
     private func makeStore() -> MappingStore {

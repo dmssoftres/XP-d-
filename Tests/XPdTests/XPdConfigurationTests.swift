@@ -71,4 +71,41 @@ final class XPdConfigurationTests: XCTestCase {
             )
         }
     }
+
+    func testDynamicProfilesPreserveOrderAndRejectInvalidNames() throws {
+        let configuration = XPdConfiguration(
+            profiles: [
+                .init(name: "Global", mappings: [], hidBindings: []),
+                .init(name: "Studio", mappings: [], hidBindings: []),
+                .init(name: "Logic Pro", mappings: [], hidBindings: [])
+            ],
+            profileName: "Studio",
+            showsInputOverlay: true
+        )
+        let decoded = try XPdConfiguration.decode(try configuration.encodedData())
+        XCTAssertEqual(decoded.profiles.map(\.name), ["Global", "Studio", "Logic Pro"])
+        XCTAssertEqual(decoded.profileName, "Studio")
+
+        let duplicate = XPdConfiguration(
+            profiles: [
+                .init(name: "Global", mappings: [], hidBindings: []),
+                .init(name: "studio", mappings: [], hidBindings: []),
+                .init(name: "Studio", mappings: [], hidBindings: [])
+            ],
+            profileName: "Global",
+            showsInputOverlay: true
+        )
+        XCTAssertThrowsError(try duplicate.validate()) { error in
+            XCTAssertEqual(error as? XPdConfiguration.ValidationError, .duplicateProfileName("Studio"))
+        }
+
+        let padded = XPdConfiguration(
+            profiles: [.init(name: " Global ", mappings: [], hidBindings: [])],
+            profileName: " Global ",
+            showsInputOverlay: true
+        )
+        XCTAssertThrowsError(try padded.validate()) { error in
+            XCTAssertEqual(error as? XPdConfiguration.ValidationError, .invalidProfileName(" Global "))
+        }
+    }
 }

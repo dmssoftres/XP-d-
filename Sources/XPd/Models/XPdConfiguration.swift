@@ -2,12 +2,13 @@ import Foundation
 
 /// The portable, versioned configuration format used by XP[d].
 ///
-/// Arrays are used instead of dictionaries deliberately: they make the file
-/// format explicit, allow duplicate keys to be rejected on import, and can be
-/// sorted before encoding for stable diffs.
+/// Arrays are used instead of dictionaries deliberately: profile order is
+/// meaningful to the wheel selector, while mapping/HID entries can be sorted
+/// before encoding for stable diffs.
 struct XPdConfiguration: Codable, Equatable {
-    static let currentVersion = 2
-    static let availableProfileNames = ["Global", "Finder", "Logic Pro"]
+    static let currentVersion = 3
+    static let legacyVersion = 2
+    static let defaultProfileNames = ["Global", "Finder", "Logic Pro"]
 
     let version: Int
     let profiles: [Profile]
@@ -56,6 +57,7 @@ struct XPdConfiguration: Codable, Equatable {
         case duplicateProfileName(String)
         case unknownProfileName(String)
         case missingProfileName(String)
+        case invalidProfileName(String)
         case invalidActiveProfile(String)
         case duplicateMappingKey(profile: String, control: RemoteControl, gesture: GestureKind)
         case duplicateHIDControl(profile: String, control: RemoteControl)
@@ -72,6 +74,8 @@ struct XPdConfiguration: Codable, Equatable {
                 return "Unknown profile: \(name)."
             case let .missingProfileName(name):
                 return "Missing profile: \(name)."
+            case let .invalidProfileName(name):
+                return "Profile names must be trimmed, non-empty, and at most 40 characters: \(name)."
             case let .invalidActiveProfile(name):
                 return "Invalid active profile: \(name)."
             case let .duplicateMappingKey(profile, control, gesture):
@@ -98,17 +102,66 @@ struct XPdConfiguration: Codable, Equatable {
         self.showsInputOverlay = showsInputOverlay
     }
 
-    /// Decodes and validates the entire document before returning it.
+    /// Decodes and validates the entire document before returning it. Version
+    /// 2 exports are validated using the historical exact profile set and
+    /// returned as an upgraded v3 value.
     static func decode(_ data: Data) throws -> XPdConfiguration {
         let decoder = JSONDecoder()
-        let configuration = try decoder.decode(XPdConfiguration.self, from: data)
-        try configuration.validate()
-        return configuration
+        let version = try decoder.decode(VersionEnvelope.self, from: data).version
+        switch version {
+        case currentVersion:
+            let configuration = try decoder.decode(XPdConfiguration.self, from: data)
+            try configuration.validate()
+            return configuration
+        case legacyVersion:
+            let legacy = try decoder.decode(XPdConfiguration.self, from: data)
+            try legacy.validateV2()
+            return XPdConfiguration(
+                version: currentVersion,
+                profiles: legacy.profiles,
+                profileName: legacy.profileName,
+                showsInputOverlay: legacy.showsInputOverlay
+            )
+        default:
+            throw ValidationError.unsupportedVersion(version)
+        }
     }
 
     /// Validates semantic constraints that Codable cannot express itself.
     func validate() throws {
         guard version == Self.currentVersion else {
+            throw ValidationError.unsupportedVersion(version)
+        }
+        guard !profiles.isEmpty else {
+            throw ValidationError.missingProfileName("Global")
+        }
+
+        var profileNames = Set<String>()
+        for profile in profiles {
+            let trimmedName = profile.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedName.isEmpty, trimmedName.count <= 40, trimmedName == profile.name else {
+                throw ValidationError.invalidProfileName(profile.name)
+            }
+            let foldedName = Self.profileNameComparisonKey(trimmedName)
+            guard profileNames.insert(foldedName).inserted else {
+                throw ValidationError.duplicateProfileName(profile.name)
+            }
+        }
+
+        guard profiles.contains(where: { $0.name == "Global" }) else {
+            throw ValidationError.missingProfileName("Global")
+        }
+        guard profiles.contains(where: { $0.name == profileName }) else {
+            throw ValidationError.invalidActiveProfile(profileName)
+        }
+
+        try validateEntries()
+    }
+
+    /// Validates the historical fixed-profile export before upgrading it to
+    /// the current dynamic format.
+    private func validateV2() throws {
+        guard version == Self.legacyVersion else {
             throw ValidationError.unsupportedVersion(version)
         }
 
@@ -117,21 +170,23 @@ struct XPdConfiguration: Codable, Equatable {
             guard profileNames.insert(profile.name).inserted else {
                 throw ValidationError.duplicateProfileName(profile.name)
             }
-            guard Self.availableProfileNames.contains(profile.name) else {
+            guard Self.defaultProfileNames.contains(profile.name) else {
                 throw ValidationError.unknownProfileName(profile.name)
             }
         }
-
-        for requiredName in Self.availableProfileNames {
+        for requiredName in Self.defaultProfileNames {
             guard profileNames.contains(requiredName) else {
                 throw ValidationError.missingProfileName(requiredName)
             }
         }
-
         guard profileNames.contains(profileName) else {
             throw ValidationError.invalidActiveProfile(profileName)
         }
 
+        try validateEntries()
+    }
+
+    private func validateEntries() throws {
         for profile in profiles {
             var mappingKeys = Set<MappingKey>()
             for entry in profile.mappings {
@@ -173,11 +228,20 @@ struct XPdConfiguration: Codable, Equatable {
     /// Encodes a stable, human-readable document suitable for export or
     /// source-control comparison.
     func encodedData() throws -> Data {
-        try validate()
+        // Keep the encoder useful for migration fixtures and older callers;
+        // normal store exports always construct the current v3 value.
+        if version == Self.legacyVersion {
+            try validateV2()
+        } else {
+            try validate()
+        }
 
         let sortedConfiguration = XPdConfiguration(
             version: version,
-            profiles: profiles.sorted { Self.profileIndex($0.name) < Self.profileIndex($1.name) }.map { profile in
+            // Profile order is meaningful to the wheel selector. Callers
+            // provide the persisted order, while entries within each profile
+            // are sorted for deterministic output.
+            profiles: profiles.map { profile in
                 Profile(
                     name: profile.name,
                     mappings: profile.mappings.sorted { lhs, rhs in
@@ -200,8 +264,15 @@ struct XPdConfiguration: Codable, Equatable {
         return try encoder.encode(sortedConfiguration)
     }
 
-    private static func profileIndex(_ profileName: String) -> Int {
-        availableProfileNames.firstIndex(of: profileName) ?? Int.max
+    private struct VersionEnvelope: Decodable {
+        let version: Int
+    }
+
+    static func profileNameComparisonKey(_ name: String) -> String {
+        name.folding(
+            options: [.caseInsensitive, .diacriticInsensitive],
+            locale: Locale(identifier: "en_US_POSIX")
+        )
     }
 
     private static func controlIndex(_ control: RemoteControl) -> Int {

@@ -48,10 +48,12 @@ shell command is required.
 ## Configuration files
 
 Use **Import** and **Export** in the mapping inspector to move or back up the
-complete XP[d] setup as readable JSON. The version 2 file contains Global,
-Finder, and Logic Pro, with each profile's complete Tap, Hold, and Double
-mappings and HID bindings, plus the active profile and overlay preference.
-Imports are validated completely before the current setup is replaced.
+complete XP[d] setup as readable JSON. Use the profile-management button beside
+the header picker to add profiles or remove any profile except Global. The
+version 3 file preserves profile order and contains every profile's complete
+Tap, Hold, and Double mappings and HID bindings, plus the active profile and
+overlay preference. Version 2 exports upgrade on import, and invalid imports are
+rejected before the current setup is replaced.
 
 ## Remote battery
 

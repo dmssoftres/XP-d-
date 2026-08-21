@@ -4,7 +4,27 @@ import Observation
 @Observable
 @MainActor
 final class MappingStore {
-    static let availableProfiles = XPdConfiguration.availableProfileNames
+    private(set) var availableProfiles: [String] = XPdConfiguration.defaultProfileNames
+
+    enum ProfileError: LocalizedError, Equatable {
+        case invalidName(String)
+        case duplicateName(String)
+        case profileNotFound(String)
+        case cannotDeleteGlobal
+
+        var errorDescription: String? {
+            switch self {
+            case let .invalidName(name):
+                return "Profile names must be trimmed, non-empty, and at most 40 characters: \(name)."
+            case let .duplicateName(name):
+                return "A profile named \(name) already exists."
+            case let .profileNotFound(name):
+                return "Profile not found: \(name)."
+            case .cannotDeleteGlobal:
+                return "The Global profile cannot be deleted."
+            }
+        }
+    }
 
     enum PersistenceResult: Equatable {
         case idle
@@ -32,7 +52,7 @@ final class MappingStore {
     var selectedGesture: GestureKind = .tap
     var profileName = "Global" {
         didSet {
-            guard Self.availableProfiles.contains(profileName) else {
+            guard availableProfiles.contains(profileName) else {
                 profileName = oldValue
                 return
             }
@@ -40,7 +60,7 @@ final class MappingStore {
             saveActiveProfile(named: oldValue)
             activateProfile(named: profileName)
             defaults.set(profileName, forKey: profileNameDefaultsKey)
-            lastPersistenceResult = .saved
+            saveAllProfiles()
         }
     }
     private(set) var mappings: [MappingKey: Mapping] = [:]
@@ -89,9 +109,21 @@ final class MappingStore {
         var hidBindings: [RemoteControl: String]
     }
 
+    private struct PersistedProfile: Codable, Equatable {
+        let name: String
+        let state: ProfileState
+    }
+
+    private struct PersistedProfiles: Codable, Equatable {
+        let version: Int
+        let profiles: [PersistedProfile]
+        let activeProfileName: String
+    }
+
     private let defaults: UserDefaults
-    private let profilesDefaultsKey = "XPd.profiles.v2"
-    private let profilesMigrationKey = "XPd.profiles.v2.migrated"
+    private let profilesDefaultsKey = "XPd.profiles.v3"
+    private let legacyProfilesDefaultsKey = "XPd.profiles.v2"
+    private let profilesMigrationKey = "XPd.profiles.v3.migrated"
     private let defaultsKey = "XPd.mappings.v1"
     private let hidBindingsKey = "XPd.hidBindings.v1"
     private let profileNameDefaultsKey = "XPd.profileName.v1"
@@ -104,6 +136,7 @@ final class MappingStore {
     private var pendingProfileName: String?
     private var actionPressesInFlight: Set<RemoteControl> = []
     private var isReplacingConfiguration = false
+    private var loadedProfileName: String?
     private let actionRunner = ActionRunner()
     @ObservationIgnored private lazy var inputOverlay = InputOverlayController(displayDuration: inputOverlayDuration)
 
@@ -112,7 +145,6 @@ final class MappingStore {
         hid = HIDService(startHardware: startHardware)
 
         let savedProfile = defaults.string(forKey: profileNameDefaultsKey)
-        profileName = Self.availableProfiles.contains(savedProfile ?? "") ? savedProfile! : "Global"
         showsInputOverlay = defaults.object(forKey: inputOverlayDefaultsKey) as? Bool ?? true
         let savedDuration = defaults.object(forKey: inputOverlayDurationDefaultsKey) as? Double ?? 4
         inputOverlayDuration = Self.closestInputOverlayDuration(to: savedDuration)
@@ -121,13 +153,15 @@ final class MappingStore {
         wheelSensitivity = WheelScrollSettings.clamped(savedWheelSensitivity)
 
         let migratedLegacyState = loadOrMigrateProfiles()
-        if migratedLegacyState {
-            isReplacingConfiguration = true
-            profileName = "Global"
-            isReplacingConfiguration = false
-            defaults.set(profileName, forKey: profileNameDefaultsKey)
-        }
+        let restoredProfile = migratedLegacyState
+            ? "Global"
+            : (loadedProfileName ?? savedProfile).flatMap { availableProfiles.contains($0) ? $0 : nil } ?? "Global"
+        isReplacingConfiguration = true
+        profileName = restoredProfile
+        isReplacingConfiguration = false
+        defaults.set(profileName, forKey: profileNameDefaultsKey)
         activateProfile(named: profileName)
+        saveAllProfiles()
 
         hid.onInput = { [weak self] signature in
             self?.handleHIDInput(signature)
@@ -141,6 +175,45 @@ final class MappingStore {
     func update(_ mapping: Mapping, for control: RemoteControl, gesture: GestureKind) {
         mappings[MappingKey(control: control, gesture: gesture)] = mapping
         save()
+    }
+
+    /// Adds a profile with an independent copy of the default mapping/HID
+    /// state and activates it so it is immediately ready for editing.
+    @discardableResult
+    func addProfile(named rawName: String) throws -> String {
+        let name = try validatedNewProfileName(rawName)
+        closeProfileSelector()
+        profileStates[name] = Self.defaultProfileState()
+        availableProfiles.append(name)
+        isReplacingConfiguration = true
+        profileName = name
+        isReplacingConfiguration = false
+        activateProfile(named: name)
+        defaults.set(profileName, forKey: profileNameDefaultsKey)
+        saveAllProfiles()
+        return name
+    }
+
+    /// Deletes an inactive or active profile. Global is intentionally
+    /// protected because it is the required fallback profile.
+    func deleteProfile(named name: String) throws {
+        guard name != "Global" else { throw ProfileError.cannotDeleteGlobal }
+        guard availableProfiles.contains(name), profileStates[name] != nil else {
+            throw ProfileError.profileNotFound(name)
+        }
+
+        closeProfileSelector()
+        if profileName == name {
+            isReplacingConfiguration = true
+            profileName = "Global"
+            isReplacingConfiguration = false
+            activateProfile(named: "Global")
+            defaults.set(profileName, forKey: profileNameDefaultsKey)
+        }
+
+        availableProfiles.removeAll { $0 == name }
+        profileStates.removeValue(forKey: name)
+        saveAllProfiles()
     }
 
     func learnSelectedControl() {
@@ -178,7 +251,7 @@ final class MappingStore {
     /// Returns the current configuration as deterministic, pretty-printed
     /// JSON data. File panels and filesystem access belong to the UI layer.
     func exportConfiguration() -> Data? {
-        let profiles = Self.availableProfiles.compactMap { name -> XPdConfiguration.Profile? in
+        let profiles = availableProfiles.compactMap { name -> XPdConfiguration.Profile? in
             guard let state = profileStates[name] else { return nil }
             return XPdConfiguration.Profile(
                 name: name,
@@ -238,18 +311,22 @@ final class MappingStore {
             )
         }
 
-        // The model validation above requires the exact profile set, but keep
-        // this guard adjacent to replacement as a second atomicity barrier.
-        guard Set(importedStates.keys) == Set(Self.availableProfiles) else {
+        // Keep this guard adjacent to replacement as a second atomicity
+        // barrier. The model already validated Global, names, and active
+        // profile, but this ensures no state is lost while converting.
+        guard importedStates.count == configuration.profiles.count,
+              importedStates["Global"] != nil,
+              Set(importedStates.keys) == Set(configuration.profiles.map(\.name)) else {
             lastConfigurationResult = .failed(
                 operation: .import,
-                message: "Configuration does not contain the required profiles."
+                message: "Configuration contains invalid profile state."
             )
             return false
         }
 
         isReplacingConfiguration = true
         profileStates = importedStates
+        availableProfiles = configuration.profiles.map(\.name)
         profileName = configuration.profileName
         activateProfile(named: configuration.profileName)
         isReplacingConfiguration = false
@@ -257,6 +334,7 @@ final class MappingStore {
         learningControl = nil
         liveControl = nil
         actionPressesInFlight.removeAll()
+        closeProfileSelector()
         showsInputOverlay = configuration.showsInputOverlay
         defaults.set(profileName, forKey: profileNameDefaultsKey)
         saveAllProfiles()
@@ -415,31 +493,35 @@ final class MappingStore {
             if let pendingProfileName {
                 profileName = pendingProfileName
             }
-            isProfileSelectorVisible = false
-            pendingProfileName = nil
-            inputOverlay.hideProfileSelector()
-            liveControl = nil
+            closeProfileSelector()
         } else {
             isProfileSelectorVisible = true
             pendingProfileName = profileName
             inputOverlay.showProfileSelector(
-                profiles: Self.availableProfiles,
+                profiles: availableProfiles,
                 selectedProfile: profileName
             )
         }
     }
 
     private func rotateProfile(_ direction: Int) {
-        guard !Self.availableProfiles.isEmpty else { return }
+        guard !availableProfiles.isEmpty else { return }
         let highlightedProfile = pendingProfileName ?? profileName
-        let currentIndex = Self.availableProfiles.firstIndex(of: highlightedProfile) ?? 0
-        let count = Self.availableProfiles.count
+        let currentIndex = availableProfiles.firstIndex(of: highlightedProfile) ?? 0
+        let count = availableProfiles.count
         let nextIndex = (currentIndex + direction + count) % count
-        pendingProfileName = Self.availableProfiles[nextIndex]
+        pendingProfileName = availableProfiles[nextIndex]
         inputOverlay.showProfileSelector(
-            profiles: Self.availableProfiles,
+            profiles: availableProfiles,
             selectedProfile: pendingProfileName ?? profileName
         )
+    }
+
+    private func closeProfileSelector() {
+        isProfileSelectorVisible = false
+        pendingProfileName = nil
+        inputOverlay.hideProfileSelector()
+        liveControl = nil
     }
 
     private func showOverlayPress(for control: RemoteControl) {
@@ -467,7 +549,7 @@ final class MappingStore {
     }
 
     private func saveActiveProfile(named name: String) {
-        guard Self.availableProfiles.contains(name) else { return }
+        guard availableProfiles.contains(name) else { return }
         profileStates[name] = ProfileState(mappings: mappings, hidBindings: hidBindings)
     }
 
@@ -483,7 +565,15 @@ final class MappingStore {
 
     private func saveAllProfiles() {
         do {
-            let data = try JSONEncoder().encode(profileStates)
+            let persisted = PersistedProfiles(
+                version: XPdConfiguration.currentVersion,
+                profiles: availableProfiles.compactMap { name in
+                    guard let state = profileStates[name] else { return nil }
+                    return PersistedProfile(name: name, state: state)
+                },
+                activeProfileName: profileName
+            )
+            let data = try JSONEncoder().encode(persisted)
             defaults.set(data, forKey: profilesDefaultsKey)
             defaults.set(true, forKey: profilesMigrationKey)
             lastPersistenceResult = .saved
@@ -494,10 +584,25 @@ final class MappingStore {
 
     private func loadOrMigrateProfiles() -> Bool {
         if let data = defaults.data(forKey: profilesDefaultsKey),
-           let decoded = try? JSONDecoder().decode([String: ProfileState].self, from: data),
-           Set(decoded.keys) == Set(Self.availableProfiles) {
-            profileStates = decoded
+           let decoded = try? JSONDecoder().decode(PersistedProfiles.self, from: data),
+           isValidPersistedProfiles(decoded) {
+            availableProfiles = decoded.profiles.map(\.name)
+            profileStates = Dictionary(uniqueKeysWithValues: decoded.profiles.map { ($0.name, $0.state) })
+            loadedProfileName = decoded.activeProfileName
             defaults.set(true, forKey: profilesMigrationKey)
+            return false
+        }
+
+        // Version 2 persisted profile state as a dictionary with the exact
+        // historical three-profile set. Restore that canonical order while
+        // preserving every stored mapping and HID binding.
+        if let data = defaults.data(forKey: legacyProfilesDefaultsKey),
+           let decoded = try? JSONDecoder().decode([String: ProfileState].self, from: data),
+           let migrated = migrateLegacyPersistedProfiles(decoded) {
+            availableProfiles = migrated.order
+            profileStates = migrated.states
+            defaults.set(true, forKey: profilesMigrationKey)
+            saveAllProfiles()
             return false
         }
 
@@ -527,17 +632,57 @@ final class MappingStore {
         }
 
         profileStates = migratedProfiles
+        availableProfiles = XPdConfiguration.defaultProfileNames
         defaults.set(true, forKey: profilesMigrationKey)
         saveAllProfiles()
         return migratedLegacyState
     }
 
+    private func isValidPersistedProfiles(_ persisted: PersistedProfiles) -> Bool {
+        guard persisted.version == XPdConfiguration.currentVersion else { return false }
+        let configuration = XPdConfiguration(
+            profiles: persisted.profiles.map { profile in
+                XPdConfiguration.Profile(
+                    name: profile.name,
+                    mappings: Self.mappingEntries(from: profile.state.mappings),
+                    hidBindings: Self.hidBindingEntries(from: profile.state.hidBindings)
+                )
+            },
+            profileName: persisted.activeProfileName,
+            showsInputOverlay: showsInputOverlay
+        )
+        return (try? configuration.validate()) != nil
+    }
+
+    private func validatedNewProfileName(_ rawName: String) throws -> String {
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name.count <= 40 else {
+            throw ProfileError.invalidName(rawName)
+        }
+        let foldedName = XPdConfiguration.profileNameComparisonKey(name)
+        guard !availableProfiles.contains(where: {
+            XPdConfiguration.profileNameComparisonKey($0) == foldedName
+        }) else {
+            throw ProfileError.duplicateName(name)
+        }
+        return name
+    }
+
+    private func migrateLegacyPersistedProfiles(
+        _ decoded: [String: ProfileState]
+    ) -> (order: [String], states: [String: ProfileState])? {
+        let order = XPdConfiguration.defaultProfileNames
+        guard Set(decoded.keys) == Set(order) else { return nil }
+        return (order: order, states: decoded)
+    }
+
     private static func defaultProfileStates() -> [String: ProfileState] {
+        Dictionary(uniqueKeysWithValues: XPdConfiguration.defaultProfileNames.map { ($0, defaultProfileState()) })
+    }
+
+    private static func defaultProfileState() -> ProfileState {
         let mappings = [MappingKey(control: .k1, gesture: .tap): Mapping(action: .openApplication, command: "ChatGPT")]
-        let bindings = defaultHIDBindings
-        return Dictionary(uniqueKeysWithValues: availableProfiles.map { name in
-            (name, ProfileState(mappings: mappings, hidBindings: bindings))
-        })
+        return ProfileState(mappings: mappings, hidBindings: defaultHIDBindings)
     }
 
     private static func mappingEntries(from mappings: [MappingKey: Mapping]) -> [XPdConfiguration.MappingEntry] {

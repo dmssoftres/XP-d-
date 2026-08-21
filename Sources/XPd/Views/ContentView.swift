@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     let store: MappingStore
+    @State private var isManagingProfiles = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -21,6 +22,9 @@ struct ContentView: View {
             .padding(.vertical, 12)
         }
         .background(.regularMaterial)
+        .sheet(isPresented: $isManagingProfiles) {
+            ProfileManagementView(store: store)
+        }
     }
 
     private var header: some View {
@@ -46,12 +50,20 @@ struct ContentView: View {
             }
             Spacer()
             Picker("Profile", selection: Bindable(store).profileName) {
-                ForEach(MappingStore.availableProfiles, id: \.self) { profile in
+                ForEach(store.availableProfiles, id: \.self) { profile in
                     Text(profile).tag(profile)
                 }
             }
             .pickerStyle(.menu)
-            .frame(width: 180)
+            .frame(width: 160)
+            Button {
+                isManagingProfiles = true
+            } label: {
+                Image(systemName: "person.2")
+            }
+            .buttonStyle(.borderless)
+            .help("Add or remove profiles")
+            .accessibilityLabel("Manage profiles")
         }
         .padding(.horizontal, 22)
         .padding(.vertical, 14)
@@ -119,5 +131,108 @@ struct ContentView: View {
     private var appVersion: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
             ?? "0.1.1"
+    }
+}
+
+private struct ProfileManagementView: View {
+    let store: MappingStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var newProfileName = ""
+    @State private var profileToDelete: String?
+    @State private var errorMessage: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Profiles")
+                        .font(.title2.weight(.semibold))
+                    Text("Create a profile for a separate mapping and HID layout.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Done") { dismiss() }
+            }
+
+            List {
+                ForEach(store.availableProfiles, id: \.self) { profile in
+                    HStack(spacing: 10) {
+                        Image(systemName: profile == "Global" ? "globe" : "person.crop.circle")
+                            .foregroundStyle(.secondary)
+                        Text(profile)
+                        if profile == store.profileName {
+                            Text("Active")
+                                .font(.caption2.weight(.medium))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        if profile == "Global" {
+                            Text("Required")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Button {
+                                profileToDelete = profile
+                            } label: {
+                                Image(systemName: "trash")
+                            }
+                            .buttonStyle(.borderless)
+                            .foregroundStyle(.red)
+                            .accessibilityLabel("Delete \(profile)")
+                        }
+                    }
+                    .padding(.vertical, 3)
+                }
+            }
+            .listStyle(.inset)
+            .frame(minHeight: 150)
+
+            HStack(spacing: 8) {
+                TextField("New profile name", text: $newProfileName)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit(addProfile)
+                Button("Add", action: addProfile)
+                    .disabled(newProfileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+
+            if let errorMessage {
+                Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .lineLimit(2)
+            }
+        }
+        .padding(20)
+        .frame(width: 420, height: 390)
+        .confirmationDialog(
+            "Delete \(profileToDelete ?? "profile")?",
+            isPresented: Binding(
+                get: { profileToDelete != nil },
+                set: { if !$0 { profileToDelete = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) {
+                guard let profileToDelete else { return }
+                do {
+                    try store.deleteProfile(named: profileToDelete)
+                    self.profileToDelete = nil
+                } catch {
+                    errorMessage = error.localizedDescription
+                }
+            }
+            Button("Cancel", role: .cancel) { profileToDelete = nil }
+        }
+    }
+
+    private func addProfile() {
+        do {
+            _ = try store.addProfile(named: newProfileName)
+            newProfileName = ""
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 }
