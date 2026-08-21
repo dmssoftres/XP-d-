@@ -172,15 +172,18 @@ struct MappingInspector: View {
 
     private var midiEditorBody: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .bottom) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("MIDI Lock")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(selectedControlTitle)
-                        .font(.title2.weight(.semibold))
+            ZStack {
+                HStack(alignment: .bottom) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("MIDI Lock")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text(selectedControlTitle)
+                            .font(.title2.weight(.semibold))
+                    }
+                    Spacer()
                 }
-                Spacer()
+
                 Picker("Layer", selection: Bindable(store).selectedMIDILayer) {
                     Text("Primary Layer").tag(MIDIMappingLayer.primary)
                     Text("Fn Layer 2").tag(MIDIMappingLayer.function)
