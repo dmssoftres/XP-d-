@@ -106,6 +106,18 @@ final class MappingStoreMIDITests: XCTestCase {
         XCTAssertEqual(store.activeRealm, .standard)
     }
 
+    func testRenamingRememberedMIDIProfilePreservesWorkspaceRestoration() throws {
+        let store = makeStore()
+        _ = try store.addMIDIProfile(named: "Performance")
+        XCTAssertTrue(store.selectProfile("Global"))
+
+        try store.renameProfile(named: "Performance", to: "Live")
+
+        XCTAssertTrue(store.toggleWorkspace())
+        XCTAssertEqual(store.profileName, "Live")
+        XCTAssertEqual(store.activeRealm, .midi)
+    }
+
     func testNoMIDIProfileFailsWithoutChangingStandardState() {
         let store = makeStore()
         XCTAssertFalse(store.toggleWorkspace())

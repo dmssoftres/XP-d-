@@ -51,6 +51,7 @@ final class MappingStore {
         case invalidName(String)
         case duplicateName(String)
         case profileNotFound(String)
+        case cannotRenameGlobal
         case cannotDeleteGlobal
         case noMIDIProfile
         case invalidMIDIProfile(String)
@@ -63,6 +64,8 @@ final class MappingStore {
                 return "A profile named \(name) already exists."
             case let .profileNotFound(name):
                 return "Profile not found: \(name)."
+            case .cannotRenameGlobal:
+                return "The Global profile cannot be renamed."
             case .cannotDeleteGlobal:
                 return "The Global profile cannot be deleted."
             case .noMIDIProfile:
@@ -778,6 +781,43 @@ final class MappingStore {
         settings: MIDIProfileSettings? = nil
     ) throws -> String {
         try addProfile(named: name, realm: .midi, midiSettings: settings)
+    }
+
+    /// Renames a profile in place without changing its order, realm, mappings,
+    /// HID bindings, or active MIDI session state. Global remains the stable
+    /// migration and fallback identity.
+    @discardableResult
+    func renameProfile(named existingName: String, to rawName: String) throws -> String {
+        guard existingName != "Global" else { throw ProfileError.cannotRenameGlobal }
+        guard let profileIndex = availableProfiles.firstIndex(of: existingName),
+              profileStates[existingName] != nil else {
+            throw ProfileError.profileNotFound(existingName)
+        }
+
+        let name = try validatedProfileName(rawName, excluding: existingName)
+        guard name != existingName else { return existingName }
+
+        closeProfileSelector()
+        saveActiveProfile()
+        guard let state = profileStates.removeValue(forKey: existingName) else {
+            throw ProfileError.profileNotFound(existingName)
+        }
+
+        profileStates[name] = state
+        availableProfiles[profileIndex] = name
+        if lastStandardProfileName == existingName { lastStandardProfileName = name }
+        if lastMIDIProfileName == existingName { lastMIDIProfileName = name }
+
+        if profileName == existingName {
+            isReplacingConfiguration = true
+            profileName = name
+            isReplacingConfiguration = false
+            defaults.set(name, forKey: profileNameDefaultsKey)
+            syncMIDIOverlay()
+        }
+
+        saveAllProfiles()
+        return name
     }
 
     /// Deletes an inactive or active profile. Global is intentionally
@@ -1806,13 +1846,17 @@ final class MappingStore {
     }
 
     private func validatedNewProfileName(_ rawName: String) throws -> String {
+        try validatedProfileName(rawName, excluding: nil)
+    }
+
+    private func validatedProfileName(_ rawName: String, excluding excludedName: String?) throws -> String {
         let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty, name.count <= 40 else {
             throw ProfileError.invalidName(rawName)
         }
         let foldedName = XPdConfiguration.profileNameComparisonKey(name)
         guard !availableProfiles.contains(where: {
-            XPdConfiguration.profileNameComparisonKey($0) == foldedName
+            $0 != excludedName && XPdConfiguration.profileNameComparisonKey($0) == foldedName
         }) else {
             throw ProfileError.duplicateName(name)
         }

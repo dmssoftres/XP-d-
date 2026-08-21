@@ -86,7 +86,7 @@ struct ContentView: View {
                 Image(systemName: "square.stack.3d.up")
             }
             .buttonStyle(.borderless)
-            .help("Add or remove profiles")
+            .help("Add, rename, or remove profiles")
             .accessibilityLabel("Manage profiles")
         }
         .padding(.horizontal, 22)
@@ -265,6 +265,8 @@ private struct ProfileManagementView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var newProfileName = ""
     @State private var newProfileRealm: ProfileRealm = .standard
+    @State private var profileBeingRenamed: String?
+    @State private var renamedProfileName = ""
     @State private var profileToDelete: String?
     @State private var errorMessage: String?
 
@@ -274,7 +276,7 @@ private struct ProfileManagementView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Profiles")
                         .font(.title2.weight(.semibold))
-                    Text("Create a profile for a separate mapping and HID layout.")
+                    Text("Create or rename profiles with separate mappings and HID layouts.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -287,7 +289,13 @@ private struct ProfileManagementView: View {
                     HStack(spacing: 8) {
                         Image(systemName: profile == "Global" ? "globe" : "app")
                             .foregroundStyle(.secondary)
-                        Text(profile)
+                        if profileBeingRenamed == profile {
+                            TextField("Profile name", text: $renamedProfileName)
+                                .textFieldStyle(.roundedBorder)
+                                .onSubmit { renameProfile(profile) }
+                        } else {
+                            Text(profile)
+                        }
                         Text(store.profileRealm(for: profile) == .midi ? "MIDI" : "Standard")
                             .font(.caption2.weight(.medium))
                             .foregroundStyle(store.profileRealm(for: profile) == .midi ? .orange : .secondary)
@@ -301,7 +309,30 @@ private struct ProfileManagementView: View {
                             Text("Required")
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
+                        } else if profileBeingRenamed == profile {
+                            Button {
+                                renameProfile(profile)
+                            } label: {
+                                Image(systemName: "checkmark")
+                            }
+                            .buttonStyle(.borderless)
+                            .disabled(renamedProfileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            .accessibilityLabel("Save profile name")
+                            Button {
+                                cancelRenaming()
+                            } label: {
+                                Image(systemName: "xmark")
+                            }
+                            .buttonStyle(.borderless)
+                            .accessibilityLabel("Cancel renaming")
                         } else {
+                            Button {
+                                beginRenaming(profile)
+                            } label: {
+                                Image(systemName: "pencil")
+                            }
+                            .buttonStyle(.borderless)
+                            .accessibilityLabel("Rename \(profile)")
                             Button {
                                 profileToDelete = profile
                             } label: {
@@ -372,6 +403,27 @@ private struct ProfileManagementView: View {
             }
             newProfileName = ""
             newProfileRealm = .standard
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func beginRenaming(_ profile: String) {
+        profileBeingRenamed = profile
+        renamedProfileName = profile
+        errorMessage = nil
+    }
+
+    private func cancelRenaming() {
+        profileBeingRenamed = nil
+        renamedProfileName = ""
+    }
+
+    private func renameProfile(_ profile: String) {
+        do {
+            _ = try store.renameProfile(named: profile, to: renamedProfileName)
+            cancelRenaming()
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription

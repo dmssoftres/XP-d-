@@ -238,6 +238,51 @@ final class MappingStoreProfileTests: XCTestCase {
         XCTAssertThrowsError(try store.deleteProfile(named: "Global")) { error in
             XCTAssertEqual(error as? MappingStore.ProfileError, .cannotDeleteGlobal)
         }
+        XCTAssertThrowsError(try store.renameProfile(named: "Global", to: "Everywhere")) { error in
+            XCTAssertEqual(error as? MappingStore.ProfileError, .cannotRenameGlobal)
+        }
+    }
+
+    func testRenamingActiveProfilePreservesStateOrderAndPersistence() throws {
+        let store = makeStore()
+        _ = try store.addProfile(named: "Studio")
+        let mapping = Mapping(action: .noAction, command: "studio")
+        store.update(mapping, for: .k1, gesture: .tap)
+        store.selectedControl = .k2
+        store.learnSelectedControl()
+        store.simulateHIDInputForTesting("studio-k2")
+
+        let renamed = try store.renameProfile(named: "Studio", to: "  Editing  ")
+
+        XCTAssertEqual(renamed, "Editing")
+        XCTAssertEqual(store.availableProfiles, ["Global", "Finder", "Logic Pro", "Editing"])
+        XCTAssertEqual(store.profileName, "Editing")
+        XCTAssertEqual(store.mapping(for: .k1, gesture: .tap), mapping)
+        XCTAssertEqual(store.hidBinding(for: .k2), "studio-k2")
+
+        let reloaded = makeStore()
+        XCTAssertEqual(reloaded.availableProfiles, ["Global", "Finder", "Logic Pro", "Editing"])
+        XCTAssertEqual(reloaded.profileName, "Editing")
+        XCTAssertEqual(reloaded.mapping(for: .k1, gesture: .tap), mapping)
+        XCTAssertEqual(reloaded.hidBinding(for: .k2), "studio-k2")
+    }
+
+    func testRenameValidationAndSelectorResetAreAtomic() throws {
+        let store = makeStore()
+        store.simulateHIDInputForTesting("wheel:center")
+        store.simulateHIDInputForTesting("wheel:+")
+        XCTAssertTrue(store.isProfileSelectorVisibleForTesting)
+
+        XCTAssertThrowsError(try store.renameProfile(named: "Finder", to: " logic pro ")) { error in
+            XCTAssertEqual(error as? MappingStore.ProfileError, .duplicateName("logic pro"))
+        }
+        XCTAssertTrue(store.isProfileSelectorVisibleForTesting)
+        XCTAssertEqual(store.availableProfiles, ["Global", "Finder", "Logic Pro"])
+
+        try store.renameProfile(named: "Finder", to: "Files")
+        XCTAssertFalse(store.isProfileSelectorVisibleForTesting)
+        XCTAssertNil(store.pendingProfileNameForTesting)
+        XCTAssertEqual(store.availableProfiles, ["Global", "Files", "Logic Pro"])
     }
 
     func testDeletingInactiveAndActiveProfilesPreservesFallback() throws {

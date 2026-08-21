@@ -26,7 +26,7 @@ No backend, database, cloud account, telemetry service, or third-party package d
 
 Shortcut Remote HID value/report → `HIDService` → `ButtonGestureRecognizer` for K1–K10 → `MappingStore` gesture resolution → persisted mapping lookup → optional same-control Tap application resolution → `ActionRunner` side effect and input-overlay presentation. Tap waits through the Double window; Hold and Double suppress Tap. Profile changes, imports, learning, disconnects, and displaced live controls cancel pending gestures. Inherited Hold/Double application targets are read at execution time; invalid Tap mappings stop before side effects.
 
-Configuration UI/profile-manager edits → `MappingStore` → one ordered version-4 profile collection in `UserDefaults`. Version-2 fixed and version-3 dynamic persistence migrate to Standard profiles; older shared mappings and HID bindings migrate into Global. Export builds a complete ordered JSON document; v2/v3 exports upgrade on decode, and imports validate realms, remembered profiles, typed MIDI values, mappings, and bindings before one replacement.
+Configuration UI/profile-manager edits → `MappingStore` → one ordered version-4 profile collection in `UserDefaults`. Renaming a non-Global profile replaces its name identity atomically while preserving order, realm, mappings, HID bindings, active selection, and remembered workspace targets. Version-2 fixed and version-3 dynamic persistence migrate to Standard profiles; older shared mappings and HID bindings migrate into Global. Export builds a complete ordered JSON document; v2/v3 exports upgrade on decode, and imports validate realms, remembered profiles, typed MIDI values, mappings, and bindings before one replacement.
 
 MIDI-realm HID input → `MappingStore` primary/Fn routing and session offsets →
 `MIDIOutputService` → independent `XP[d] Control` or `XP[d] Performance`
@@ -38,7 +38,7 @@ Every actual send attempt also emits one transient monitor event back to the
 main-actor store. The MIDI inspector keeps only the newest 100 events and can
 copy or clear them; monitor history is diagnostic state and is never persisted.
 
-Wheel-center hold → open selector with current profile order → wheel rotation updates only the pending highlight → center release activates the highlighted profile and loads its mappings/HID bindings. Adding, deleting, or importing profiles closes stale selector state.
+Wheel-center hold → open selector with current profile order → wheel rotation updates only the pending highlight → center release activates the highlighted profile and loads its mappings/HID bindings. Adding, renaming, deleting, or importing profiles closes stale selector state.
 
 Matching HID connection → BLE PnP read/verification → notify-only FFE0/0002 plus FFE0/0003 subscription → validated `02 F2 01 <percent>` packet → `HIDService` battery state → header and menu-bar UI. Disconnect, identity mismatch, Bluetooth loss, or invalid data clears/withholds the BLE value.
 

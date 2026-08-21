@@ -78,7 +78,8 @@ share the newest 100 entries or **Clear** before a focused hardware test.
 
 Use **Import** and **Export** in the mapping inspector to move or back up the
 complete XP[d] setup as readable JSON. Use the profile-management button beside
-the header picker to add profiles or remove any profile except Global. The
+the header picker to add, rename, or remove profiles. Global cannot be renamed
+or removed. The
 version 4 file preserves profile order and contains every profile's realm,
 complete
 Tap, Hold, and Double mappings and HID bindings, plus the active profile and
