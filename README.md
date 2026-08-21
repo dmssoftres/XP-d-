@@ -53,6 +53,10 @@ Finder, and Logic Pro, with each profile's complete Tap, Hold, and Double
 mappings and HID bindings, plus the active profile and overlay preference.
 Imports are validated completely before the current setup is replaced.
 
+## Remote battery
+
+When the matching Shortcut Remote exposes the verified vendor notification, XP[d] shows its exact battery percentage in the window header and menu-bar submenu. The BLE path is notify-only, requires the target's exact PnP identity, and never sends undocumented commands. If exact telemetry is absent or invalid, the app shows `Battery unavailable` rather than estimating.
+
 ## Development permissions and relaunches
 
 Accessibility and Input Monitoring approval are tied to the app's code signature. This repository uses standard ad-hoc signing because no Apple Development identity is configured on the current Mac. If permissions become stale after a rebuild, run:

@@ -33,8 +33,11 @@ final class HIDService {
     var onInput: ((String?) -> Void)?
 
     @ObservationIgnored private let resources = HIDResources()
+    @ObservationIgnored private let bluetoothBatteryMonitor = ShortcutRemoteBatteryMonitor()
     @ObservationIgnored private var report6ControlIsActive = false
     @ObservationIgnored private var connectedDevice: IOHIDDevice?
+    @ObservationIgnored private var hidBatteryPercentage: Int?
+    @ObservationIgnored private var bluetoothBatteryPercentage: Int?
     @ObservationIgnored private var lastBatteryRefresh = Date.distantPast
     private let logger = Logger(subsystem: "com.dmssoftres.xpd", category: "HID")
 
@@ -46,6 +49,11 @@ final class HIDService {
     private static let batteryRefreshInterval: TimeInterval = 15
 
     init(startHardware: Bool = true) {
+        bluetoothBatteryMonitor.onBatteryPercentage = { [weak self] percentage in
+            guard let self, self.isConnected else { return }
+            self.bluetoothBatteryPercentage = percentage
+            self.updateBatteryPercentage()
+        }
         if startHardware {
             start()
         }
@@ -82,6 +90,7 @@ final class HIDService {
                 service.registerInputReports(for: device)
                 service.isConnected = true
                 service.refreshBattery(force: true)
+                service.bluetoothBatteryMonitor.startMonitoring()
                 service.lastEvent = service.hasInputAccess
                     ? "Shortcut Remote connected"
                     : "Connected · Input Monitoring required"
@@ -231,8 +240,11 @@ final class HIDService {
     private func handleDeviceRemoval() {
         isConnected = false
         connectedDevice = nil
+        hidBatteryPercentage = nil
+        bluetoothBatteryPercentage = nil
         batteryPercentage = nil
         lastBatteryRefresh = .distantPast
+        bluetoothBatteryMonitor.stopMonitoring()
     }
 
     private func refreshBatteryIfNeeded() {
@@ -241,6 +253,7 @@ final class HIDService {
 
     private func refreshBattery(force: Bool) {
         guard isConnected, let connectedDevice else {
+            hidBatteryPercentage = nil
             batteryPercentage = nil
             return
         }
@@ -251,7 +264,12 @@ final class HIDService {
         }
 
         lastBatteryRefresh = now
-        batteryPercentage = Self.batteryPercentage(for: connectedDevice)
+        hidBatteryPercentage = Self.batteryPercentage(for: connectedDevice)
+        updateBatteryPercentage()
+    }
+
+    private func updateBatteryPercentage() {
+        batteryPercentage = bluetoothBatteryPercentage ?? hidBatteryPercentage
     }
 
     private static func batteryPercentage(for device: IOHIDDevice) -> Int? {

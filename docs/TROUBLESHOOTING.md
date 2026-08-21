@@ -18,6 +18,14 @@
 - **Do not:** match all HID devices or log unrelated system input.
 - **Related files/decisions:** `README.md`, `Sources/XPd/Services/HIDService.swift`
 
+## Connected remote shows Battery unavailable
+
+- **Observed behavior:** HID connection works, but no percentage appears.
+- **Likely causes:** Bluetooth access is denied/off, the BLE PnP identity differs, or the verified vendor notifications are unavailable.
+- **Verification:** inspect privacy-safe `com.dmssoftres.xpd` / `Battery` logs for state, identity, and subscription milestones.
+- **Fix:** enable Bluetooth for the existing signed app and reconnect/relaunch; do not reset unrelated TCC permissions automatically.
+- **Do not:** estimate charge, weaken identity/packet validation, or send undocumented BLE writes.
+
 ## Imported configuration is rejected
 
 - **Observed behavior:** import reports failure and current mappings remain unchanged.

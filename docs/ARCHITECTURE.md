@@ -11,7 +11,8 @@ No backend, database, cloud account, telemetry service, or third-party package d
 | Component | Responsibility | Interfaces | Owner |
 |---|---|---|---|
 | `XPdApp` / `AppDelegate` | Application lifecycle, menu-bar/window setup, initial input permission request | SwiftUI, AppKit, IOKit permission API | Unknown |
-| `HIDService` | Match `10429:514`, manage HID lifecycle, publish input reports/wheel values, and expose optional verified battery percentage | IOKit HID callbacks/properties | Unknown |
+| `HIDService` | Match `10429:514`, manage HID lifecycle, publish input reports/wheel values, and combine exact HID/BLE battery sources | IOKit HID callbacks/properties | Unknown |
+| `ShortcutRemoteBatteryMonitor` | Verify the target BLE PnP identity, enable its two notify-only vendor characteristics, and parse exact battery packets | CoreBluetooth | Unknown |
 | `MappingStore` | Central active-profile state, independent profile mappings/HID bindings, migration, persistence, imports, action dispatch | SwiftUI observable state, `UserDefaults` | Unknown |
 | `ActionRunner` | Execute mapped shortcuts, scrolling, app actions, and commands; permission preflight/settings | Core Graphics, AppKit, ApplicationServices, process APIs | Unknown |
 | Configuration models/document | Codable configuration schema, validation, JSON import/export | Foundation, SwiftUI `FileDocument` | Unknown |
@@ -27,6 +28,8 @@ Configuration UI edits → active profile in `MappingStore` → one version-2 pr
 
 Wheel center → open persistent selector → wheel rotation updates only the pending highlight → second center press activates the highlighted profile and loads its mappings/HID bindings.
 
+Matching HID connection → BLE PnP read/verification → notify-only FFE0/0002 plus FFE0/0003 subscription → validated `02 F2 01 <percent>` packet → `HIDService` battery state → header and menu-bar UI. Disconnect, identity mismatch, Bluetooth loss, or invalid data clears/withholds the BLE value.
+
 The build script compiles `XPd`, assembles `dist/XP[d].app`, creates its Info.plist, copies the icon, applies a stable designated requirement for `com.dmssoftres.xpd`, and optionally launches or verifies the process.
 
 ## Trust boundaries
@@ -34,6 +37,7 @@ The build script compiles `XPd`, assembles `dist/XP[d].app`, creates its Info.pl
 - macOS Input Monitoring consent gates remote input observation.
 - Accessibility/event-posting consent gates synthetic scrolling and window manipulation.
 - HID reports are untrusted hardware input and must be matched/decoded narrowly.
+- Private BLE notifications are untrusted peripheral input; require exact PnP identity, packet signature, and 0...100 range, and never write undocumented vendor characteristics.
 - Imported JSON and user-entered commands are untrusted data; imports require complete validation and commands execute only through explicit mappings.
 - TCC reset modes mutate the user's privacy settings and remain manual recovery operations.
 
@@ -43,6 +47,7 @@ The build script compiles `XPd`, assembles `dist/XP[d].app`, creates its Info.pl
 - Privacy approval stale after rebuild: the app may connect or post events incorrectly until the stable signed bundle is approved/relaunched.
 - Invalid import: reject atomically without replacing any in-memory or persisted profile state.
 - Unknown/changed HID report: learning or mapped control resolution fails; capture evidence before changing decoding.
+- Missing/mismatched BLE identity or notification: retain an exact HID property if available; otherwise show battery unavailable rather than estimating.
 - Wheel-center report changes or loses its device-specific standalone empty report-6 distinction: selector confirmation may regress and requires controlled real-hardware recapture.
 - Action target unavailable or permission denied: report a structured action failure without corrupting mappings.
 

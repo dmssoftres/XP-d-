@@ -94,6 +94,8 @@ cat > "$INFO_PLIST" <<PLIST
   <key>NSPrincipalClass</key><string>NSApplication</string>
   <key>NSInputMonitoringUsageDescription</key>
   <string>XP[d] reads input from your connected Shortcut Remote so its controls can be mapped.</string>
+  <key>NSBluetoothAlwaysUsageDescription</key>
+  <string>XP[d] reads the connected Shortcut Remote's verified battery level.</string>
 </dict>
 </plist>
 PLIST

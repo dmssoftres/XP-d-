@@ -19,4 +19,81 @@ final class BatteryIndicatorTests: XCTestCase {
         XCTAssertNil(HIDService.normalizedBatteryPercentage(from: NSNumber(value: true)))
         XCTAssertNil(HIDService.normalizedBatteryPercentage(from: "42"))
     }
+
+    func testBLEBatteryNotificationAcceptsVerifiedZeroAndOneHundredPercent() {
+        XCTAssertEqual(
+            ShortcutRemoteBatteryMonitor.batteryPercentage(
+                fromBatteryNotification: Data([0x02, 0xF2, 0x01, 0x00, 0x01])
+            ),
+            0
+        )
+        XCTAssertEqual(
+            ShortcutRemoteBatteryMonitor.batteryPercentage(
+                fromBatteryNotification: Data([0x02, 0xF2, 0x01, 0x64, 0x01])
+            ),
+            100
+        )
+    }
+
+    func testBLEBatteryNotificationRejectsMalformedOrAmbiguousPackets() {
+        XCTAssertNil(ShortcutRemoteBatteryMonitor.batteryPercentage(fromBatteryNotification: Data()))
+        XCTAssertNil(
+            ShortcutRemoteBatteryMonitor.batteryPercentage(
+                fromBatteryNotification: Data([0x02, 0xF2, 0x01])
+            )
+        )
+        XCTAssertNil(
+            ShortcutRemoteBatteryMonitor.batteryPercentage(
+                fromBatteryNotification: Data([0x01, 0xF2, 0x01, 0x64, 0x01])
+            )
+        )
+        XCTAssertNil(
+            ShortcutRemoteBatteryMonitor.batteryPercentage(
+                fromBatteryNotification: Data([0x02, 0xF1, 0x01, 0x64, 0x01])
+            )
+        )
+        XCTAssertNil(
+            ShortcutRemoteBatteryMonitor.batteryPercentage(
+                fromBatteryNotification: Data([0x02, 0xF2, 0x02, 0x64, 0x01])
+            )
+        )
+        XCTAssertNil(
+            ShortcutRemoteBatteryMonitor.batteryPercentage(
+                fromBatteryNotification: Data([0x02, 0xF2, 0x01, 0x65, 0x01])
+            )
+        )
+    }
+
+    func testBLEBatteryIdentityRequiresExactShortcutRemotePnPID() {
+        XCTAssertTrue(
+            ShortcutRemoteBatteryMonitor.isExpectedRemoteDeviceInformation(
+                Data([0x02, 0xBD, 0x28, 0x02, 0x02, 0x01, 0x00])
+            )
+        )
+        XCTAssertFalse(
+            ShortcutRemoteBatteryMonitor.isExpectedRemoteDeviceInformation(
+                Data([0x01, 0xBD, 0x28, 0x02, 0x02, 0x01, 0x00])
+            )
+        )
+        XCTAssertFalse(
+            ShortcutRemoteBatteryMonitor.isExpectedRemoteDeviceInformation(
+                Data([0x02, 0xBC, 0x28, 0x02, 0x02, 0x01, 0x00])
+            )
+        )
+        XCTAssertFalse(
+            ShortcutRemoteBatteryMonitor.isExpectedRemoteDeviceInformation(
+                Data([0x02, 0xBD, 0x28, 0x02, 0x03, 0x01, 0x00])
+            )
+        )
+        XCTAssertFalse(
+            ShortcutRemoteBatteryMonitor.isExpectedRemoteDeviceInformation(
+                Data([0x02, 0xBD, 0x28, 0x02, 0x02, 0x02, 0x00])
+            )
+        )
+        XCTAssertFalse(
+            ShortcutRemoteBatteryMonitor.isExpectedRemoteDeviceInformation(
+                Data([0x02, 0xBD, 0x28, 0x02, 0x02, 0x01])
+            )
+        )
+    }
 }
