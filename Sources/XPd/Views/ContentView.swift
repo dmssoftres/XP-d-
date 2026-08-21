@@ -59,7 +59,7 @@ struct ContentView: View {
             Button {
                 isManagingProfiles = true
             } label: {
-                Image(systemName: "person.2")
+                Image(systemName: "square.stack.3d.up")
             }
             .buttonStyle(.borderless)
             .help("Add or remove profiles")
@@ -158,7 +158,7 @@ private struct ProfileManagementView: View {
             List {
                 ForEach(store.availableProfiles, id: \.self) { profile in
                     HStack(spacing: 10) {
-                        Image(systemName: profile == "Global" ? "globe" : "person.crop.circle")
+                        Image(systemName: profile == "Global" ? "globe" : "app")
                             .foregroundStyle(.secondary)
                         Text(profile)
                         if profile == store.profileName {
