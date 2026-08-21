@@ -17,18 +17,31 @@ struct XPdApp: App {
         MenuBarExtra {
             MenuBarView(store: store)
         } label: {
-            HStack(spacing: 3) {
-                Image(systemName: "smallcircle.filled.circle")
-                if store.activeRealm == .midi {
-                    Text("M")
-                        .font(.caption2.weight(.bold))
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 1)
-                        .background(.primary.opacity(0.12), in: Capsule())
-                }
-            }
-            .accessibilityLabel(store.activeRealm == .midi ? "XP[d], MIDI Lock active" : "XP[d]")
+            Image(nsImage: MenuBarIcon.image(midiLocked: store.activeRealm == .midi))
+                .accessibilityLabel(store.activeRealm == .midi ? "XP[d], MIDI Lock active" : "XP[d]")
         }
+    }
+}
+
+/// MenuBarExtra flattens nested SwiftUI labels into separate status-item
+/// elements. Render both marks into one template image so the MIDI badge is
+/// attached to the XP[d] icon instead of becoming a second menu-bar item.
+private enum MenuBarIcon {
+    static func image(midiLocked: Bool) -> NSImage {
+        let size = NSSize(width: midiLocked ? 25 : 15, height: 18)
+        let image = NSImage(size: size)
+        image.lockFocus()
+        drawSymbol("smallcircle.filled.circle", in: NSRect(x: 0, y: 2, width: 15, height: 15))
+        if midiLocked {
+            drawSymbol("m.circle", in: NSRect(x: 12, y: 0, width: 12, height: 12))
+        }
+        image.unlockFocus()
+        image.isTemplate = true
+        return image
+    }
+
+    private static func drawSymbol(_ name: String, in rect: NSRect) {
+        NSImage(systemSymbolName: name, accessibilityDescription: nil)?.draw(in: rect)
     }
 }
 
