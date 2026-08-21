@@ -5,18 +5,7 @@ struct RemoteView: View {
     let store: MappingStore
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Remote").font(.headline)
-                Spacer()
-                Text(store.hid.lastEvent)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-
-            device
-        }
+        device
     }
 
     private var device: some View {
