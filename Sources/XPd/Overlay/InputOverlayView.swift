@@ -93,8 +93,8 @@ private struct ProfileSelectorCard: View {
         .padding(16)
         .frame(width: 290)
         .background {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(.thinMaterial)
+            OverlayGlassMaterial()
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         }
         .background {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
@@ -127,6 +127,12 @@ private struct SoftSlateCard: View {
         entry.isPressed && elapsed >= holdThreshold
     }
 
+    private var versionLabel: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+        return build.map { "v\(version) (\($0))" } ?? "v\(version)"
+    }
+
     private var cardOpacity: Double {
         guard let releasedAt = entry.releasedAt else { return 1 }
         let age = now.timeIntervalSince(releasedAt)
@@ -139,12 +145,20 @@ private struct SoftSlateCard: View {
     var body: some View {
         VStack(spacing: 11) {
             HStack(spacing: 15) {
-                Text(entry.control.overlayLabel)
-                    .font(.custom("HelveticaNeue-Medium", fixedSize: 34))
-                    .foregroundStyle(Color.white.opacity(0.96))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.65)
-                    .frame(width: 58, alignment: .center)
+                VStack(spacing: 2) {
+                    Text(entry.control.overlayLabel)
+                        .font(.custom("HelveticaNeue-Medium", fixedSize: 34))
+                        .foregroundStyle(Color.white.opacity(0.96))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.65)
+
+                    Text(versionLabel)
+                        .font(.custom("HelveticaNeue", fixedSize: 7))
+                        .tracking(0.2)
+                        .foregroundStyle(Color.white.opacity(0.34))
+                        .lineLimit(1)
+                }
+                .frame(width: 58, alignment: .center)
 
                 Rectangle()
                     .fill(Color.white.opacity(0.12))
@@ -164,8 +178,8 @@ private struct SoftSlateCard: View {
         .padding(.vertical, 14)
         .frame(width: 290, height: 118)
         .background {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(.thinMaterial)
+            OverlayGlassMaterial()
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         }
         .background {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
@@ -260,8 +274,8 @@ private struct SoftSlateHistoryCard: View {
         .padding(.horizontal, 14)
         .frame(width: 290, height: 50, alignment: .leading)
         .background {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(.thinMaterial)
+            OverlayGlassMaterial()
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .opacity(0.82)
         }
         .background {
