@@ -26,12 +26,41 @@ final class ActionRunner {
         case restore
     }
 
+    enum ForegroundVerification: Equatable {
+        case notForegrounded
+        case foregroundedWindowVisible
+        case foregroundedWindowStateUnknown
+    }
+
+    enum ActivationFailure: Equatable {
+        case workspaceError(String)
+        case missingApplication
+        case exactApplicationPathChanged
+        case applicationPathUnavailable
+        case notForegrounded
+    }
+
+    enum ActivationDecision: Equatable {
+        case completed
+        case retry
+        case workspaceFallback
+        case failure(ActivationFailure)
+    }
+
+    enum WorkspaceFallbackDecision: Equatable {
+        case ready
+        case failure(ActivationFailure)
+    }
+
     private enum WindowMutationResult {
         case success(Int)
         case failure(AXError)
     }
 
     private let workspace = NSWorkspace.shared
+
+    private static let activationVerificationAttempts = 6
+    private static let activationVerificationDelay = Duration.milliseconds(50)
 
     /// Pure seams shared by the AX implementation and focused tests.
     static func orderedWindowCandidates<T>(focused: T?, main: T?) -> [T] {
@@ -40,9 +69,76 @@ final class ActionRunner {
 
     static func toggleOperation(
         applicationIsActive: Bool,
-        targetWindowIsMinimized: Bool?
+        targetWindowIsMinimized: Bool?,
+        applicationIsHidden: Bool = false
     ) -> ToggleOperation {
-        applicationIsActive && targetWindowIsMinimized != true ? .minimize : .restore
+        applicationIsActive && !applicationIsHidden && targetWindowIsMinimized == false
+            ? .minimize
+            : .restore
+    }
+
+    static func foregroundVerification(
+        applicationIsActive: Bool,
+        applicationIsHidden: Bool,
+        targetWindowIsMinimized: Bool?
+    ) -> ForegroundVerification {
+        guard applicationIsActive, !applicationIsHidden else {
+            return .notForegrounded
+        }
+        guard let targetWindowIsMinimized else {
+            return .foregroundedWindowStateUnknown
+        }
+        return targetWindowIsMinimized
+            ? .notForegrounded
+            : .foregroundedWindowVisible
+    }
+
+    static func activationDecision(
+        directRequestAccepted: Bool,
+        targetBecameActive: Bool,
+        remainingAttempts: Int,
+        allowWorkspaceFallback: Bool
+    ) -> ActivationDecision {
+        guard directRequestAccepted else {
+            return allowWorkspaceFallback
+                ? .workspaceFallback
+                : .failure(.notForegrounded)
+        }
+        if targetBecameActive {
+            return .completed
+        }
+        if remainingAttempts > 0 {
+            return .retry
+        }
+        if allowWorkspaceFallback {
+            return .workspaceFallback
+        }
+        return .failure(.notForegrounded)
+    }
+
+    static func workspaceFallbackDecision(
+        errorMessage: String?,
+        applicationReturned: Bool,
+        exactPathMatches: Bool
+    ) -> WorkspaceFallbackDecision {
+        if let errorMessage {
+            return .failure(.workspaceError(errorMessage))
+        }
+        guard applicationReturned else {
+            return .failure(.missingApplication)
+        }
+        guard exactPathMatches else {
+            return .failure(.exactApplicationPathChanged)
+        }
+        return .ready
+    }
+
+    static func workspaceFallbackConfiguration() -> NSWorkspace.OpenConfiguration {
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        configuration.createsNewApplicationInstance = false
+        configuration.allowsRunningApplicationSubstitution = false
+        return configuration
     }
 
     static func applicationPathsMatch(requestedPath: String, runningURL: URL) -> Bool {
@@ -70,9 +166,18 @@ final class ActionRunner {
 
         if let runningApplication = runningApplication(matching: requestedName) {
             if mapping.action == .toggleApplication {
-                completion(toggle(runningApplication, requestedName: requestedName))
+                toggle(
+                    runningApplication,
+                    requestedName: requestedName,
+                    completion: completion
+                )
             } else {
-                completion(restore(runningApplication, requestedName: requestedName, promptForAccess: false))
+                restore(
+                    runningApplication,
+                    requestedName: requestedName,
+                    promptForAccess: false,
+                    completion: completion
+                )
             }
             return
         }
@@ -84,18 +189,37 @@ final class ActionRunner {
 
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
+        configuration.createsNewApplicationInstance = false
+        configuration.allowsRunningApplicationSubstitution = false
         workspace.openApplication(at: applicationURL, configuration: configuration) { application, error in
-            let result: ActionExecutionResult
-            if let error {
-                result = .failure("Could not open \(requestedName): \(error.localizedDescription)")
-            } else if let application {
-                result = .success("Opened \(application.localizedName ?? requestedName)")
-            } else {
-                result = .failure("Could not open \(requestedName)")
-            }
-
             Task { @MainActor in
-                completion(result)
+                if let error {
+                    completion(.failure("Could not open \(requestedName): \(error.localizedDescription)"))
+                    return
+                }
+
+                guard let application else {
+                    completion(.failure("Could not open \(requestedName)"))
+                    return
+                }
+
+                if !Self.allowsBundleIdentifierFallback(for: requestedName) {
+                    guard let returnedURL = application.bundleURL,
+                          Self.applicationPathsMatch(
+                              requestedPath: requestedName,
+                              runningURL: returnedURL
+                          ) else {
+                        completion(.failure("Could not open \(requestedName): exact application path changed"))
+                        return
+                    }
+                }
+
+                self.restore(
+                    application,
+                    requestedName: requestedName,
+                    promptForAccess: false,
+                    completion: completion
+                )
             }
         }
     }
@@ -223,22 +347,35 @@ final class ActionRunner {
 
     private func toggle(
         _ application: NSRunningApplication,
-        requestedName: String
-    ) -> ActionExecutionResult {
+        requestedName: String,
+        completion: @escaping @MainActor (ActionExecutionResult) -> Void
+    ) {
         // A physical button press is not an explicit permission request.  A
         // failed preflight should produce a stable status message, not a
         // repeated system prompt on every press.
         guard hasAccessibilityAccess(prompt: false) else {
-            return .failure("Allow XP[d] in Accessibility, then press again")
+            completion(.failure("Allow XP[d] in Accessibility, then press again"))
+            return
         }
 
         if Self.toggleOperation(
             applicationIsActive: application.isActive,
-            targetWindowIsMinimized: targetWindowIsMinimized(application)
+            targetWindowIsMinimized: targetWindowIsMinimized(application),
+            applicationIsHidden: application.isHidden
         ) == .minimize {
-            return minimize(application, requestedName: requestedName)
+            completion(minimize(application, requestedName: requestedName))
+            return
         }
-        return restore(application, requestedName: requestedName, promptForAccess: true)
+
+        // Toggle's minimize branch is synchronous because the AX mutation is
+        // the requested operation. Restoration is asynchronous: success is
+        // reported only after the application is actually frontmost.
+        restore(
+            application,
+            requestedName: requestedName,
+            promptForAccess: true,
+            completion: completion
+        )
     }
 
     private func minimize(
@@ -263,8 +400,9 @@ final class ActionRunner {
     private func restore(
         _ application: NSRunningApplication,
         requestedName: String,
-        promptForAccess: Bool
-    ) -> ActionExecutionResult {
+        promptForAccess: Bool,
+        completion: @escaping @MainActor (ActionExecutionResult) -> Void
+    ) {
         let name = displayName(for: application, fallback: requestedName)
         // Restoration may be reached from a physical button press.  Keep the
         // check silent for all action execution; the inspector's explicit
@@ -276,17 +414,194 @@ final class ActionRunner {
             restoreFailed = true
         }
 
-        guard application.activate(options: [.activateAllWindows]) else {
-            return .failure("Could not activate \(name)")
+        // Hidden applications do not reliably become visible from activate
+        // alone.  unhide() is a non-AX AppKit request and never prompts.
+        _ = application.unhide()
+        let requestAccepted = application.activate(options: [.activateAllWindows])
+
+        verifyActivation(
+            application,
+            requestedName: requestedName,
+            displayName: name,
+            promptForAccess: promptForAccess,
+            hasAccessibilityAccess: hasAccess,
+            restoreFailed: restoreFailed,
+            directRequestAccepted: requestAccepted,
+            remainingAttempts: requestAccepted ? Self.activationVerificationAttempts : 0,
+            allowWorkspaceFallback: true,
+            completion: completion
+        )
+    }
+
+    private func verifyActivation(
+        _ application: NSRunningApplication,
+        requestedName: String,
+        displayName name: String,
+        promptForAccess: Bool,
+        hasAccessibilityAccess: Bool,
+        restoreFailed: Bool,
+        directRequestAccepted: Bool,
+        remainingAttempts: Int,
+        allowWorkspaceFallback: Bool,
+        completion: @escaping @MainActor (ActionExecutionResult) -> Void
+    ) {
+        let verification = foregroundVerification(for: application)
+        let targetBecameActive = verification != .notForegrounded
+        switch Self.activationDecision(
+            directRequestAccepted: directRequestAccepted,
+            targetBecameActive: targetBecameActive,
+            remainingAttempts: remainingAttempts,
+            allowWorkspaceFallback: allowWorkspaceFallback
+        ) {
+        case .completed:
+            completion(Self.activationResult(
+                displayName: name,
+                promptForAccess: promptForAccess,
+                hasAccessibilityAccess: hasAccessibilityAccess,
+                restoreFailed: restoreFailed,
+                verification: verification
+            ))
+        case .retry:
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: Self.activationVerificationDelay)
+                guard let self else { return }
+                self.verifyActivation(
+                    application,
+                    requestedName: requestedName,
+                    displayName: name,
+                    promptForAccess: promptForAccess,
+                    hasAccessibilityAccess: hasAccessibilityAccess,
+                    restoreFailed: restoreFailed,
+                    directRequestAccepted: directRequestAccepted,
+                    remainingAttempts: remainingAttempts - 1,
+                    allowWorkspaceFallback: allowWorkspaceFallback,
+                    completion: completion
+                )
+            }
+        case .workspaceFallback:
+            reopenAndVerify(
+                application,
+                requestedName: requestedName,
+                displayName: name,
+                promptForAccess: promptForAccess,
+                hasAccessibilityAccess: hasAccessibilityAccess,
+                restoreFailed: restoreFailed,
+                completion: completion
+            )
+        case .failure(let failure):
+            completion(Self.activationFailureResult(displayName: name, failure: failure))
+        }
+    }
+
+    private func reopenAndVerify(
+        _ application: NSRunningApplication,
+        requestedName: String,
+        displayName name: String,
+        promptForAccess: Bool,
+        hasAccessibilityAccess: Bool,
+        restoreFailed: Bool,
+        completion: @escaping @MainActor (ActionExecutionResult) -> Void
+    ) {
+        guard let applicationURL = application.bundleURL else {
+            completion(Self.activationFailureResult(
+                displayName: name,
+                failure: .applicationPathUnavailable
+            ))
+            return
         }
 
-        if promptForAccess, !hasAccess {
+        let configuration = Self.workspaceFallbackConfiguration()
+        workspace.openApplication(at: applicationURL, configuration: configuration) { [weak self] fallbackApplication, error in
+            Task { @MainActor in
+                guard let self else { return }
+                let fallbackURL = fallbackApplication?.bundleURL
+                let fallbackDecision = Self.workspaceFallbackDecision(
+                    errorMessage: error?.localizedDescription,
+                    applicationReturned: fallbackApplication != nil,
+                    exactPathMatches: fallbackURL.map {
+                        Self.applicationPathsMatch(
+                            requestedPath: applicationURL.path,
+                            runningURL: $0
+                        )
+                    } ?? false
+                )
+                guard case .ready = fallbackDecision else {
+                    if case .failure(let failure) = fallbackDecision {
+                        completion(Self.activationFailureResult(displayName: name, failure: failure))
+                    }
+                    return
+                }
+
+                guard let fallbackApplication else { return }
+                _ = fallbackApplication.unhide()
+                var fallbackRestoreFailed = restoreFailed
+                if hasAccessibilityAccess,
+                   case .failure = self.setMinimized(false, for: fallbackApplication) {
+                    fallbackRestoreFailed = true
+                }
+                self.verifyActivation(
+                    fallbackApplication,
+                    requestedName: requestedName,
+                    displayName: name,
+                    promptForAccess: promptForAccess,
+                    hasAccessibilityAccess: hasAccessibilityAccess,
+                    restoreFailed: fallbackRestoreFailed,
+                    directRequestAccepted: true,
+                    remainingAttempts: Self.activationVerificationAttempts,
+                    allowWorkspaceFallback: false,
+                    completion: completion
+                )
+            }
+        }
+    }
+
+    static func activationResult(
+        displayName name: String,
+        promptForAccess: Bool,
+        hasAccessibilityAccess: Bool,
+        restoreFailed: Bool,
+        verification: ForegroundVerification
+    ) -> ActionExecutionResult {
+        if promptForAccess, !hasAccessibilityAccess {
             return .failure("Activated \(name); allow XP[d] in Accessibility to restore minimized windows")
         }
         if restoreFailed {
             return .failure("Activated \(name), but could not restore its windows")
         }
-        return .success("Activated \(name)")
+        switch verification {
+        case .foregroundedWindowVisible:
+            return .success("Activated \(name)")
+        case .foregroundedWindowStateUnknown:
+            return .success("Activated \(name); window visibility unavailable")
+        case .notForegrounded:
+            return .failure("Could not activate \(name)")
+        }
+    }
+
+    static func activationFailureResult(
+        displayName name: String,
+        failure: ActivationFailure
+    ) -> ActionExecutionResult {
+        switch failure {
+        case .workspaceError(let message):
+            return .failure("Could not activate \(name): \(message)")
+        case .exactApplicationPathChanged:
+            return .failure("Could not activate \(name): exact application path changed")
+        case .applicationPathUnavailable:
+            return .failure("Could not activate \(name): application path is unavailable")
+        case .missingApplication, .notForegrounded:
+            return .failure("Could not activate \(name)")
+        }
+    }
+
+    private func foregroundVerification(
+        for application: NSRunningApplication
+    ) -> ForegroundVerification {
+        Self.foregroundVerification(
+            applicationIsActive: application.isActive,
+            applicationIsHidden: application.isHidden,
+            targetWindowIsMinimized: targetWindowIsMinimized(application)
+        )
     }
 
     private func hasAccessibilityAccess(prompt: Bool) -> Bool {

@@ -62,7 +62,7 @@ The build script compiles `XPd`, assembles `dist/XP[d].app`, creates its Info.pl
 - Missing release or conflicting live-button reports: cancel the displaced/pending gesture rather than execute an ambiguous action.
 - Missing/mismatched BLE identity or notification: retain an exact HID property if available; otherwise show battery unavailable rather than estimating.
 - Wheel-center report changes or loses its device-specific standalone empty report-6 distinction: selector confirmation may regress and requires controlled real-hardware recapture.
-- Action target unavailable or permission denied: report a structured action failure without corrupting mappings.
+- Action target unavailable or permission denied: report a structured action failure without corrupting mappings. Existing application targets are unhidden/restored where permitted, directly activated, and asynchronously verified as foreground; a failed or ineffective direct activation makes one same-path `NSWorkspace` reopen attempt without creating another instance.
 - Inherited Hold/Double target invalid: show the Tap validation failure and do not invoke `ActionRunner`.
 - CoreMIDI source creation/send failure: keep profile state intact, report the
   affected port, and retain failed live/toggle state so cleanup can retry.
