@@ -14,8 +14,20 @@ struct XPdApp: App {
         }
         .defaultSize(width: 980, height: 650)
 
-        MenuBarExtra("XP[d]", systemImage: "smallcircle.filled.circle") {
+        MenuBarExtra {
             MenuBarView(store: store)
+        } label: {
+            HStack(spacing: 3) {
+                Image(systemName: "smallcircle.filled.circle")
+                if store.activeRealm == .midi {
+                    Text("M")
+                        .font(.caption2.weight(.bold))
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(.primary.opacity(0.12), in: Capsule())
+                }
+            }
+            .accessibilityLabel(store.activeRealm == .midi ? "XP[d], MIDI Lock active" : "XP[d]")
         }
     }
 }

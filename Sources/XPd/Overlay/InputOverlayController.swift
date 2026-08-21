@@ -5,6 +5,7 @@ import SwiftUI
 final class InputOverlayController {
     private let model: InputOverlayModel
     private let panel: NSPanel
+    private var visibilityGeneration = 0
 
     init(displayDuration: TimeInterval = 4) {
         model = InputOverlayModel(displayDuration: displayDuration)
@@ -25,14 +26,8 @@ final class InputOverlayController {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         panel.isReleasedWhenClosed = false
 
-        model.visibilityDidChange = { [weak panel] hasVisibleEntries in
-            guard let panel else { return }
-            if hasVisibleEntries {
-                panel.contentView?.needsLayout = true
-                panel.contentView?.needsDisplay = true
-            } else {
-                panel.orderOut(nil)
-            }
+        model.visibilityDidChange = { [weak self] hasVisibleEntries in
+            self?.updatePanelVisibility(hasVisibleEntries)
         }
 
         NotificationCenter.default.addObserver(
@@ -126,8 +121,32 @@ final class InputOverlayController {
     }
 
     private func ensureVisible() {
+        visibilityGeneration &+= 1
+        panel.alphaValue = 1
         positionOnActiveScreen()
         panel.orderFrontRegardless()
+    }
+
+    private func updatePanelVisibility(_ hasVisibleEntries: Bool) {
+        visibilityGeneration &+= 1
+        let generation = visibilityGeneration
+
+        if hasVisibleEntries {
+            panel.alphaValue = 1
+            panel.contentView?.needsLayout = true
+            panel.contentView?.needsDisplay = true
+            return
+        }
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.22
+            panel.animator().alphaValue = 0
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.24) { [weak self] in
+            guard let self, self.visibilityGeneration == generation else { return }
+            self.panel.orderOut(nil)
+            self.panel.alphaValue = 1
+        }
     }
 
     private func positionOnActiveScreen() {

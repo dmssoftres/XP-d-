@@ -111,6 +111,7 @@ final class InputOverlayModel {
     var isEnabled = true
     private(set) var displayDuration: TimeInterval
     @ObservationIgnored var visibilityDidChange: ((Bool) -> Void)?
+    @ObservationIgnored private var midiDismissalTimer: Timer?
 
     init(displayDuration: TimeInterval = 4) {
         self.displayDuration = displayDuration
@@ -195,21 +196,37 @@ final class InputOverlayModel {
             summary: summary
         )
         visibilityDidChange?(true)
+        scheduleMIDIDismissal()
     }
 
     func clearMIDI() {
         guard midiPresentation != nil else { return }
+        midiDismissalTimer?.invalidate()
+        midiDismissalTimer = nil
         midiPresentation = nil
         visibilityDidChange?(hasVisibleContent)
     }
 
     func reset() {
         entries.removeAll()
+        midiDismissalTimer?.invalidate()
+        midiDismissalTimer = nil
         midiPresentation = nil
         visibilityDidChange?(hasVisibleContent)
     }
 
     private var hasVisibleContent: Bool {
-        profileSelection != nil || !entries.isEmpty
+        profileSelection != nil || midiPresentation != nil || !entries.isEmpty
+    }
+
+    private func scheduleMIDIDismissal() {
+        midiDismissalTimer?.invalidate()
+        let timer = Timer(timeInterval: displayDuration, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.clearMIDI()
+            }
+        }
+        midiDismissalTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 }

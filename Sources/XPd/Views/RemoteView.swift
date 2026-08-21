@@ -266,15 +266,29 @@ struct RemoteView: View {
             Button {
                 store.selectedControl = control
             } label: {
-                VStack(spacing: 1) {
+                VStack(spacing: 2) {
                     Text(control.rawValue)
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(keyLabelColor(control))
-                    Text(isFn ? "Hold → Layer 2" : midiButtonSummary(mapping))
-                        .font(.system(size: 7.5, weight: .medium, design: .monospaced))
-                        .foregroundStyle(isFn ? .orange : .white.opacity(0.54))
+                    if isFn {
+                        Text("Hold → Layer 2")
+                            .font(.system(size: 8.5, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.orange)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.65)
+                    } else {
+                        let detail = midiButtonDetail(mapping)
+                        VStack(spacing: 0) {
+                            Text(detail.primary)
+                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            Text(detail.secondary)
+                                .font(.system(size: 8.5, weight: .medium, design: .monospaced))
+                                .foregroundStyle(.white.opacity(0.58))
+                        }
+                        .foregroundStyle(.white.opacity(0.76))
                         .lineLimit(1)
-                        .minimumScaleFactor(0.55)
+                        .minimumScaleFactor(0.65)
+                    }
                 }
                 .frame(maxWidth: .infinity, minHeight: height - 14, maxHeight: height - 14)
                 .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
@@ -290,16 +304,22 @@ struct RemoteView: View {
     }
 
     private func midiButtonSummary(_ mapping: MIDIButtonMapping) -> String {
+        let detail = midiButtonDetail(mapping)
+        return "\(detail.primary) \(detail.secondary)"
+    }
+
+    private func midiButtonDetail(_ mapping: MIDIButtonMapping) -> (primary: String, secondary: String) {
         switch mapping.kind {
         case .note:
-            return "\(midiNoteName(mapping.note))(\(mapping.note)) Ch\(mapping.channel) V\(mapping.velocity)"
+            return ("\(midiNoteName(mapping.note)) (\(mapping.note))", "Ch \(mapping.channel) · V \(mapping.velocity)")
         case .cc:
-            return "CC\(mapping.controller) Ch\(mapping.channel) \(mapping.pressValue)/\(mapping.releaseValue)"
+            return ("CC \(mapping.controller)", "Ch \(mapping.channel) · \(mapping.pressValue)/\(mapping.releaseValue)")
         case .program:
-            return "PC\(mapping.program) Ch\(mapping.channel)"
+            return ("PC \(mapping.program)", "Ch \(mapping.channel)")
         case .chord:
-            return "\(mapping.chord.map(String.init).joined(separator: ",")) Ch\(mapping.channel) V\(mapping.velocity)"
-        case .noAction: return "—"
+            return (mapping.chord.map(String.init).joined(separator: ","), "Ch \(mapping.channel) · V \(mapping.velocity)")
+        case .noAction:
+            return ("No output", "")
         }
     }
 
