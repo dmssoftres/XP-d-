@@ -30,6 +30,12 @@ Configuration UI/profile-manager edits → `MappingStore` → one ordered versio
 
 Standard K-layer input → accumulate K reports until the generic HID release boundary → classify every designated K as a modifier and require exactly one non-designated primary → route Tap/Hold/Double through the exact modifier-set `MappingKey`. Pending gesture identity includes the primary, exact K layer, keyboard modifiers, and F keys so only equivalent presses may form a Double; a primary-first press is reclassified when a K modifier joins its active cycle. A single designated modifier released alone executes its Base Tap mapping; modifier-only stacks and multi-primary cycles are consumed. Press order is irrelevant within the cycle. Profile/import/learning/disconnect/wheel boundaries cancel the accumulated cycle. Physical rollover and the target device's post-release report behavior remain manual acceptance points because the current HID stream exposes only one generic release boundary.
 
+Standard mapping inspector → keep Base bound to the left action column → bind
+the chosen exact K-modifier set to the right action column → keep title,
+modifier designation, gesture, and result state shared outside the split.
+Keyboard-shortcut and remote-trigger capture are mutually exclusive across the
+two columns so only one local event monitor/capture handler remains active.
+
 Keyboard-shortcut capture → local AppKit key-down/flags-changed monitor → in-view draft for exactly one simultaneous chord (zero or more modifiers plus one physical key) → second mouse click commits structured chord data and its readable display text. Escape, selection/action changes, and view removal cancel the draft without changing either mapping. Remote K-buttons remain mapping triggers and are never recorded as shortcut inputs. `ActionRunner` silently preflights post-event access and, only for a structured chord, posts one matching key-down/key-up pair; legacy command-text shortcuts remain visible but are rejected with re-record guidance.
 
 Remote-trigger capture → local modifier/function-key monitor plus a temporary

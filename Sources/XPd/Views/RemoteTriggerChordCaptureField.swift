@@ -13,6 +13,7 @@ struct RemoteTriggerChordCaptureField: View {
     let beginCapture: (@escaping (RemoteControl) -> Void) -> Void
     let endCapture: () -> Void
     let onCommit: (RemoteControl, Set<KeyboardShortcut.Modifier>, UInt16?) -> Void
+    let onRecordingChange: (Bool) -> Void
 
     @State private var isRecording = false
     @State private var draftControl: RemoteControl?
@@ -167,6 +168,7 @@ struct RemoteTriggerChordCaptureField: View {
         currentModifierFlags = []
         didCaptureButton = false
         isRecording = true
+        onRecordingChange(true)
 
         eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { event in
             switch event.type {
@@ -211,6 +213,7 @@ struct RemoteTriggerChordCaptureField: View {
             self.eventMonitor = nil
         }
         isRecording = false
+        onRecordingChange(false)
         endCapture()
 
         if commit, didCaptureButton, let draftControl {

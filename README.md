@@ -104,6 +104,11 @@ would conflict with their held-layer role. Layer stacks require exactly one
 non-modifier primary K button; ambiguous multi-primary input is consumed.
 Turning a designation off hides its layers without deleting their mappings.
 
+For a non-modifier K button, the inspector keeps the Base action visible in a
+left column and shows one chosen exact modifier layer in a right column. The
+right header selects single or stacked layers, so Base and K-layer actions can
+be compared and edited without swapping the entire inspector.
+
 In Standard profiles, select K1–K10 to set an optional **Button title**. The
 title appears as one compact line at the top of that button and is shared by
 its Tap, Hold, and Double mappings. Titles are profile-specific, limited to 24

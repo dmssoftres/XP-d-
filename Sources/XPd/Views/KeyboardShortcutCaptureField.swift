@@ -94,6 +94,7 @@ struct KeyboardShortcutCaptureField: View {
     @Binding var command: String
     @Binding var shortcut: KeyboardShortcut?
     let cancellationGeneration: Int
+    let onRecordingChange: (Bool) -> Void
 
     @State private var isRecording = false
     @State private var draftKeyCode: UInt16?
@@ -249,6 +250,7 @@ struct KeyboardShortcutCaptureField: View {
         currentModifierFlags = []
         didEditDraft = false
         isRecording = true
+        onRecordingChange(true)
         eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { event in
             switch event.type {
             case .keyDown:
@@ -315,6 +317,7 @@ struct KeyboardShortcutCaptureField: View {
             self.eventMonitor = nil
         }
         isRecording = false
+        onRecordingChange(false)
         if commit, didEditDraft {
             if let draftShortcut {
                 shortcut = draftShortcut

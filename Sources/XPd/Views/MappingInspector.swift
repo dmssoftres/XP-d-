@@ -3,30 +3,7 @@ import SwiftUI
 
 struct MappingInspector: View {
     let store: MappingStore
-    @State private var isEditingCommand = false
-    @State private var shortcutCaptureCancellation = 0
-    @State private var remoteTriggerCaptureCancellation = 0
-    @FocusState private var isCommandFieldFocused: Bool
-
-    private var binding: Binding<Mapping> {
-        Binding(
-            get: {
-                store.mapping(
-                    for: store.selectedControl,
-                    gesture: store.selectedGesture,
-                    modifierControls: store.selectedMappingModifiers
-                )
-            },
-            set: {
-                store.update(
-                    $0,
-                    for: store.selectedControl,
-                    gesture: store.selectedGesture,
-                    modifierControls: store.selectedMappingModifiers
-                )
-            }
-        )
-    }
+    @State private var activeStandardEditorLayer: Set<RemoteControl>?
 
     var body: some View {
         Group {
@@ -165,28 +142,20 @@ struct MappingInspector: View {
             }
         }
         .onChange(of: store.selectedControl) { _, _ in
-            endCommandEditing()
+            ensureModifierLayerSelection()
         }
         .onChange(of: store.selectedGesture) { _, _ in
             if store.isRemoteModifier(store.selectedControl), store.selectedGesture != .tap {
                 store.selectedGesture = .tap
             }
-            endCommandEditing()
-        }
-        .onChange(of: store.selectedMappingModifiers) { _, _ in
-            endCommandEditing()
         }
         .onChange(of: store.profileName) { _, _ in
-            endCommandEditing()
+            ensureModifierLayerSelection()
         }
-        .onChange(of: selectedAction) { _, _ in
-            endCommandEditing()
+        .onChange(of: store.remoteModifierControls) { _, _ in
+            ensureModifierLayerSelection()
         }
-        .onChange(of: isCommandFieldFocused) { _, isFocused in
-            if !isFocused {
-                isEditingCommand = false
-            }
-        }
+        .onAppear(perform: ensureModifierLayerSelection)
     }
 
     // MARK: MIDI editor
@@ -687,53 +656,37 @@ struct MappingInspector: View {
                 }
 
                 if isStandardLayerEligible {
-                    mappingLayerPicker
-                }
+                    HStack(alignment: .top, spacing: 16) {
+                        StandardMappingActionEditor(
+                            store: store,
+                            modifierControls: [],
+                            title: "Base Action",
+                            activeCaptureLayer: $activeStandardEditorLayer
+                        )
 
-                Picker("Action", selection: binding.action) {
-                    ForEach(ActionKind.allCases) { action in
-                        Text(action.rawValue).tag(action)
+                        Divider()
+
+                        StandardMappingActionEditor(
+                            store: store,
+                            modifierControls: store.selectedMappingModifiers,
+                            title: "\(mappingLayerLabel) Action",
+                            layerPicker: AnyView(mappingLayerPicker),
+                            activeCaptureLayer: $activeStandardEditorLayer
+                        )
                     }
-                }
-
-                if isTapInheritanceEligible {
-                    tapApplicationEditor
+                    .fixedSize(horizontal: false, vertical: true)
                 } else {
-                    commandEditor
-                }
-
-                if store.activeRealm == .standard, store.selectedControl.isMIDIButton {
-                    remoteTriggerEditor
-                }
-
-                if isApplicationAction {
-                    Text("Use an app name, bundle ID, or .app path. Toggle application requires Accessibility permission.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    StandardMappingActionEditor(
+                        store: store,
+                        modifierControls: [],
+                        title: nil,
+                        activeCaptureLayer: $activeStandardEditorLayer
+                    )
                 }
 
                 actionResult
 
-                VStack(alignment: .leading, spacing: 7) {
-                    Text("Gesture")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    if store.isRemoteModifier(store.selectedControl) {
-                        Text("Tap · held presses select a modifier layer")
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 10)
-                            .frame(height: 24)
-                            .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
-                    } else {
-                        Picker("Gesture", selection: Bindable(store).selectedGesture) {
-                            ForEach(GestureKind.allCases) { gesture in
-                                Text(gesture.rawValue).tag(gesture)
-                            }
-                        }
-                        .labelsHidden()
-                        .pickerStyle(.segmented)
-                    }
-                }
+                gestureEditor
 
                 persistenceResult
             }
@@ -840,79 +793,6 @@ struct MappingInspector: View {
     }
 
     @ViewBuilder
-    private var commandEditor: some View {
-        if selectedAction == .keyboardShortcut {
-            KeyboardShortcutCaptureField(
-                command: binding.command,
-                shortcut: binding.keyboardShortcut,
-                cancellationGeneration: shortcutCaptureCancellation
-            )
-        } else if isEditingCommand {
-            TextField(commandPlaceholder, text: binding.command)
-                .focused($isCommandFieldFocused)
-                .onSubmit(endCommandEditing)
-                .onExitCommand(perform: endCommandEditing)
-        } else {
-            Button(action: beginCommandEditing) {
-                HStack(spacing: 0) {
-                    Text(commandDisplayValue)
-                        .foregroundStyle(binding.wrappedValue.command.isEmpty ? .secondary : .primary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Spacer(minLength: 8)
-                }
-                .padding(.horizontal, 7)
-                .frame(height: 22)
-                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 5))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 5)
-                        .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Edit command")
-            .help("Click to edit")
-        }
-    }
-
-    @ViewBuilder
-    private var remoteTriggerEditor: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Text("Remote trigger")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            RemoteTriggerChordCaptureField(
-                selectedControl: store.selectedControl,
-                currentModifiers: binding.wrappedValue.remoteTriggerModifiers,
-                currentFunctionKey: binding.wrappedValue.remoteTriggerFunctionKey,
-                cancellationGeneration: remoteTriggerCaptureCancellation,
-                beginCapture: { callback in
-                    store.beginRemoteTriggerCapture(onRemoteButton: callback)
-                },
-                endCapture: store.endRemoteTriggerCapture,
-                onCommit: { control, modifiers, functionKey in
-                    let gesture = store.selectedGesture
-                    var mapping = store.mapping(
-                        for: control,
-                        gesture: gesture,
-                        modifierControls: store.selectedMappingModifiers
-                    )
-                    mapping.remoteTriggerModifiers = modifiers
-                    mapping.remoteTriggerFunctionKey = functionKey
-                    store.update(
-                        mapping,
-                        for: control,
-                        gesture: gesture,
-                        modifierControls: store.selectedMappingModifiers
-                    )
-                    store.selectedControl = control
-                }
-            )
-        }
-    }
-
-    @ViewBuilder
     private var standardModifierEditor: some View {
         HStack(spacing: 10) {
             Toggle(
@@ -934,99 +814,70 @@ struct MappingInspector: View {
     }
 
     private var mappingLayerPicker: some View {
-        HStack(spacing: 10) {
-            Text("Mapping layer")
+        Menu {
+            ForEach(availableMappingModifiers) { control in
+                Toggle(
+                    control.rawValue,
+                    isOn: Binding(
+                        get: { store.selectedMappingModifiers.contains(control) },
+                        set: { enabled in
+                            var selected = store.selectedMappingModifiers
+                            if enabled {
+                                selected.insert(control)
+                            } else if selected.count > 1 {
+                                selected.remove(control)
+                            }
+                            store.selectedMappingModifiers = selected
+                        }
+                    )
+                )
+            }
+        } label: {
+            Label(mappingLayerLabel, systemImage: "square.stack.3d.up")
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Choose the modifier layer shown in the right column")
+    }
+
+    private var availableMappingModifiers: [RemoteControl] {
+        RemoteControl.allCases.filter {
+            store.isRemoteModifier($0) && $0 != store.selectedControl
+        }
+    }
+
+    private func ensureModifierLayerSelection() {
+        guard isStandardLayerEligible else { return }
+        let available = Set(availableMappingModifiers)
+        let selected = store.selectedMappingModifiers.intersection(available)
+        if selected.isEmpty, let first = availableMappingModifiers.first {
+            store.selectedMappingModifiers = [first]
+        } else if selected != store.selectedMappingModifiers {
+            store.selectedMappingModifiers = selected
+        }
+    }
+
+    private var gestureEditor: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text("Gesture")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Menu {
-                Button("Base") {
-                    store.selectedMappingModifiers = []
-                }
-                Divider()
-                ForEach(RemoteControl.allCases.filter {
-                    store.isRemoteModifier($0) && $0 != store.selectedControl
-                }) { control in
-                    Toggle(
-                        control.rawValue,
-                        isOn: Binding(
-                            get: { store.selectedMappingModifiers.contains(control) },
-                            set: { enabled in
-                                var selected = store.selectedMappingModifiers
-                                if enabled {
-                                    selected.insert(control)
-                                } else {
-                                    selected.remove(control)
-                                }
-                                store.selectedMappingModifiers = selected
-                            }
-                        )
-                    )
-                }
-            } label: {
-                Label(mappingLayerLabel, systemImage: "square.stack.3d.up")
-            }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            Spacer()
-        }
-    }
-
-    @ViewBuilder
-    private var tapApplicationEditor: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Toggle("Use same application as Tap", isOn: binding.usesTapApplication)
-
-            if binding.wrappedValue.usesTapApplication {
-                switch store.inheritedTapApplication(
-                    for: store.selectedControl,
-                    modifierControls: store.selectedMappingModifiers
-                ) {
-                case let .success(application):
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("Inherited from Tap")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Text(application)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 7)
-                            .frame(height: 22)
-                            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 5))
-                            .overlay {
-                                RoundedRectangle(cornerRadius: 5)
-                                    .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
-                            }
-                    }
-                case let .failure(error):
-                    Label(error.localizedDescription, systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                        .lineLimit(2)
-                }
+            if store.isRemoteModifier(store.selectedControl) {
+                Text("Tap · held presses select a modifier layer")
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 10)
+                    .frame(height: 24)
+                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
             } else {
-                commandEditor
+                Picker("Gesture", selection: Bindable(store).selectedGesture) {
+                    ForEach(GestureKind.allCases) { gesture in
+                        Text(gesture.rawValue).tag(gesture)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
             }
         }
-    }
-
-    private var commandDisplayValue: String {
-        let command = binding.wrappedValue.command
-        return command.isEmpty ? commandPlaceholder : command
-    }
-
-    private func beginCommandEditing() {
-        isEditingCommand = true
-        Task { @MainActor in
-            isCommandFieldFocused = true
-        }
-    }
-
-    private func endCommandEditing() {
-        isCommandFieldFocused = false
-        isEditingCommand = false
-        shortcutCaptureCancellation &+= 1
-        remoteTriggerCaptureCancellation &+= 1
     }
 
     private func statusCard(title: String, value: String, detail: String) -> some View {
@@ -1038,10 +889,6 @@ struct MappingInspector: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
         .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 12))
-    }
-
-    private var selectedAction: ActionKind {
-        binding.wrappedValue.action
     }
 
     private var selectedControlTitle: String {
@@ -1077,6 +924,208 @@ struct MappingInspector: View {
         )
     }
 
+}
+
+private struct StandardMappingActionEditor: View {
+    let store: MappingStore
+    let modifierControls: Set<RemoteControl>
+    let title: String?
+    var layerPicker: AnyView? = nil
+    @Binding var activeCaptureLayer: Set<RemoteControl>?
+
+    @State private var isEditingCommand = false
+    @State private var shortcutCaptureCancellation = 0
+    @State private var remoteTriggerCaptureCancellation = 0
+    @FocusState private var isCommandFieldFocused: Bool
+
+    private var binding: Binding<Mapping> {
+        Binding(
+            get: {
+                store.mapping(
+                    for: store.selectedControl,
+                    gesture: store.selectedGesture,
+                    modifierControls: modifierControls
+                )
+            },
+            set: {
+                store.update(
+                    $0,
+                    for: store.selectedControl,
+                    gesture: store.selectedGesture,
+                    modifierControls: modifierControls
+                )
+            }
+        )
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if title != nil || layerPicker != nil {
+                HStack(spacing: 8) {
+                    if let title {
+                        Text(title)
+                            .font(.headline)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 8)
+                    layerPicker
+                }
+            }
+
+            Picker("Action", selection: binding.action) {
+                ForEach(ActionKind.allCases) { action in
+                    Text(action.rawValue).tag(action)
+                }
+            }
+
+            if isTapInheritanceEligible {
+                tapApplicationEditor
+            } else {
+                commandEditor
+            }
+
+            if store.activeRealm == .standard, store.selectedControl.isMIDIButton {
+                remoteTriggerEditor
+            }
+
+            if isApplicationAction {
+                Text("Use an app name, bundle ID, or .app path. Toggle application requires Accessibility permission.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .onChange(of: store.selectedControl) { _, _ in cancelEditing() }
+        .onChange(of: store.selectedGesture) { _, _ in cancelEditing() }
+        .onChange(of: modifierControls) { _, _ in cancelEditing() }
+        .onChange(of: store.profileName) { _, _ in cancelEditing() }
+        .onChange(of: selectedAction) { _, _ in cancelEditing() }
+        .onChange(of: activeCaptureLayer) { _, activeLayer in
+            if let activeLayer, activeLayer != modifierControls {
+                cancelEditing()
+            }
+        }
+        .onChange(of: isCommandFieldFocused) { _, isFocused in
+            if !isFocused { isEditingCommand = false }
+        }
+    }
+
+    @ViewBuilder
+    private var commandEditor: some View {
+        if selectedAction == .keyboardShortcut {
+            KeyboardShortcutCaptureField(
+                command: binding.command,
+                shortcut: binding.keyboardShortcut,
+                cancellationGeneration: shortcutCaptureCancellation,
+                onRecordingChange: updateCaptureState
+            )
+        } else if isEditingCommand {
+            TextField(commandPlaceholder, text: binding.command)
+                .focused($isCommandFieldFocused)
+                .onSubmit(cancelEditing)
+                .onExitCommand(perform: cancelEditing)
+        } else {
+            Button(action: beginCommandEditing) {
+                HStack(spacing: 0) {
+                    Text(commandDisplayValue)
+                        .foregroundStyle(binding.wrappedValue.command.isEmpty ? .secondary : .primary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 8)
+                }
+                .padding(.horizontal, 7)
+                .frame(height: 22)
+                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 5))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 5)
+                        .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Edit command")
+            .help("Click to edit")
+        }
+    }
+
+    private var remoteTriggerEditor: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text("Remote trigger")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            RemoteTriggerChordCaptureField(
+                selectedControl: store.selectedControl,
+                currentModifiers: binding.wrappedValue.remoteTriggerModifiers,
+                currentFunctionKey: binding.wrappedValue.remoteTriggerFunctionKey,
+                cancellationGeneration: remoteTriggerCaptureCancellation,
+                beginCapture: { callback in
+                    store.beginRemoteTriggerCapture(onRemoteButton: callback)
+                },
+                endCapture: store.endRemoteTriggerCapture,
+                onCommit: { control, modifiers, functionKey in
+                    let gesture = store.selectedGesture
+                    var mapping = store.mapping(
+                        for: control,
+                        gesture: gesture,
+                        modifierControls: modifierControls
+                    )
+                    mapping.remoteTriggerModifiers = modifiers
+                    mapping.remoteTriggerFunctionKey = functionKey
+                    store.update(
+                        mapping,
+                        for: control,
+                        gesture: gesture,
+                        modifierControls: modifierControls
+                    )
+                    store.selectedControl = control
+                },
+                onRecordingChange: updateCaptureState
+            )
+        }
+    }
+
+    private var tapApplicationEditor: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle("Use same application as Tap", isOn: binding.usesTapApplication)
+
+            if binding.wrappedValue.usesTapApplication {
+                switch store.inheritedTapApplication(
+                    for: store.selectedControl,
+                    modifierControls: modifierControls
+                ) {
+                case let .success(application):
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Inherited from Tap")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text(application)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 7)
+                            .frame(height: 22)
+                            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 5))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 5)
+                                    .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                            }
+                    }
+                case let .failure(error):
+                    Label(error.localizedDescription, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .lineLimit(2)
+                }
+            } else {
+                commandEditor
+            }
+        }
+    }
+
+    private var selectedAction: ActionKind {
+        binding.wrappedValue.action
+    }
+
     private var isApplicationAction: Bool {
         selectedAction.isApplicationAction
     }
@@ -1088,5 +1137,32 @@ struct MappingInspector: View {
 
     private var commandPlaceholder: String {
         isApplicationAction ? "Application name (for example, ChatGPT)" : "Command"
+    }
+
+    private var commandDisplayValue: String {
+        let command = binding.wrappedValue.command
+        return command.isEmpty ? commandPlaceholder : command
+    }
+
+    private func beginCommandEditing() {
+        isEditingCommand = true
+        Task { @MainActor in
+            isCommandFieldFocused = true
+        }
+    }
+
+    private func cancelEditing() {
+        isCommandFieldFocused = false
+        isEditingCommand = false
+        shortcutCaptureCancellation &+= 1
+        remoteTriggerCaptureCancellation &+= 1
+    }
+
+    private func updateCaptureState(_ isRecording: Bool) {
+        if isRecording {
+            activeCaptureLayer = modifierControls
+        } else if activeCaptureLayer == modifierControls {
+            activeCaptureLayer = nil
+        }
     }
 }
