@@ -49,6 +49,19 @@ struct MappingKey: Hashable, Codable {
 struct Mapping: Codable, Equatable {
     var action: ActionKind = .openApplication
     var command: String = ""
+    /// Structured keyboard-chord data.  `command` remains the display value
+    /// and legacy storage field so older configuration files continue to
+    /// render, while only mappings with this value are executable as a
+    /// captured shortcut.
+    var keyboardShortcut: KeyboardShortcut?
+    /// Modifiers that must be held when the physical remote control is
+    /// pressed. This is independent from `keyboardShortcut`: the former
+    /// selects the remote trigger chord, while the latter is the keyboard
+    /// chord sent to the target application.
+    var remoteTriggerModifiers: Set<KeyboardShortcut.Modifier> = []
+    /// An optional held F1…F12 key required by the remote trigger. Function
+    /// keys are stored separately because they are ordinary keys, not flags.
+    var remoteTriggerFunctionKey: UInt16?
     /// When set on a Hold or Double application action, resolve the target
     /// from this control's current Tap mapping instead of storing a second
     /// application command.  The explicit decoder keeps older persisted
@@ -59,16 +72,25 @@ struct Mapping: Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case action
         case command
+        case keyboardShortcut
+        case remoteTriggerModifiers
+        case remoteTriggerFunctionKey
         case usesTapApplication
     }
 
     init(
         action: ActionKind = .openApplication,
         command: String = "",
+        keyboardShortcut: KeyboardShortcut? = nil,
+        remoteTriggerModifiers: Set<KeyboardShortcut.Modifier> = [],
+        remoteTriggerFunctionKey: UInt16? = nil,
         usesTapApplication: Bool = false
     ) {
         self.action = action
         self.command = command
+        self.keyboardShortcut = keyboardShortcut
+        self.remoteTriggerModifiers = remoteTriggerModifiers
+        self.remoteTriggerFunctionKey = remoteTriggerFunctionKey
         self.usesTapApplication = usesTapApplication
     }
 
@@ -76,6 +98,12 @@ struct Mapping: Codable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         action = try container.decodeIfPresent(ActionKind.self, forKey: .action) ?? .openApplication
         command = try container.decodeIfPresent(String.self, forKey: .command) ?? ""
+        keyboardShortcut = try container.decodeIfPresent(KeyboardShortcut.self, forKey: .keyboardShortcut)
+        remoteTriggerModifiers = try container.decodeIfPresent(
+            Set<KeyboardShortcut.Modifier>.self,
+            forKey: .remoteTriggerModifiers
+        ) ?? []
+        remoteTriggerFunctionKey = try container.decodeIfPresent(UInt16.self, forKey: .remoteTriggerFunctionKey)
         usesTapApplication = try container.decodeIfPresent(Bool.self, forKey: .usesTapApplication) ?? false
     }
 
@@ -83,6 +111,12 @@ struct Mapping: Codable, Equatable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(action, forKey: .action)
         try container.encode(command, forKey: .command)
+        try container.encodeIfPresent(keyboardShortcut, forKey: .keyboardShortcut)
+        try container.encode(
+            KeyboardShortcut.modifierOrder.filter { remoteTriggerModifiers.contains($0) },
+            forKey: .remoteTriggerModifiers
+        )
+        try container.encodeIfPresent(remoteTriggerFunctionKey, forKey: .remoteTriggerFunctionKey)
         try container.encode(usesTapApplication, forKey: .usesTapApplication)
     }
 }

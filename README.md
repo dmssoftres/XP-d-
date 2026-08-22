@@ -62,19 +62,32 @@ shell command is required.
 ## Keyboard shortcut capture
 
 Choose **Keyboard shortcut** for a K-button gesture, then click the shortcut
-field to start recording. Press keyboard keys and/or remote K1–K10 buttons in
-the desired order, then click the field again to save. Press Escape, switch the
-selected control or gesture, or choose another action to cancel without changing
-the existing mapping. Command, Control, Option, Shift, and Fn are each
-captured on press. Remove an individual input from its chip while recording, or
-use the clear button to empty the draft or an already-saved sequence. Capture
-records up to 12 inputs and consumes remote K-button presses while active, so
-they do not run their normal mappings.
+field to start recording. Hold any combination of Command, Control, Option,
+Shift, and Fn, then press one non-modifier key; click the field again to save
+that simultaneous chord. The remote K buttons remain the controls that trigger
+mappings—they are not part of a recorded keyboard shortcut. Escape, changing
+the selected control or gesture, or choosing another action cancels without
+changing the existing mapping. While recording, modifier and key chips can be
+removed independently; the clear button removes either the draft or saved
+shortcut.
 
-**Current limitation:** XP[d] records and persists these shortcut sequences,
-but `ActionRunner` does not yet replay keyboard shortcuts or remote-key
-sequences. This capture flow fixes configuration entry only; playback requires
-a separately defined execution design.
+XP[d] stores the recorded physical key code with its modifiers and replays one
+key-down/key-up chord through macOS when the mapping runs. Accessibility
+post-event access is required; physical button input only checks that permission
+silently. Older text-only shortcut mappings remain visible but must be
+re-recorded before XP[d] will execute them.
+
+## Remote trigger chords
+
+In a Standard K-button mapping, **Remote trigger** records the physical button
+as a special key together with any combination of Command, Control, Option,
+Shift, Fn, and one held F1–F12 key. Click to start, hold special keys, press a
+remote K button, then click again to save—for example, `⌘F4K4`. The modifier
+and function-key state is sampled when the button goes down, so it remains
+stable through Tap, Hold, or Double recognition. The mapping runs only when
+the held keys exactly match its saved trigger; clear the trigger keys to restore
+the plain K-button behavior. One modifier-gated trigger is stored per K-button
+gesture.
 
 In Standard profiles, select K1–K10 to set an optional **Button title**. The
 title appears as one compact line at the top of that button and is shared by

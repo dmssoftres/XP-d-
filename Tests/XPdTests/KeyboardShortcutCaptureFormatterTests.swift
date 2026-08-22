@@ -3,11 +3,11 @@ import XCTest
 @testable import XPd
 
 final class KeyboardShortcutCaptureFormatterTests: XCTestCase {
-    func testFormatsKeyboardEventWithModifiersInStableOrder() {
+    func testFormatsSimultaneousCommandShiftPChord() throws {
         let event = NSEvent.keyEvent(
             with: .keyDown,
             location: .zero,
-            modifierFlags: [.command, .option, .shift],
+            modifierFlags: [.command, .shift],
             timestamp: 0,
             windowNumber: 0,
             context: nil,
@@ -17,56 +17,101 @@ final class KeyboardShortcutCaptureFormatterTests: XCTestCase {
             keyCode: 35
         )
 
-        let keyboardEvent = try! XCTUnwrap(event)
-        XCTAssertEqual(KeyboardShortcutCaptureFormatter.keyboardToken(for: keyboardEvent), "⌘⌥⇧P")
-        XCTAssertEqual(
-            KeyboardShortcutCaptureFormatter.keyboardToken(for: keyboardEvent, excluding: [.command, .option]),
-            "⇧P"
-        )
+        let shortcut = try XCTUnwrap(KeyboardShortcutCaptureFormatter.shortcut(for: try XCTUnwrap(event)))
+        XCTAssertEqual(shortcut.keyCode, 35)
+        XCTAssertEqual(shortcut.modifiers, [.command, .shift])
+        XCTAssertEqual(shortcut.displayString, "⌘⇧P")
+        XCTAssertFalse(shortcut.displayString.contains("→"))
     }
 
-    func testFormatsSpecialKeysAndSequences() {
-        let event = NSEvent.keyEvent(
+    func testModifierFlagsAreStateOnlyAndIncludeFunction() {
+        let modifiers = KeyboardShortcutCaptureFormatter.modifierSet(
+            for: [.command, .control, .option, .shift, .function]
+        )
+
+        XCTAssertEqual(
+            KeyboardShortcut.modifierOrder.filter { modifiers.contains($0) },
+            [.command, .control, .option, .shift, .function]
+        )
+        XCTAssertEqual(
+            KeyboardShortcutCaptureFormatter.displayString(key: "P", modifiers: modifiers),
+            "⌘⌃⌥⇧fnP"
+        )
+        XCTAssertEqual(KeyboardShortcutCaptureFormatter.modifier(for: 55), .command)
+        XCTAssertEqual(KeyboardShortcutCaptureFormatter.modifier(for: 63), .function)
+    }
+
+    func testLabelsFunctionKeysExplicitly() throws {
+        let event = try XCTUnwrap(NSEvent.keyEvent(
             with: .keyDown,
             location: .zero,
             modifierFlags: [.command],
             timestamp: 0,
             windowNumber: 0,
             context: nil,
-            characters: "\r",
-            charactersIgnoringModifiers: "\r",
+            characters: "",
+            charactersIgnoringModifiers: "",
             isARepeat: false,
-            keyCode: 36
-        )
+            keyCode: 118
+        ))
 
-        XCTAssertEqual(KeyboardShortcutCaptureFormatter.keyboardToken(for: try! XCTUnwrap(event)), "⌘↩")
-        XCTAssertEqual(KeyboardShortcutCaptureFormatter.sequence(["⌘P", "K4"]), "⌘P → K4")
+        XCTAssertEqual(KeyboardShortcutCaptureFormatter.keyLabel(for: event), "F4")
+        XCTAssertEqual(KeyboardShortcutCaptureFormatter.shortcut(for: event)?.displayString, "⌘F4")
+        XCTAssertEqual(KeyboardShortcut.functionKeyLabel(for: 111), "F12")
     }
 
-    func testFormatsModifierPressButNotRelease() {
+    func testRemovingModifierOrKeyLeavesOneChordAndClearCanBeEmpty() {
+        let shortcut = KeyboardShortcut(
+            keyCode: 35,
+            modifiers: [.command, .shift],
+            displayString: "⌘⇧P"
+        )
+        var editedModifiers = shortcut.modifiers
+        editedModifiers.remove(.shift)
+
         XCTAssertEqual(
-            KeyboardShortcutCaptureFormatter.modifierToken(keyCode: 55, modifierFlags: [.command]),
-            "⌘"
+            KeyboardShortcutCaptureFormatter.displayString(key: "P", modifiers: editedModifiers),
+            "⌘P"
         )
-        XCTAssertNil(
-            KeyboardShortcutCaptureFormatter.modifierToken(keyCode: 55, modifierFlags: [])
-        )
+        XCTAssertTrue(editedModifiers.contains(.command))
+
+        editedModifiers.removeAll()
+        XCTAssertTrue(editedModifiers.isEmpty)
+        XCTAssertEqual(KeyboardShortcutCaptureFormatter.displayString(key: "P", modifiers: editedModifiers), "P")
     }
 
-    func testRemovesIndividualTokensAndClearsSequence() {
-        let sequence = KeyboardShortcutCaptureFormatter.sequence(["⌘", "P", "K4"])
+    func testMappingDecodesLegacyCommandOnlyShortcutWithoutExecutableModel() throws {
+        let data = #"{"action":"Keyboard shortcut","command":"⌘P","usesTapApplication":false}"#.data(using: .utf8)!
+        let mapping = try JSONDecoder().decode(Mapping.self, from: data)
 
-        XCTAssertEqual(
-            KeyboardShortcutCaptureFormatter.sequence(removingTokenAt: 1, from: sequence),
-            "⌘ → K4"
+        XCTAssertEqual(mapping.action, .keyboardShortcut)
+        XCTAssertEqual(mapping.command, "⌘P")
+        XCTAssertNil(mapping.keyboardShortcut)
+        XCTAssertTrue(mapping.remoteTriggerModifiers.isEmpty)
+    }
+
+    func testMappingRoundTripsStructuredShortcutAndDisplayCommand() throws {
+        let shortcut = KeyboardShortcut(
+            keyCode: 35,
+            modifiers: [.command, .shift],
+            displayString: "⌘⇧P"
         )
-        XCTAssertEqual(
-            KeyboardShortcutCaptureFormatter.sequence(removingTokenAt: 0, from: "K4"),
-            ""
+        let mapping = Mapping(
+            action: .keyboardShortcut,
+            command: shortcut.displayString,
+            keyboardShortcut: shortcut,
+            remoteTriggerModifiers: [.command, .shift],
+            remoteTriggerFunctionKey: 118
         )
-        XCTAssertEqual(
-            KeyboardShortcutCaptureFormatter.sequence(removingTokenAt: 99, from: sequence),
-            sequence
-        )
+
+        let data = try JSONEncoder().encode(mapping)
+        let decoded = try JSONDecoder().decode(Mapping.self, from: data)
+
+        XCTAssertEqual(decoded, mapping)
+        XCTAssertEqual(decoded.command, "⌘⇧P")
+        XCTAssertEqual(decoded.keyboardShortcut?.keyCode, 35)
+        XCTAssertEqual(decoded.keyboardShortcut?.modifiers, [.command, .shift])
+        XCTAssertEqual(decoded.remoteTriggerModifiers, [.command, .shift])
+        XCTAssertEqual(decoded.remoteTriggerFunctionKey, 118)
     }
 }

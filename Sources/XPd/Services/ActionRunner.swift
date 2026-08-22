@@ -21,6 +21,9 @@ struct ActionExecutionResult: Equatable {
 /// Services/AppKit; no shell command is involved.
 @MainActor
 final class ActionRunner {
+    typealias EventPoster = (CGEvent) -> Void
+    typealias PostEventAccessProvider = () -> Bool
+
     enum ToggleOperation: Equatable {
         case minimize
         case restore
@@ -61,6 +64,21 @@ final class ActionRunner {
 
     private static let activationVerificationAttempts = 6
     private static let activationVerificationDelay = Duration.milliseconds(50)
+
+    private let eventPoster: EventPoster
+    private let postEventAccessProvider: PostEventAccessProvider
+
+    init(
+        postEventAccessProvider: @escaping PostEventAccessProvider = {
+            CGPreflightPostEventAccess()
+        },
+        eventPoster: @escaping EventPoster = { event in
+            event.post(tap: .cghidEventTap)
+        }
+    ) {
+        self.postEventAccessProvider = postEventAccessProvider
+        self.eventPoster = eventPoster
+    }
 
     /// Pure seams shared by the AX implementation and focused tests.
     static func orderedWindowCandidates<T>(focused: T?, main: T?) -> [T] {
@@ -156,6 +174,11 @@ final class ActionRunner {
         mapping: Mapping,
         completion: @escaping @MainActor (ActionExecutionResult) -> Void
     ) {
+        if mapping.action == .keyboardShortcut {
+            executeKeyboardShortcut(mapping, completion: completion)
+            return
+        }
+
         guard mapping.action == .openApplication || mapping.action == .toggleApplication else { return }
 
         let requestedName = mapping.command.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -222,6 +245,81 @@ final class ActionRunner {
                 )
             }
         }
+    }
+
+    private func executeKeyboardShortcut(
+        _ mapping: Mapping,
+        completion: @escaping @MainActor (ActionExecutionResult) -> Void
+    ) {
+        guard let shortcut = mapping.keyboardShortcut else {
+            let legacyCommand = mapping.command.trimmingCharacters(in: .whitespacesAndNewlines)
+            completion(.failure(
+                legacyCommand.isEmpty
+                    ? "Record a keyboard shortcut first"
+                    : "This shortcut uses an old format; re-record it"
+            ))
+            return
+        }
+
+        guard !shortcut.displayString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            completion(.failure("Keyboard shortcut is incomplete; re-record it"))
+            return
+        }
+
+        guard shortcut.keyCode <= 127 else {
+            completion(.failure("Keyboard shortcut has an invalid key; re-record it"))
+            return
+        }
+
+        // A physical button press must never trigger a permission prompt.  The
+        // explicit inspector permission action remains the only requester.
+        guard hasPostEventAccess else {
+            completion(.failure("Allow XP[d] in Accessibility, then press again"))
+            return
+        }
+
+        guard let keyDown = CGEvent(
+            keyboardEventSource: nil,
+            virtualKey: shortcut.keyCode,
+            keyDown: true
+        ),
+        let keyUp = CGEvent(
+            keyboardEventSource: nil,
+            virtualKey: shortcut.keyCode,
+            keyDown: false
+        ) else {
+            completion(.failure("Could not create keyboard shortcut events; re-record it"))
+            return
+        }
+
+        let flags = Self.cgEventFlags(for: shortcut.modifiers)
+        keyDown.flags = flags
+        keyUp.flags = flags
+        eventPoster(keyDown)
+        eventPoster(keyUp)
+        completion(.success("Sent " + shortcut.displayString))
+    }
+
+    static func cgEventFlags(
+        for modifiers: Set<KeyboardShortcut.Modifier>
+    ) -> CGEventFlags {
+        var flags: CGEventFlags = []
+        if modifiers.contains(.command) {
+            flags.insert(.maskCommand)
+        }
+        if modifiers.contains(.control) {
+            flags.insert(.maskControl)
+        }
+        if modifiers.contains(.option) {
+            flags.insert(.maskAlternate)
+        }
+        if modifiers.contains(.shift) {
+            flags.insert(.maskShift)
+        }
+        if modifiers.contains(.function) {
+            flags.insert(.maskSecondaryFn)
+        }
+        return flags
     }
 
     func scroll(
@@ -612,7 +710,7 @@ final class ActionRunner {
     }
 
     private var hasPostEventAccess: Bool {
-        CGPreflightPostEventAccess()
+        postEventAccessProvider()
     }
 
     private func requestPostEventAccess() -> Bool {

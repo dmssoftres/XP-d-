@@ -5,6 +5,7 @@ struct MappingInspector: View {
     let store: MappingStore
     @State private var isEditingCommand = false
     @State private var shortcutCaptureCancellation = 0
+    @State private var remoteTriggerCaptureCancellation = 0
     @FocusState private var isCommandFieldFocused: Bool
 
     private var binding: Binding<Mapping> {
@@ -154,6 +155,9 @@ struct MappingInspector: View {
             endCommandEditing()
         }
         .onChange(of: store.selectedGesture) { _, _ in
+            endCommandEditing()
+        }
+        .onChange(of: store.profileName) { _, _ in
             endCommandEditing()
         }
         .onChange(of: selectedAction) { _, _ in
@@ -671,6 +675,10 @@ struct MappingInspector: View {
                     commandEditor
                 }
 
+                if store.activeRealm == .standard, store.selectedControl.isMIDIButton {
+                    remoteTriggerEditor
+                }
+
                 if isApplicationAction {
                     Text("Use an app name, bundle ID, or .app path. Toggle application requires Accessibility permission.")
                         .font(.caption)
@@ -801,9 +809,8 @@ struct MappingInspector: View {
         if selectedAction == .keyboardShortcut {
             KeyboardShortcutCaptureField(
                 command: binding.command,
-                cancellationGeneration: shortcutCaptureCancellation,
-                beginRemoteCapture: store.beginKeyboardShortcutCapture,
-                endRemoteCapture: store.endKeyboardShortcutCapture
+                shortcut: binding.keyboardShortcut,
+                cancellationGeneration: shortcutCaptureCancellation
             )
         } else if isEditingCommand {
             TextField(commandPlaceholder, text: binding.command)
@@ -831,6 +838,33 @@ struct MappingInspector: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Edit command")
             .help("Click to edit")
+        }
+    }
+
+    @ViewBuilder
+    private var remoteTriggerEditor: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text("Remote trigger")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            RemoteTriggerChordCaptureField(
+                selectedControl: store.selectedControl,
+                currentModifiers: binding.wrappedValue.remoteTriggerModifiers,
+                currentFunctionKey: binding.wrappedValue.remoteTriggerFunctionKey,
+                cancellationGeneration: remoteTriggerCaptureCancellation,
+                beginCapture: { callback in
+                    store.beginRemoteTriggerCapture(onRemoteButton: callback)
+                },
+                endCapture: store.endRemoteTriggerCapture,
+                onCommit: { control, modifiers, functionKey in
+                    let gesture = store.selectedGesture
+                    var mapping = store.mapping(for: control, gesture: gesture)
+                    mapping.remoteTriggerModifiers = modifiers
+                    mapping.remoteTriggerFunctionKey = functionKey
+                    store.update(mapping, for: control, gesture: gesture)
+                    store.selectedControl = control
+                }
+            )
         }
     }
 
@@ -886,6 +920,7 @@ struct MappingInspector: View {
         isCommandFieldFocused = false
         isEditingCommand = false
         shortcutCaptureCancellation &+= 1
+        remoteTriggerCaptureCancellation &+= 1
     }
 
     private func statusCard(title: String, value: String, detail: String) -> some View {

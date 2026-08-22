@@ -15,6 +15,22 @@ final class MappingStoreGestureTests: XCTestCase {
         }
     }
 
+    private final class ModifierState: @unchecked Sendable {
+        var value: Set<KeyboardShortcut.Modifier>
+
+        init(_ value: Set<KeyboardShortcut.Modifier>) {
+            self.value = value
+        }
+    }
+
+    private final class FunctionKeyState: @unchecked Sendable {
+        var value: Set<UInt16>
+
+        init(_ value: Set<UInt16>) {
+            self.value = value
+        }
+    }
+
     @MainActor
     private final class TestScheduler {
         private(set) var now: TimeInterval = 0
@@ -146,24 +162,119 @@ final class MappingStoreGestureTests: XCTestCase {
         XCTAssertEqual(executed, ["hold"])
     }
 
-    func testKeyboardShortcutCaptureConsumesRemoteKPressesWithoutExecutingMappings() {
+    func testRemoteTriggerRequiresExactModifierMatch() {
+        let modifierState = ModifierState([.command, .shift])
+        var executed: [String] = []
+        let scheduler = TestScheduler()
+        let store = makeStore(
+            scheduler: scheduler,
+            remoteModifierProvider: { modifierState.value }
+        ) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+        store.update(
+            Mapping(
+                action: .openApplication,
+                command: "command-shift",
+                remoteTriggerModifiers: [.command, .shift]
+            ),
+            for: .k1,
+            gesture: .tap
+        )
+
+        pressAndReleaseK1(store)
+        scheduler.advance(by: 0.30)
+        XCTAssertEqual(executed, ["command-shift"])
+
+        modifierState.value = []
+        pressAndReleaseK1(store)
+        scheduler.advance(by: 0.30)
+        XCTAssertEqual(executed, ["command-shift"])
+    }
+
+    func testRemoteTriggerModifierSnapshotSurvivesDelayedGesture() {
+        let modifierState = ModifierState([.option, .function])
         let scheduler = TestScheduler()
         var executed: [String] = []
+        let store = makeStore(
+            scheduler: scheduler,
+            remoteModifierProvider: { modifierState.value }
+        ) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+        store.update(
+            Mapping(
+                action: .openApplication,
+                command: "option-function",
+                remoteTriggerModifiers: [.option, .function]
+            ),
+            for: .k1,
+            gesture: .tap
+        )
+
+        store.simulateHIDInputForTesting(k1Signature)
+        modifierState.value = []
+        store.simulateHIDInputForTesting(nil)
+        scheduler.advance(by: 0.30)
+
+        XCTAssertEqual(executed, ["option-function"])
+    }
+
+    func testRemoteTriggerRequiresExactHeldFunctionKey() {
+        let functionKeyState = FunctionKeyState([118]) // F4
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeStore(
+            scheduler: scheduler,
+            remoteFunctionKeyProvider: { functionKeyState.value }
+        ) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+        store.update(
+            Mapping(
+                action: .openApplication,
+                command: "F4 remote trigger",
+                remoteTriggerFunctionKey: 118
+            ),
+            for: .k4,
+            gesture: .tap
+        )
+
+        store.simulateHIDInputForTesting("r6:02 00 00 00 00 00 00")
+        store.simulateHIDInputForTesting(nil)
+        scheduler.advance(by: 0.30)
+        XCTAssertEqual(executed, ["F4 remote trigger"])
+
+        functionKeyState.value = []
+        store.simulateHIDInputForTesting("r6:02 00 00 00 00 00 00")
+        store.simulateHIDInputForTesting(nil)
+        scheduler.advance(by: 0.30)
+        XCTAssertEqual(executed, ["F4 remote trigger"])
+    }
+
+    func testRemoteTriggerCaptureConsumesKButtonUntilEnded() {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        var captured: RemoteControl?
         let store = makeStore(scheduler: scheduler) { mapping, completion in
             executed.append(mapping.command)
             completion(.success(mapping.command))
         }
-        store.update(Mapping(action: .openApplication, command: "normal mapping"), for: .k1, gesture: .tap)
-        var captured: [RemoteControl] = []
+        store.update(Mapping(action: .openApplication, command: "normal"), for: .k1, gesture: .tap)
 
-        store.beginKeyboardShortcutCapture { captured.append($0) }
-        store.simulateHIDInputForTesting(k1Signature)
-        store.simulateHIDInputForTesting(nil)
+        store.beginRemoteTriggerCapture { captured = $0 }
+        pressAndReleaseK1(store)
         scheduler.advance(by: 1)
-        store.endKeyboardShortcutCapture()
-
-        XCTAssertEqual(captured, [.k1])
+        XCTAssertEqual(captured, .k1)
         XCTAssertTrue(executed.isEmpty)
+
+        store.endRemoteTriggerCapture()
+        pressAndReleaseK1(store)
+        scheduler.advance(by: 0.30)
+        XCTAssertEqual(executed, ["normal"])
     }
 
     func testDifferentDownReportCancelsDisplacedLiveButton() {
@@ -188,6 +299,8 @@ final class MappingStoreGestureTests: XCTestCase {
 
     private func makeStore(
         scheduler: TestScheduler,
+        remoteModifierProvider: @escaping MappingStore.RemoteModifierProvider = { [] },
+        remoteFunctionKeyProvider: @escaping MappingStore.RemoteFunctionKeyProvider = { [] },
         execute: @escaping MappingStore.ActionExecutionOverride
     ) -> MappingStore {
         MappingStore(
@@ -196,7 +309,9 @@ final class MappingStoreGestureTests: XCTestCase {
             gestureSchedule: { delay, action in
                 scheduler.schedule(delay: delay, action: action)
             },
-            actionExecutionOverride: execute
+            actionExecutionOverride: execute,
+            remoteModifierProvider: remoteModifierProvider,
+            remoteFunctionKeyProvider: remoteFunctionKeyProvider
         )
     }
 

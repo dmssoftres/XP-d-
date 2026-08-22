@@ -2,55 +2,43 @@ import AppKit
 import SwiftUI
 
 enum KeyboardShortcutCaptureFormatter {
-    static let separator = " → "
-
-    static func keyboardToken(
-        for event: NSEvent,
-        excluding capturedModifiers: NSEvent.ModifierFlags = []
-    ) -> String? {
-        guard !event.isARepeat else { return nil }
+    static func shortcut(for event: NSEvent) -> KeyboardShortcut? {
+        guard event.type == .keyDown, !event.isARepeat else { return nil }
+        guard KeyboardShortcutCaptureFormatter.modifier(for: event.keyCode) == nil else {
+            return nil
+        }
 
         let key = keyLabel(for: event)
         guard !key.isEmpty else { return nil }
 
-        let flags = event.modifierFlags
-            .intersection(.deviceIndependentFlagsMask)
-            .subtracting(capturedModifiers)
-        let modifiers = [
-            flags.contains(.command) ? "⌘" : nil,
-            flags.contains(.option) ? "⌥" : nil,
-            flags.contains(.control) ? "⌃" : nil,
-            flags.contains(.shift) ? "⇧" : nil,
-            flags.contains(.function) ? "fn" : nil
-        ]
-        .compactMap { $0 }
-        .joined()
-
-        return modifiers + key
+        let modifiers = modifierSet(for: event.modifierFlags)
+        return KeyboardShortcut(
+            keyCode: event.keyCode,
+            modifiers: modifiers,
+            displayString: displayString(key: key, modifiers: modifiers)
+        )
     }
 
-    /// Returns a token only for the press edge of a modifier key. `flagsChanged`
-    /// events are also emitted when the key is released, so a release has no
-    /// token and cannot add noise to the recorded sequence.
-    static func modifierToken(for event: NSEvent) -> String? {
-        guard event.type == .flagsChanged else { return nil }
-        return modifierToken(keyCode: event.keyCode, modifierFlags: event.modifierFlags)
+    static func displayString(key: String, modifiers: Set<KeyboardShortcut.Modifier>) -> String {
+        let prefix = KeyboardShortcut.modifierOrder
+            .filter { modifiers.contains($0) }
+            .map(\.symbol)
+            .joined()
+        return prefix + key
     }
 
-    static func modifierToken(keyCode: UInt16, modifierFlags: NSEvent.ModifierFlags) -> String? {
-        guard let flag = modifierFlag(for: keyCode), modifierFlags.contains(flag) else { return nil }
-
-        switch keyCode {
-        case 54, 55: return "⌘"
-        case 58, 61: return "⌥"
-        case 59, 62: return "⌃"
-        case 56, 60: return "⇧"
-        case 63: return "fn"
-        default: return nil
-        }
+    static func modifierSet(for flags: NSEvent.ModifierFlags) -> Set<KeyboardShortcut.Modifier> {
+        let flags = flags.intersection(.deviceIndependentFlagsMask)
+        var modifiers = Set<KeyboardShortcut.Modifier>()
+        if flags.contains(.command) { modifiers.insert(.command) }
+        if flags.contains(.control) { modifiers.insert(.control) }
+        if flags.contains(.option) { modifiers.insert(.option) }
+        if flags.contains(.shift) { modifiers.insert(.shift) }
+        if flags.contains(.function) { modifiers.insert(.function) }
+        return modifiers
     }
 
-    static func modifierFlag(for keyCode: UInt16) -> NSEvent.ModifierFlags? {
+    static func modifier(for keyCode: UInt16) -> KeyboardShortcut.Modifier? {
         switch keyCode {
         case 54, 55: return .command
         case 58, 61: return .option
@@ -61,33 +49,37 @@ enum KeyboardShortcutCaptureFormatter {
         }
     }
 
-    static func sequence(_ tokens: [String]) -> String {
-        tokens.joined(separator: separator)
+    static func modifierFlag(for keyCode: UInt16) -> NSEvent.ModifierFlags? {
+        switch modifier(for: keyCode) {
+        case .command: return .command
+        case .option: return .option
+        case .control: return .control
+        case .shift: return .shift
+        case .function: return .function
+        case nil: return nil
+        }
     }
 
-    static func tokens(in sequence: String) -> [String] {
-        sequence.isEmpty ? [] : sequence.components(separatedBy: separator)
-    }
-
-    static func sequence(removingTokenAt index: Int, from sequence: String) -> String {
-        var tokens = tokens(in: sequence)
-        guard tokens.indices.contains(index) else { return sequence }
-        tokens.remove(at: index)
-        return self.sequence(tokens)
-    }
-
-    private static func keyLabel(for event: NSEvent) -> String {
+    static func keyLabel(for event: NSEvent) -> String {
         switch event.keyCode {
         case 36: return "↩"
         case 48: return "⇥"
         case 49: return "Space"
         case 51: return "⌫"
         case 53: return "Esc"
+        case 115: return "Home"
+        case 116: return "Page Up"
+        case 117: return "Delete"
+        case 119: return "End"
+        case 121: return "Page Down"
         case 123: return "←"
         case 124: return "→"
         case 125: return "↓"
         case 126: return "↑"
         default:
+            if let functionKey = KeyboardShortcut.functionKeyLabel(for: event.keyCode) {
+                return functionKey
+            }
             return event.charactersIgnoringModifiers?
                 .uppercased()
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -95,29 +87,40 @@ enum KeyboardShortcutCaptureFormatter {
     }
 }
 
-/// A click-to-record field for mapping shortcuts. Keyboard input remains local
-/// to XP[d] while recording; remote K-button capture is supplied by
-/// `MappingStore` because its HID stream is intentionally owned there.
+/// A click-to-record field for one simultaneous keyboard chord.  Modifier
+/// `flagsChanged` events update the current state only; a non-modifier
+/// `keyDown` captures that state and replaces the single draft chord.
 struct KeyboardShortcutCaptureField: View {
     @Binding var command: String
+    @Binding var shortcut: KeyboardShortcut?
     let cancellationGeneration: Int
-    let beginRemoteCapture: (@escaping (RemoteControl) -> Void) -> Void
-    let endRemoteCapture: () -> Void
 
     @State private var isRecording = false
-    @State private var originalCommand = ""
-    @State private var capturedTokens: [String] = []
+    @State private var draftKeyCode: UInt16?
+    @State private var draftKeyLabel = ""
+    @State private var draftModifiers: Set<KeyboardShortcut.Modifier> = []
+    @State private var currentModifierFlags: NSEvent.ModifierFlags = []
     @State private var didEditDraft = false
-    @State private var pressedModifierKeyCodes: Set<UInt16> = []
-    @State private var capturedModifierFlags: NSEvent.ModifierFlags = []
     @State private var eventMonitor: Any?
 
-    private var draft: String {
-        KeyboardShortcutCaptureFormatter.sequence(capturedTokens)
+    private var draftShortcut: KeyboardShortcut? {
+        guard let keyCode = draftKeyCode, !draftKeyLabel.isEmpty else { return nil }
+        return KeyboardShortcut(
+            keyCode: keyCode,
+            modifiers: draftModifiers,
+            displayString: KeyboardShortcutCaptureFormatter.displayString(
+                key: draftKeyLabel,
+                modifiers: draftModifiers
+            )
+        )
     }
 
-    private var hasSequenceToClear: Bool {
-        isRecording ? !capturedTokens.isEmpty || !originalCommand.isEmpty : !command.isEmpty
+    private var hasDraft: Bool {
+        draftKeyCode != nil || !draftModifiers.isEmpty
+    }
+
+    private var hasShortcutToClear: Bool {
+        hasDraft || shortcut != nil || !command.isEmpty
     }
 
     var body: some View {
@@ -143,10 +146,10 @@ struct KeyboardShortcutCaptureField: View {
                 .buttonStyle(.plain)
                 .frame(maxWidth: .infinity)
                 .accessibilityLabel(isRecording ? "Recording keyboard shortcut" : "Record keyboard shortcut")
-                .help(isRecording ? "Press keyboard keys or remote K buttons, then click to save." : "Click to record a shortcut")
+                .help(isRecording ? "Hold modifier keys and press one key, then click to save." : "Click to record a shortcut")
 
-                if hasSequenceToClear {
-                    Button(action: clearSequence) {
+                if hasShortcutToClear {
+                    Button(action: clearShortcut) {
                         Image(systemName: "xmark.circle.fill")
                             .foregroundStyle(.secondary)
                     }
@@ -161,26 +164,20 @@ struct KeyboardShortcutCaptureField: View {
                     .stroke(isRecording ? Color.accentColor : Color(nsColor: .separatorColor), lineWidth: 1)
             }
             .contentShape(Rectangle())
-            if isRecording, !capturedTokens.isEmpty {
+
+            if isRecording, hasDraft {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 5) {
-                        ForEach(Array(capturedTokens.enumerated()), id: \.offset) { index, token in
-                            Button {
-                                removeToken(at: index)
-                            } label: {
-                                HStack(spacing: 3) {
-                                    Text(token)
-                                        .font(.caption.monospaced())
-                                    Image(systemName: "xmark.circle.fill")
-                                        .font(.caption2)
-                                }
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 3)
-                                .background(.quaternary, in: Capsule())
+                        ForEach(KeyboardShortcut.modifierOrder.filter { draftModifiers.contains($0) }, id: \.self) { modifier in
+                            removableChip(label: modifier.symbol, accessibilityLabel: "Remove \(modifier.rawValue) modifier") {
+                                removeModifier(modifier)
                             }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("Remove \(token)")
-                            .help("Remove \(token) from the draft")
+                        }
+
+                        if draftKeyCode != nil {
+                            removableChip(label: draftKeyLabel, accessibilityLabel: "Remove \(draftKeyLabel) key") {
+                                removeKey()
+                            }
                         }
                     }
                 }
@@ -196,17 +193,49 @@ struct KeyboardShortcutCaptureField: View {
         }
     }
 
+    private func removableChip(
+        label: String,
+        accessibilityLabel: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 3) {
+                Text(label)
+                    .font(.caption.monospaced())
+                Image(systemName: "xmark.circle.fill")
+                    .font(.caption2)
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(.quaternary, in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(accessibilityLabel)
+        .help(accessibilityLabel)
+    }
+
     private var displayValue: String {
         if isRecording {
-            return capturedTokens.isEmpty
-                ? "Recording — press keyboard keys or remote K buttons"
-                : "Recording \(capturedTokens.count) key(s)"
+            if let draftShortcut {
+                return "Recording \(draftShortcut.displayString)"
+            }
+            if !draftModifiers.isEmpty {
+                let modifiers = KeyboardShortcut.modifierOrder
+                    .filter { draftModifiers.contains($0) }
+                    .map(\.symbol)
+                    .joined()
+                return "Recording \(modifiers) — press a key"
+            }
+            return "Recording — hold modifiers, then press a key"
+        }
+        if let shortcut, !shortcut.displayString.isEmpty {
+            return shortcut.displayString
         }
         return command.isEmpty ? "No shortcut recorded" : command
     }
 
     private var displayValueIsPlaceholder: Bool {
-        (isRecording && capturedTokens.isEmpty) || (!isRecording && command.isEmpty)
+        (isRecording && !hasDraft) || (!isRecording && shortcut == nil && command.isEmpty)
     }
 
     private func toggleRecording() {
@@ -214,42 +243,38 @@ struct KeyboardShortcutCaptureField: View {
     }
 
     private func startRecording() {
-        originalCommand = command
-        capturedTokens = []
+        draftKeyCode = nil
+        draftKeyLabel = ""
+        draftModifiers = []
+        currentModifierFlags = []
         didEditDraft = false
-        pressedModifierKeyCodes = []
-        capturedModifierFlags = []
         isRecording = true
-        beginRemoteCapture { control in
-            append(control.rawValue)
-        }
         eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { event in
             switch event.type {
             case .keyDown:
                 if event.keyCode == 53 {
                     stopRecording(commit: false)
-                } else if let token = KeyboardShortcutCaptureFormatter.keyboardToken(
-                    for: event,
-                    excluding: capturedModifierFlags
-                ) {
-                    append(token)
+                } else if let captured = KeyboardShortcutCaptureFormatter.shortcut(for: event) {
+                    draftKeyCode = captured.keyCode
+                    draftKeyLabel = KeyboardShortcutCaptureFormatter.keyLabel(for: event)
+                    draftModifiers = captured.modifiers
+                    didEditDraft = true
                 }
             case .flagsChanged:
-                // Track physical modifier keys so a repeated flagsChanged
-                // event, or releasing one side while the other is held,
-                // cannot append a duplicate token. A release can still report
-                // the modifier flag when the other side is held, so an already
-                // tracked keycode is always treated as the release edge.
-                if pressedModifierKeyCodes.contains(event.keyCode) {
-                    pressedModifierKeyCodes.remove(event.keyCode)
-                    refreshCapturedModifierFlags()
-                } else if let token = KeyboardShortcutCaptureFormatter.modifierToken(for: event) {
-                    if pressedModifierKeyCodes.insert(event.keyCode).inserted {
-                        refreshCapturedModifierFlags()
-                        append(token)
+                if let modifierFlag = KeyboardShortcutCaptureFormatter.modifierFlag(for: event.keyCode) {
+                    if event.modifierFlags.contains(modifierFlag) {
+                        currentModifierFlags.insert(modifierFlag)
+                    } else {
+                        currentModifierFlags.remove(modifierFlag)
                     }
-                } else {
-                    pressedModifierKeyCodes.remove(event.keyCode)
+
+                    // Before the final key is pressed, show held modifiers as
+                    // removable chips.  Once a key is captured, keep the
+                    // draft stable so releasing a modifier cannot mutate the
+                    // saved chord.
+                    if draftKeyCode == nil {
+                        draftModifiers = KeyboardShortcutCaptureFormatter.modifierSet(for: currentModifierFlags)
+                    }
                 }
             default:
                 break
@@ -258,31 +283,27 @@ struct KeyboardShortcutCaptureField: View {
         }
     }
 
-    private func refreshCapturedModifierFlags() {
-        capturedModifierFlags = pressedModifierKeyCodes.reduce(into: []) { flags, keyCode in
-            if let flag = KeyboardShortcutCaptureFormatter.modifierFlag(for: keyCode) {
-                flags.insert(flag)
-            }
-        }
-    }
-
-    private func append(_ token: String) {
-        guard isRecording, capturedTokens.count < 12 else { return }
-        capturedTokens.append(token)
+    private func removeModifier(_ modifier: KeyboardShortcut.Modifier) {
+        guard isRecording else { return }
+        draftModifiers.remove(modifier)
         didEditDraft = true
     }
 
-    private func removeToken(at index: Int) {
-        guard isRecording, capturedTokens.indices.contains(index) else { return }
-        capturedTokens.remove(at: index)
+    private func removeKey() {
+        guard isRecording else { return }
+        draftKeyCode = nil
+        draftKeyLabel = ""
         didEditDraft = true
     }
 
-    private func clearSequence() {
+    private func clearShortcut() {
         if isRecording {
-            capturedTokens.removeAll()
+            draftKeyCode = nil
+            draftKeyLabel = ""
+            draftModifiers = []
             didEditDraft = true
         } else {
+            shortcut = nil
             command = ""
         }
     }
@@ -293,14 +314,20 @@ struct KeyboardShortcutCaptureField: View {
             NSEvent.removeMonitor(eventMonitor)
             self.eventMonitor = nil
         }
-        endRemoteCapture()
         isRecording = false
         if commit, didEditDraft {
-            command = draft
+            if let draftShortcut {
+                shortcut = draftShortcut
+                command = draftShortcut.displayString
+            } else {
+                shortcut = nil
+                command = ""
+            }
         }
-        capturedTokens = []
+        draftKeyCode = nil
+        draftKeyLabel = ""
+        draftModifiers = []
+        currentModifierFlags = []
         didEditDraft = false
-        pressedModifierKeyCodes = []
-        capturedModifierFlags = []
     }
 }

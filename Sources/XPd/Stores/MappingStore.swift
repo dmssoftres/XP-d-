@@ -1,4 +1,5 @@
 import AppKit
+import CoreGraphics
 import Foundation
 import Observation
 
@@ -44,6 +45,8 @@ final class MappingStore {
         _ mapping: Mapping,
         _ completion: @escaping @MainActor (ActionExecutionResult) -> Void
     ) -> Void
+    typealias RemoteModifierProvider = @MainActor () -> Set<KeyboardShortcut.Modifier>
+    typealias RemoteFunctionKeyProvider = @MainActor () -> Set<UInt16>
 
     private(set) var availableProfiles: [String] = XPdConfiguration.defaultProfileNames
 
@@ -349,31 +352,53 @@ final class MappingStore {
     private var midiControlLayers: [RemoteControl: Int] = [:]
     private var centerFnHoldTask: Task<Void, Never>?
     private var centerFnHoldGeneration = 0
-    /// The keyboard-shortcut editor temporarily owns K-button input while it
-    /// records a sequence.  Keeping this at the store/HID boundary prevents a
-    /// captured press from also executing its configured mapping.
-    private var shortcutCaptureHandler: ((RemoteControl) -> Void)?
     private let midiOutputService: MIDIOutputService
     private let midiCommandTail = MIDICommandTail()
     private let midiShutdownGate = MIDIShutdownGate()
     private let actionRunner = ActionRunner()
     private let actionExecutionOverride: ActionExecutionOverride?
+    private let remoteModifierProvider: RemoteModifierProvider
+    private let remoteFunctionKeyProvider: RemoteFunctionKeyProvider
     private let buttonGestureRecognizer: ButtonGestureRecognizer
+    private var pendingRemoteTriggerModifiers: [RemoteControl: Set<KeyboardShortcut.Modifier>] = [:]
+    private var pendingRemoteTriggerFunctionKeys: [RemoteControl: Set<UInt16>] = [:]
+    private var remoteTriggerCaptureHandler: ((RemoteControl) -> Void)?
     @ObservationIgnored private lazy var inputOverlay = InputOverlayController(displayDuration: inputOverlayDuration)
     @ObservationIgnored private let terminationObserver = MIDIShutdownObserver()
+
+    private static func currentRemoteModifierSet() -> Set<KeyboardShortcut.Modifier> {
+        let flags = CGEventSource.flagsState(.combinedSessionState)
+        var modifiers = Set<KeyboardShortcut.Modifier>()
+        if flags.contains(.maskCommand) { modifiers.insert(.command) }
+        if flags.contains(.maskControl) { modifiers.insert(.control) }
+        if flags.contains(.maskAlternate) { modifiers.insert(.option) }
+        if flags.contains(.maskShift) { modifiers.insert(.shift) }
+        if flags.contains(.maskSecondaryFn) { modifiers.insert(.function) }
+        return modifiers
+    }
+
+    private static func currentRemoteFunctionKeySet() -> Set<UInt16> {
+        KeyboardShortcut.functionKeyCodes.filter {
+            CGEventSource.keyState(.combinedSessionState, key: CGKeyCode($0))
+        }
+    }
 
     init(
         userDefaults: UserDefaults = .standard,
         startHardware: Bool = true,
         gestureSchedule: @escaping ButtonGestureRecognizer.Schedule = ButtonGestureRecognizer.productionSchedule,
         actionExecutionOverride: ActionExecutionOverride? = nil,
-        midiOutputService: MIDIOutputService? = nil
+        midiOutputService: MIDIOutputService? = nil,
+        remoteModifierProvider: @escaping RemoteModifierProvider = MappingStore.currentRemoteModifierSet,
+        remoteFunctionKeyProvider: @escaping RemoteFunctionKeyProvider = MappingStore.currentRemoteFunctionKeySet
     ) {
         defaults = userDefaults
         hid = HIDService(startHardware: startHardware)
         buttonGestureRecognizer = ButtonGestureRecognizer(schedule: gestureSchedule)
         self.actionExecutionOverride = actionExecutionOverride
         self.midiOutputService = midiOutputService ?? MIDIOutputService(defaults: userDefaults)
+        self.remoteModifierProvider = remoteModifierProvider
+        self.remoteFunctionKeyProvider = remoteFunctionKeyProvider
 
         let savedProfile = defaults.string(forKey: profileNameDefaultsKey)
         showsInputOverlay = defaults.object(forKey: inputOverlayDefaultsKey) as? Bool ?? true
@@ -446,6 +471,21 @@ final class MappingStore {
 
     func mapping(for control: RemoteControl, gesture: GestureKind) -> Mapping {
         mappings[MappingKey(control: control, gesture: gesture)] ?? Mapping()
+    }
+
+    /// Starts a temporary Standard-mode capture. Matching K-button input is
+    /// delivered to the callback and never enters normal gesture routing.
+    /// The UI owns modifier tracking because the capture is explicitly tied
+    /// to its mouse-start/mouse-stop lifecycle.
+    func beginRemoteTriggerCapture(onRemoteButton: @escaping (RemoteControl) -> Void) {
+        cancelLearning()
+        cancelPendingButtonGestures()
+        closeProfileSelector()
+        remoteTriggerCaptureHandler = onRemoteButton
+    }
+
+    func endRemoteTriggerCapture() {
+        remoteTriggerCaptureHandler = nil
     }
 
     /// Returns the optional title for a Standard-mode K button. Titles are
@@ -744,17 +784,6 @@ final class MappingStore {
     func update(_ mapping: Mapping, for control: RemoteControl, gesture: GestureKind) {
         mappings[MappingKey(control: control, gesture: gesture)] = mapping
         save()
-    }
-
-    func beginKeyboardShortcutCapture(onRemoteButton: @escaping (RemoteControl) -> Void) {
-        cancelLearning()
-        cancelPendingButtonGestures()
-        closeProfileSelector()
-        shortcutCaptureHandler = onRemoteButton
-    }
-
-    func endKeyboardShortcutCapture() {
-        shortcutCaptureHandler = nil
     }
 
     /// Executes a mapping after resolving any same-control Tap inheritance.
@@ -1119,17 +1148,10 @@ final class MappingStore {
         liveInputGeneration += 1
         let generation = liveInputGeneration
 
-        if let shortcutCaptureHandler {
-            guard let signature,
-                  let matched = hidBindings.first(where: { $0.value == signature })?.key,
-                  matched.isMIDIButton else {
+        guard let signature else {
+            if remoteTriggerCaptureHandler != nil {
                 return
             }
-            shortcutCaptureHandler(matched)
-            return
-        }
-
-        guard let signature else {
             if activeRealm == .midi, let liveControl {
                 if liveControl == .wheelCenter, fnControl == .wheelCenter {
                     finishCenterMIDIInteraction()
@@ -1171,11 +1193,27 @@ final class MappingStore {
         }
 
         guard let matched = hidBindings.first(where: { $0.value == signature })?.key else { return }
+
+        if let remoteTriggerCaptureHandler,
+           activeRealm == .standard,
+           matched.isMIDIButton {
+            remoteTriggerCaptureHandler(matched)
+            return
+        }
+
+        if activeRealm == .standard, matched.isMIDIButton,
+           pendingRemoteTriggerModifiers[matched] == nil {
+            pendingRemoteTriggerModifiers[matched] = remoteModifierProvider()
+            pendingRemoteTriggerFunctionKeys[matched] = remoteFunctionKeyProvider()
+        }
+
         if let displacedControl = liveControl, displacedControl != matched {
             if activeRealm == .midi {
                 handleMIDIControlRelease(displacedControl)
             } else {
                 buttonGestureRecognizer.cancel(displacedControl)
+                pendingRemoteTriggerModifiers.removeValue(forKey: displacedControl)
+                pendingRemoteTriggerFunctionKeys.removeValue(forKey: displacedControl)
                 if showsInputOverlay, !displacedControl.isWheelRotation {
                     inputOverlay.release(control: displacedControl)
                 }
@@ -1231,11 +1269,16 @@ final class MappingStore {
             return
         }
 
-        showOverlayPress(for: matched)
         buttonGestureRecognizer.press(matched)
     }
 
     private func recognizedButtonGesture(control: RemoteControl, gesture: GestureKind) {
+        let modifiers = pendingRemoteTriggerModifiers.removeValue(forKey: control) ?? []
+        let functionKeys = pendingRemoteTriggerFunctionKeys.removeValue(forKey: control) ?? []
+        let mapping = mapping(for: control, gesture: gesture)
+        let expectedFunctionKeys = mapping.remoteTriggerFunctionKey.map { Set([$0]) } ?? []
+        guard mapping.remoteTriggerModifiers == modifiers, functionKeys == expectedFunctionKeys else { return }
+        showOverlayPress(for: control)
         if showsInputOverlay {
             inputOverlay.recognize(control: control, gesture: gesture)
         }
@@ -1389,6 +1432,9 @@ final class MappingStore {
 
     private func cancelPendingButtonGestures() {
         buttonGestureRecognizer.cancelAll()
+        pendingRemoteTriggerModifiers.removeAll()
+        pendingRemoteTriggerFunctionKeys.removeAll()
+        remoteTriggerCaptureHandler = nil
         if let liveControl, showsInputOverlay, !liveControl.isWheelRotation {
             inputOverlay.release(control: liveControl)
         }

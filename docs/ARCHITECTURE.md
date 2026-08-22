@@ -15,7 +15,7 @@ No backend, database, cloud account, telemetry service, or third-party package d
 | `ShortcutRemoteBatteryMonitor` | Verify the target BLE PnP identity, enable its two notify-only vendor characteristics, and parse exact battery packets | CoreBluetooth | Unknown |
 | `ButtonGestureRecognizer` | Convert K1–K10 down/release reports into mutually exclusive Tap, Hold, and Double events with cancellable timing | Main-actor scheduler seam | Unknown |
 | `MappingStore` | Ordered Standard/MIDI profiles, mapping/HID/MIDI state, migration, persistence, imports, selector/Fn routing, action dispatch | SwiftUI observable state, `UserDefaults` | Unknown |
-| `ActionRunner` | Execute currently supported scrolling and application actions; permission preflight/settings | Core Graphics, AppKit, ApplicationServices, process APIs | Unknown |
+| `ActionRunner` | Execute scrolling, application actions, and captured keyboard chords; silently preflight routine event-posting access | Core Graphics, AppKit, ApplicationServices, process APIs | Unknown |
 | `MIDIOutputService` | Create Control/Performance virtual sources, encode MIDI 1.0 UMP, track active output, pitch return, cleanup, and exact send-result monitor events | CoreMIDI actor and injectable backend | Unknown |
 | Configuration models/document | Codable configuration schema, validation, JSON import/export | Foundation, SwiftUI `FileDocument` | Unknown |
 | `ContentView`, `RemoteView`, `MappingInspector`, `KeyboardShortcutCaptureField` | Hardware editor, mapping controls, click-to-record shortcut entry, live status, import/export | SwiftUI, AppKit local events | Unknown |
@@ -24,11 +24,20 @@ No backend, database, cloud account, telemetry service, or third-party package d
 
 ## Data flow
 
-Shortcut Remote HID value/report → `HIDService` → `ButtonGestureRecognizer` for K1–K10 → `MappingStore` gesture resolution → persisted mapping lookup → optional same-control Tap application resolution → `ActionRunner` side effect and input-overlay presentation. Tap waits through the Double window; Hold and Double suppress Tap. Profile changes, imports, learning, disconnects, and displaced live controls cancel pending gestures. Inherited Hold/Double application targets are read at execution time; invalid Tap mappings stop before side effects.
+Shortcut Remote HID value/report → `HIDService` → `MappingStore` snapshots global modifier flags at K1–K10 button-down → `ButtonGestureRecognizer` → exact persisted remote-trigger modifier match → mapping resolution → optional same-control Tap application resolution → `ActionRunner` side effect and input-overlay presentation. Tap waits through the Double window; Hold and Double suppress Tap. Profile changes, imports, learning, disconnects, and displaced live controls cancel pending gestures. Inherited Hold/Double application targets are read at execution time; invalid Tap mappings stop before side effects.
 
 Configuration UI/profile-manager edits → `MappingStore` → one ordered version-5 profile collection in `UserDefaults`. Standard K1–K10 titles are optional, profile-scoped metadata shared across gestures; they are excluded from MIDI profiles. Renaming a non-Global profile replaces its name identity atomically while preserving order, realm, mappings, HID bindings, button titles, active selection, and remembered workspace targets. Version-2 fixed and version-3 dynamic persistence migrate to Standard profiles; version 4 gains empty title collections; older shared mappings and HID bindings migrate into Global. Export builds a complete ordered JSON document; v2/v3/v4 exports upgrade on decode, and imports validate realms, remembered profiles, typed MIDI values, mappings, bindings, and Standard titles before one replacement.
 
-Keyboard-shortcut capture → local AppKit key-down/flags-changed monitor plus an explicit temporary `MappingStore` K1–K10 input handler → in-view draft sequence with individual remove/clear controls → second mouse click commits the mapping/autosave. Escape, selection/action changes, and view removal cancel the draft without writing through the newly selected mapping. While active, the store consumes remote input before normal gesture, selector, or MIDI routing. Keyboard/remote sequence replay remains unimplemented.
+Keyboard-shortcut capture → local AppKit key-down/flags-changed monitor → in-view draft for exactly one simultaneous chord (zero or more modifiers plus one physical key) → second mouse click commits structured chord data and its readable display text. Escape, selection/action changes, and view removal cancel the draft without changing either mapping. Remote K-buttons remain mapping triggers and are never recorded as shortcut inputs. `ActionRunner` silently preflights post-event access and, only for a structured chord, posts one matching key-down/key-up pair; legacy command-text shortcuts remain visible but are rejected with re-record guidance.
+
+Remote-trigger capture → local modifier/function-key monitor plus a temporary
+`MappingStore` K1–K10 capture handler → in-view draft combining modifiers,
+one held F1–F12 key, and the captured remote special key → second mouse click
+writes remote trigger data to that button's selected gesture mapping and selects
+the captured button. The handler consumes capture input before normal routing.
+At runtime global modifier and F-key state sampled on K-button down must exactly
+match before overlay or action effects; the snapshot remains associated with the
+later Tap/Hold/Double result.
 
 MIDI-realm HID input → `MappingStore` primary/Fn routing and session offsets →
 `MIDIOutputService` → independent `XP[d] Control` or `XP[d] Performance`
@@ -66,7 +75,7 @@ The build script compiles `XPd`, assembles `dist/XP[d].app`, creates its Info.pl
 - Wheel-center report changes or loses its device-specific standalone empty report-6 distinction: selector confirmation may regress and requires controlled real-hardware recapture.
 - Action target unavailable or permission denied: report a structured action failure without corrupting mappings. Existing application targets are unhidden/restored where permitted, directly activated, and asynchronously verified as foreground; a failed or ineffective direct activation makes one same-path `NSWorkspace` reopen attempt without creating another instance.
 - Inherited Hold/Double target invalid: show the Tap validation failure and do not invoke `ActionRunner`.
-- Keyboard-shortcut capture interrupted: restore the prior command and remove the local event monitor/remote capture handler without saving a partial sequence.
+- Keyboard-shortcut capture interrupted: remove the local event monitor and discard the in-memory chord draft without writing into the current or newly selected mapping.
 - CoreMIDI source creation/send failure: keep profile state intact, report the
   affected port, and retain failed live/toggle state so cleanup can retry.
 - Unverified physical Fn rollover: do not substitute a latch or claim the
