@@ -38,6 +38,29 @@ final class InputOverlayModelTests: XCTestCase {
     }
 
     @MainActor
+    func testCompletedPressExpiresUsingConfiguredDuration() {
+        let model = InputOverlayModel(displayDuration: 0.01)
+        let presentation = InputOverlayPresentation(mapping: Mapping(action: .noAction))
+        let expired = expectation(description: "completed HUD entry expires")
+        model.visibilityDidChange = { isVisible in
+            if !isVisible {
+                expired.fulfill()
+            }
+        }
+
+        model.presentCompleted(
+            control: .k1,
+            tap: presentation,
+            hold: presentation,
+            doubleTap: presentation
+        )
+
+        XCTAssertFalse(model.entries.last?.isPressed ?? true)
+        wait(for: [expired], timeout: 1)
+        XCTAssertTrue(model.entries.isEmpty)
+    }
+
+    @MainActor
     func testMIDIOverlayShowsLockProfileLayerAndMessage() {
         let model = InputOverlayModel()
 

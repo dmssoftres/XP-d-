@@ -152,6 +152,19 @@ final class InputOverlayModel {
         visibilityDidChange?(true)
     }
 
+    /// Presents a gesture that was recognized after the physical HID release.
+    /// Tap and Double are resolved only after that release, so their cards
+    /// must start their configured display duration immediately.
+    func presentCompleted(
+        control: RemoteControl,
+        tap: InputOverlayPresentation,
+        hold: InputOverlayPresentation,
+        doubleTap: InputOverlayPresentation
+    ) {
+        press(control: control, tap: tap, hold: hold, doubleTap: doubleTap)
+        release(control: control)
+    }
+
     func release(control: RemoteControl) {
         guard let index = entries.lastIndex(where: { $0.control == control && $0.isPressed }) else { return }
         let id = entries[index].id

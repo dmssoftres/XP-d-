@@ -66,6 +66,17 @@ final class InputOverlayController {
         )
     }
 
+    func presentCompleted(control: RemoteControl, tap: Mapping, hold: Mapping, doubleTap: Mapping) {
+        guard model.isEnabled else { return }
+        ensureVisible()
+        model.presentCompleted(
+            control: control,
+            tap: InputOverlayPresentation(mapping: tap),
+            hold: InputOverlayPresentation(mapping: hold),
+            doubleTap: InputOverlayPresentation(mapping: doubleTap)
+        )
+    }
+
     func release(control: RemoteControl) {
         model.release(control: control)
     }

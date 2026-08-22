@@ -1455,7 +1455,11 @@ final class MappingStore {
         let expectedFunctionKeys = mapping.remoteTriggerFunctionKey.map { Set([$0]) } ?? []
         guard mapping.remoteTriggerModifiers == identity.keyboardModifiers,
               identity.functionKeys == expectedFunctionKeys else { return }
-        showOverlayPress(for: control, modifierControls: layer)
+        showOverlayPress(
+            for: control,
+            modifierControls: layer,
+            isAlreadyReleased: gesture != .hold
+        )
         if showsInputOverlay {
             inputOverlay.recognize(control: control, gesture: gesture)
         }
@@ -1695,15 +1699,18 @@ final class MappingStore {
 
     private func showOverlayPress(
         for control: RemoteControl,
-        modifierControls: Set<RemoteControl> = []
+        modifierControls: Set<RemoteControl> = [],
+        isAlreadyReleased: Bool = false
     ) {
         guard showsInputOverlay else { return }
-        inputOverlay.press(
-            control: control,
-            tap: overlayMapping(for: control, gesture: .tap, modifierControls: modifierControls),
-            hold: overlayMapping(for: control, gesture: .hold, modifierControls: modifierControls),
-            doubleTap: overlayMapping(for: control, gesture: .doubleTap, modifierControls: modifierControls)
-        )
+        let tap = overlayMapping(for: control, gesture: .tap, modifierControls: modifierControls)
+        let hold = overlayMapping(for: control, gesture: .hold, modifierControls: modifierControls)
+        let doubleTap = overlayMapping(for: control, gesture: .doubleTap, modifierControls: modifierControls)
+        if isAlreadyReleased {
+            inputOverlay.presentCompleted(control: control, tap: tap, hold: hold, doubleTap: doubleTap)
+        } else {
+            inputOverlay.press(control: control, tap: tap, hold: hold, doubleTap: doubleTap)
+        }
     }
 
     private func saveMIDIState() {
