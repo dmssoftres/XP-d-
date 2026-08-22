@@ -10,8 +10,21 @@ struct MappingInspector: View {
 
     private var binding: Binding<Mapping> {
         Binding(
-            get: { store.mapping(for: store.selectedControl, gesture: store.selectedGesture) },
-            set: { store.update($0, for: store.selectedControl, gesture: store.selectedGesture) }
+            get: {
+                store.mapping(
+                    for: store.selectedControl,
+                    gesture: store.selectedGesture,
+                    modifierControls: store.selectedMappingModifiers
+                )
+            },
+            set: {
+                store.update(
+                    $0,
+                    for: store.selectedControl,
+                    gesture: store.selectedGesture,
+                    modifierControls: store.selectedMappingModifiers
+                )
+            }
         )
     }
 
@@ -155,6 +168,12 @@ struct MappingInspector: View {
             endCommandEditing()
         }
         .onChange(of: store.selectedGesture) { _, _ in
+            if store.isRemoteModifier(store.selectedControl), store.selectedGesture != .tap {
+                store.selectedGesture = .tap
+            }
+            endCommandEditing()
+        }
+        .onChange(of: store.selectedMappingModifiers) { _, _ in
             endCommandEditing()
         }
         .onChange(of: store.profileName) { _, _ in
@@ -663,6 +682,14 @@ struct MappingInspector: View {
                         .textFieldStyle(.roundedBorder)
                 }
 
+                if isStandardModifierEligible {
+                    standardModifierEditor
+                }
+
+                if isStandardLayerEligible {
+                    mappingLayerPicker
+                }
+
                 Picker("Action", selection: binding.action) {
                     ForEach(ActionKind.allCases) { action in
                         Text(action.rawValue).tag(action)
@@ -691,13 +718,21 @@ struct MappingInspector: View {
                     Text("Gesture")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Picker("Gesture", selection: Bindable(store).selectedGesture) {
-                        ForEach(GestureKind.allCases) { gesture in
-                            Text(gesture.rawValue).tag(gesture)
+                    if store.isRemoteModifier(store.selectedControl) {
+                        Text("Tap · held presses select a modifier layer")
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 10)
+                            .frame(height: 24)
+                            .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+                    } else {
+                        Picker("Gesture", selection: Bindable(store).selectedGesture) {
+                            ForEach(GestureKind.allCases) { gesture in
+                                Text(gesture.rawValue).tag(gesture)
+                            }
                         }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
                     }
-                    .labelsHidden()
-                    .pickerStyle(.segmented)
                 }
 
                 persistenceResult
@@ -858,13 +893,81 @@ struct MappingInspector: View {
                 endCapture: store.endRemoteTriggerCapture,
                 onCommit: { control, modifiers, functionKey in
                     let gesture = store.selectedGesture
-                    var mapping = store.mapping(for: control, gesture: gesture)
+                    var mapping = store.mapping(
+                        for: control,
+                        gesture: gesture,
+                        modifierControls: store.selectedMappingModifiers
+                    )
                     mapping.remoteTriggerModifiers = modifiers
                     mapping.remoteTriggerFunctionKey = functionKey
-                    store.update(mapping, for: control, gesture: gesture)
+                    store.update(
+                        mapping,
+                        for: control,
+                        gesture: gesture,
+                        modifierControls: store.selectedMappingModifiers
+                    )
                     store.selectedControl = control
                 }
             )
+        }
+    }
+
+    @ViewBuilder
+    private var standardModifierEditor: some View {
+        HStack(spacing: 10) {
+            Toggle(
+                "K modifier",
+                isOn: Binding(
+                    get: { store.isRemoteModifier(store.selectedControl) },
+                    set: { _ = store.setRemoteModifier(store.selectedControl, enabled: $0) }
+                )
+            )
+            .toggleStyle(.switch)
+            .controlSize(.small)
+
+            if store.isRemoteModifier(store.selectedControl) {
+                Text("Tap only when used by itself")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var mappingLayerPicker: some View {
+        HStack(spacing: 10) {
+            Text("Mapping layer")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Menu {
+                Button("Base") {
+                    store.selectedMappingModifiers = []
+                }
+                Divider()
+                ForEach(RemoteControl.allCases.filter {
+                    store.isRemoteModifier($0) && $0 != store.selectedControl
+                }) { control in
+                    Toggle(
+                        control.rawValue,
+                        isOn: Binding(
+                            get: { store.selectedMappingModifiers.contains(control) },
+                            set: { enabled in
+                                var selected = store.selectedMappingModifiers
+                                if enabled {
+                                    selected.insert(control)
+                                } else {
+                                    selected.remove(control)
+                                }
+                                store.selectedMappingModifiers = selected
+                            }
+                        )
+                    )
+                }
+            } label: {
+                Label(mappingLayerLabel, systemImage: "square.stack.3d.up")
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            Spacer()
         }
     }
 
@@ -874,7 +977,10 @@ struct MappingInspector: View {
             Toggle("Use same application as Tap", isOn: binding.usesTapApplication)
 
             if binding.wrappedValue.usesTapApplication {
-                switch store.inheritedTapApplication(for: store.selectedControl) {
+                switch store.inheritedTapApplication(
+                    for: store.selectedControl,
+                    modifierControls: store.selectedMappingModifiers
+                ) {
                 case let .success(application):
                     VStack(alignment: .leading, spacing: 3) {
                         Text("Inherited from Tap")
@@ -935,7 +1041,7 @@ struct MappingInspector: View {
     }
 
     private var selectedAction: ActionKind {
-        store.mapping(for: store.selectedControl, gesture: store.selectedGesture).action
+        binding.wrappedValue.action
     }
 
     private var selectedControlTitle: String {
@@ -944,6 +1050,24 @@ struct MappingInspector: View {
 
     private var isStandardButtonTitleEligible: Bool {
         store.activeRealm == .standard && store.selectedControl.isMIDIButton
+    }
+
+    private var isStandardModifierEligible: Bool {
+        store.activeRealm == .standard && store.selectedControl.isModifierEligible
+    }
+
+    private var isStandardLayerEligible: Bool {
+        isStandardButtonTitleEligible
+            && !store.isRemoteModifier(store.selectedControl)
+            && !store.remoteModifierControls.isEmpty
+    }
+
+    private var mappingLayerLabel: String {
+        guard !store.selectedMappingModifiers.isEmpty else { return "Base" }
+        return RemoteControl.allCases
+            .filter { store.selectedMappingModifiers.contains($0) }
+            .map(\.rawValue)
+            .joined(separator: " + ")
     }
 
     private var standardButtonTitleBinding: Binding<String> {

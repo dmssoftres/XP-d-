@@ -131,8 +131,8 @@ final class ButtonGestureRecognizerTests: XCTestCase {
         let recognizer = ButtonGestureRecognizer { delay, action in
             scheduler.schedule(delay: delay, action: action)
         }
-        recognizer.onGesture = { control, gesture in
-            recorder.value.append(.init(control: control, gesture: gesture))
+        recognizer.onGesture = { identity, gesture in
+            recorder.value.append(.init(control: identity.control, gesture: gesture))
         }
         return (recognizer, scheduler, recorder)
     }

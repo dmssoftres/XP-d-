@@ -12,6 +12,13 @@ enum RemoteControl: String, CaseIterable, Codable, Identifiable {
     var isWheelRotation: Bool {
         self == .wheelCW || self == .wheelCCW
     }
+
+    /// Standard-mode layer modifiers are limited to physical K buttons;
+    /// wheels and the center control cannot be assigned this role.
+    var isModifierEligible: Bool {
+        isMIDIButton
+    }
+
 }
 
 enum GestureKind: String, CaseIterable, Codable, Identifiable {
@@ -44,6 +51,49 @@ enum ActionKind: String, CaseIterable, Codable, Identifiable {
 struct MappingKey: Hashable, Codable {
     let control: RemoteControl
     let gesture: GestureKind
+    /// An empty set is the original/base mapping. A non-empty value selects
+    /// the exact alternate layer for the designated K-button modifiers.
+    let modifierControls: Set<RemoteControl>
+
+    init(
+        control: RemoteControl,
+        gesture: GestureKind,
+        modifierControls: Set<RemoteControl> = []
+    ) {
+        self.control = control
+        self.gesture = gesture
+        self.modifierControls = modifierControls
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case control, gesture, modifierControls, modifierControl
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        control = try container.decode(RemoteControl.self, forKey: .control)
+        gesture = try container.decode(GestureKind.self, forKey: .gesture)
+        if let controls = try container.decodeIfPresent(Set<RemoteControl>.self, forKey: .modifierControls) {
+            modifierControls = controls
+        } else if let legacyControl = try container.decodeIfPresent(RemoteControl.self, forKey: .modifierControl) {
+            // A short-lived single-control shape was used by an earlier
+            // development build; accepting it costs nothing and keeps those
+            // local mappings usable.
+            modifierControls = [legacyControl]
+        } else {
+            modifierControls = []
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(control, forKey: .control)
+        try container.encode(gesture, forKey: .gesture)
+        try container.encode(
+            RemoteControl.allCases.filter { modifierControls.contains($0) },
+            forKey: .modifierControls
+        )
+    }
 }
 
 struct Mapping: Codable, Equatable {

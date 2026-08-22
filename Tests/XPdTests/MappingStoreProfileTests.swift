@@ -51,6 +51,55 @@ final class MappingStoreProfileTests: XCTestCase {
         XCTAssertEqual(reloaded.standardButtonTitle(for: .k1), "Chrome")
     }
 
+    func testRemoteModifierLayersAreProfileSpecificReloadAndSurviveTemporaryDisable() throws {
+        let store = makeStore()
+        let globalLayer = Mapping(action: .openApplication, command: "Global stacked layer")
+        store.setRemoteModifier(.k3, enabled: true)
+        store.setRemoteModifier(.k4, enabled: true)
+        store.update(
+            globalLayer,
+            for: .k1,
+            gesture: .tap,
+            modifierControls: [.k3, .k4]
+        )
+
+        store.setRemoteModifier(.k4, enabled: false)
+        XCTAssertFalse(store.isRemoteModifier(.k4))
+        XCTAssertEqual(
+            store.mapping(for: .k1, gesture: .tap, modifierControls: [.k3, .k4]),
+            globalLayer
+        )
+        store.setRemoteModifier(.k4, enabled: true)
+
+        store.profileName = "Finder"
+        XCTAssertFalse(store.isRemoteModifier(.k3))
+        XCTAssertFalse(store.isRemoteModifier(.k4))
+        XCTAssertNotEqual(
+            store.mapping(for: .k1, gesture: .tap, modifierControls: [.k3, .k4]),
+            globalLayer
+        )
+
+        store.profileName = "Global"
+        let exported = try XCTUnwrap(store.exportConfiguration())
+        defaults.removePersistentDomain(forName: suiteName)
+        let imported = makeStore()
+        XCTAssertTrue(imported.importConfiguration(exported))
+        XCTAssertTrue(imported.isRemoteModifier(.k3))
+        XCTAssertTrue(imported.isRemoteModifier(.k4))
+        XCTAssertEqual(
+            imported.mapping(for: .k1, gesture: .tap, modifierControls: [.k3, .k4]),
+            globalLayer
+        )
+
+        let reloaded = makeStore()
+        XCTAssertTrue(reloaded.isRemoteModifier(.k3))
+        XCTAssertTrue(reloaded.isRemoteModifier(.k4))
+        XCTAssertEqual(
+            reloaded.mapping(for: .k1, gesture: .tap, modifierControls: [.k3, .k4]),
+            globalLayer
+        )
+    }
+
     func testStandardButtonTitleEmptyRemovesAndWheelOrMIDIUpdatesAreNoOps() throws {
         let store = makeStore()
         store.updateStandardButtonTitle("Chrome", for: .k1)

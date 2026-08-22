@@ -6,13 +6,16 @@ import Foundation
 /// meaningful to the wheel selector, while mapping/HID entries can be sorted
 /// before encoding for stable diffs.
 struct XPdConfiguration: Codable, Equatable {
-    static let currentVersion = 5
+    static let currentVersion = 6
     static let legacyVersion = 2
     static let previousVersion = 3
     /// Version 4 is the immediately previous schema.  It had no
     /// Standard-mode button-title entries, so decoding it upgrades every
     /// profile with an empty title collection.
     static let preTitlesVersion = 4
+    /// Version 5 added Standard button titles but predates dual-role K
+    /// modifiers and alternate mapping layers.
+    static let preRemoteLayersVersion = 5
     static let defaultProfileNames = ["Global", "Finder", "Logic Pro"]
     static let defaultWorkspaceLockControl: RemoteControl = .k3
 
@@ -34,6 +37,7 @@ struct XPdConfiguration: Codable, Equatable {
         let realm: ProfileRealm
         let midiSettings: MIDIProfileSettings?
         let standardButtonTitles: [StandardButtonTitleEntry]
+        let remoteModifierControls: Set<RemoteControl>
 
         var id: String { name }
 
@@ -47,7 +51,8 @@ struct XPdConfiguration: Codable, Equatable {
             hidBindings: [HIDBindingEntry],
             realm: ProfileRealm = .standard,
             midiSettings: MIDIProfileSettings? = nil,
-            standardButtonTitles: [StandardButtonTitleEntry] = []
+            standardButtonTitles: [StandardButtonTitleEntry] = [],
+            remoteModifierControls: Set<RemoteControl> = []
         ) {
             self.name = name
             self.mappings = mappings
@@ -55,6 +60,7 @@ struct XPdConfiguration: Codable, Equatable {
             self.realm = realm
             self.midiSettings = midiSettings
             self.standardButtonTitles = standardButtonTitles
+            self.remoteModifierControls = remoteModifierControls
         }
 
         init(
@@ -63,7 +69,8 @@ struct XPdConfiguration: Codable, Equatable {
             hidBindings: [HIDBindingEntry],
             profileRealm: ProfileRealm,
             midiSettings: MIDIProfileSettings? = nil,
-            standardButtonTitles: [StandardButtonTitleEntry] = []
+            standardButtonTitles: [StandardButtonTitleEntry] = [],
+            remoteModifierControls: Set<RemoteControl> = []
         ) {
             self.init(
                 name: name,
@@ -71,7 +78,8 @@ struct XPdConfiguration: Codable, Equatable {
                 hidBindings: hidBindings,
                 realm: profileRealm,
                 midiSettings: midiSettings,
-                standardButtonTitles: standardButtonTitles
+                standardButtonTitles: standardButtonTitles,
+                remoteModifierControls: remoteModifierControls
             )
         }
 
@@ -83,6 +91,7 @@ struct XPdConfiguration: Codable, Equatable {
             realm = try container.decodeIfPresent(ProfileRealm.self, forKey: .realm) ?? .standard
             midiSettings = try container.decodeIfPresent(MIDIProfileSettings.self, forKey: .midiSettings)
             standardButtonTitles = try container.decodeIfPresent([StandardButtonTitleEntry].self, forKey: .standardButtonTitles) ?? []
+            remoteModifierControls = try container.decodeIfPresent(Set<RemoteControl>.self, forKey: .remoteModifierControls) ?? []
         }
 
         func encode(to encoder: Encoder) throws {
@@ -93,10 +102,14 @@ struct XPdConfiguration: Codable, Equatable {
             try container.encode(realm, forKey: .realm)
             try container.encodeIfPresent(midiSettings, forKey: .midiSettings)
             try container.encode(standardButtonTitles, forKey: .standardButtonTitles)
+            try container.encode(
+                RemoteControl.allCases.filter { remoteModifierControls.contains($0) },
+                forKey: .remoteModifierControls
+            )
         }
 
         private enum CodingKeys: String, CodingKey {
-            case name, mappings, hidBindings, realm, midiSettings, standardButtonTitles
+            case name, mappings, hidBindings, realm, midiSettings, standardButtonTitles, remoteModifierControls
         }
     }
 
@@ -104,11 +117,41 @@ struct XPdConfiguration: Codable, Equatable {
         let control: RemoteControl
         let gesture: GestureKind
         let mapping: Mapping
+        let modifierControls: Set<RemoteControl>
 
-        init(control: RemoteControl, gesture: GestureKind, mapping: Mapping) {
+        init(
+            control: RemoteControl,
+            gesture: GestureKind,
+            mapping: Mapping,
+            modifierControls: Set<RemoteControl> = []
+        ) {
             self.control = control
             self.gesture = gesture
             self.mapping = mapping
+            self.modifierControls = modifierControls
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            control = try container.decode(RemoteControl.self, forKey: .control)
+            gesture = try container.decode(GestureKind.self, forKey: .gesture)
+            mapping = try container.decode(Mapping.self, forKey: .mapping)
+            modifierControls = try container.decodeIfPresent(Set<RemoteControl>.self, forKey: .modifierControls) ?? []
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(control, forKey: .control)
+            try container.encode(gesture, forKey: .gesture)
+            try container.encode(mapping, forKey: .mapping)
+            try container.encode(
+                RemoteControl.allCases.filter { modifierControls.contains($0) },
+                forKey: .modifierControls
+            )
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case control, gesture, mapping, modifierControls
         }
     }
 
@@ -144,6 +187,10 @@ struct XPdConfiguration: Codable, Equatable {
         case invalidActiveProfile(String)
         case invalidRememberedProfile(String, ProfileRealm)
         case invalidWorkspaceLockControl(RemoteControl)
+        case invalidRemoteModifierControl(profile: String, control: RemoteControl)
+        case remoteModifiersOnMIDIProfile(String)
+        case remoteLayersInLegacyProfile(String)
+        case invalidMappingModifierControl(profile: String, primary: RemoteControl, modifier: RemoteControl)
         case invalidMIDIWorkspaceState
         case midiSettingsInLegacyProfile(String)
         case midiSettingsOnStandardProfile(String)
@@ -175,6 +222,14 @@ struct XPdConfiguration: Codable, Equatable {
                 return "Remembered \(realm.rawValue) profile is not present: \(name)."
             case let .invalidWorkspaceLockControl(control):
                 return "Workspace lock control must be a K button: \(control.rawValue)."
+            case let .invalidRemoteModifierControl(profile, control):
+                return "Remote modifier in \(profile) must target a K button: \(control.rawValue)."
+            case let .remoteModifiersOnMIDIProfile(profile):
+                return "MIDI profile \(profile) cannot contain Standard remote modifiers."
+            case let .remoteLayersInLegacyProfile(profile):
+                return "Legacy profile \(profile) cannot contain remote modifier layers."
+            case let .invalidMappingModifierControl(profile, primary, modifier):
+                return "Mapping layer in \(profile) cannot use \(modifier.rawValue) for \(primary.rawValue)."
             case .invalidMIDIWorkspaceState:
                 return "MIDI Lock can only be active in the MIDI profile realm."
             case let .midiSettingsInLegacyProfile(name):
@@ -292,10 +347,9 @@ struct XPdConfiguration: Codable, Equatable {
     }
 
     /// Decodes and validates the entire document before returning it. Versions
-    /// 2 and 3 are decoded through their published shape and upgraded to v5;
-    /// every migrated profile is explicitly marked as standard. Version 4 is
-    /// the current-realm schema and gains empty title collections during the
-    /// upgrade.
+    /// 2 and 3 are decoded through their published shape and upgraded to v6;
+    /// every migrated profile is explicitly marked as standard. Versions 4
+    /// and 5 gain the newer fields through compatibility defaults.
     static func decode(_ data: Data) throws -> XPdConfiguration {
         let decoder = JSONDecoder()
         let version = try decoder.decode(VersionEnvelope.self, from: data).version
@@ -304,6 +358,30 @@ struct XPdConfiguration: Codable, Equatable {
             let configuration = try decoder.decode(XPdConfiguration.self, from: data)
             try configuration.validate()
             return configuration
+        case preRemoteLayersVersion:
+            let legacy = try decoder.decode(XPdConfiguration.self, from: data)
+            try legacy.validateV5()
+            return XPdConfiguration(
+                version: currentVersion,
+                profiles: legacy.profiles.map {
+                    Profile(
+                        name: $0.name,
+                        mappings: $0.mappings,
+                        hidBindings: $0.hidBindings,
+                        realm: $0.realm,
+                        midiSettings: $0.midiSettings,
+                        standardButtonTitles: $0.standardButtonTitles,
+                        remoteModifierControls: []
+                    )
+                },
+                profileName: legacy.profileName,
+                showsInputOverlay: legacy.showsInputOverlay,
+                activeRealm: legacy.activeRealm,
+                lastStandardProfileName: legacy.lastStandardProfileName,
+                lastMIDIProfileName: legacy.lastMIDIProfileName,
+                midiLocked: legacy.midiLocked,
+                workspaceLockControl: legacy.workspaceLockControl
+            )
         case preTitlesVersion:
             let legacy = try decoder.decode(XPdConfiguration.self, from: data)
             try legacy.validateV4()
@@ -316,7 +394,8 @@ struct XPdConfiguration: Codable, Equatable {
                         hidBindings: $0.hidBindings,
                         realm: $0.realm,
                         midiSettings: $0.midiSettings,
-                        standardButtonTitles: []
+                        standardButtonTitles: [],
+                        remoteModifierControls: []
                     )
                 },
                 profileName: legacy.profileName,
@@ -343,7 +422,8 @@ struct XPdConfiguration: Codable, Equatable {
                         hidBindings: $0.hidBindings,
                         realm: .standard,
                         midiSettings: nil,
-                        standardButtonTitles: []
+                        standardButtonTitles: [],
+                        remoteModifierControls: []
                     )
                 },
                 profileName: legacy.profileName,
@@ -429,7 +509,8 @@ struct XPdConfiguration: Codable, Equatable {
 
         try validateEntries(
             allowMIDISettings: false,
-            allowStandardButtonTitles: false
+            allowStandardButtonTitles: false,
+            allowRemoteLayers: false
         )
     }
 
@@ -462,7 +543,8 @@ struct XPdConfiguration: Codable, Equatable {
         }
         try validateEntries(
             allowMIDISettings: false,
-            allowStandardButtonTitles: false
+            allowStandardButtonTitles: false,
+            allowRemoteLayers: false
         )
     }
 
@@ -474,7 +556,17 @@ struct XPdConfiguration: Codable, Equatable {
             throw ValidationError.unsupportedVersion(version)
         }
         try validateCurrentProfileShape()
-        try validateEntries(allowStandardButtonTitles: false)
+        try validateEntries(allowStandardButtonTitles: false, allowRemoteLayers: false)
+    }
+
+    /// Version 5 is the immediately previous current-realm schema. It has
+    /// titles but no remote modifier designation/layer fields.
+    private func validateV5() throws {
+        guard version == Self.preRemoteLayersVersion else {
+            throw ValidationError.unsupportedVersion(version)
+        }
+        try validateCurrentProfileShape()
+        try validateEntries(allowRemoteLayers: false)
     }
 
     private func validateCurrentProfileShape() throws {
@@ -520,13 +612,21 @@ struct XPdConfiguration: Codable, Equatable {
         }
     }
 
-    private func validateEntries(allowMIDISettings: Bool = true) throws {
-        try validateEntries(allowMIDISettings: allowMIDISettings, allowStandardButtonTitles: true)
+    private func validateEntries(
+        allowMIDISettings: Bool = true,
+        allowRemoteLayers: Bool = true
+    ) throws {
+        try validateEntries(
+            allowMIDISettings: allowMIDISettings,
+            allowStandardButtonTitles: true,
+            allowRemoteLayers: allowRemoteLayers
+        )
     }
 
     private func validateEntries(
         allowMIDISettings: Bool = true,
-        allowStandardButtonTitles: Bool
+        allowStandardButtonTitles: Bool,
+        allowRemoteLayers: Bool = true
     ) throws {
         for profile in profiles {
             if profile.realm == .standard, profile.midiSettings != nil {
@@ -543,6 +643,26 @@ struct XPdConfiguration: Codable, Equatable {
             }
             if profile.realm == .midi, !profile.standardButtonTitles.isEmpty {
                 throw ValidationError.standardButtonTitlesOnMIDIProfile(profile.name)
+            }
+            if profile.realm == .midi, !profile.remoteModifierControls.isEmpty {
+                throw ValidationError.remoteModifiersOnMIDIProfile(profile.name)
+            }
+            if !allowRemoteLayers,
+               (!profile.remoteModifierControls.isEmpty
+                || profile.mappings.contains(where: { !$0.modifierControls.isEmpty })) {
+                throw ValidationError.remoteLayersInLegacyProfile(profile.name)
+            }
+            if profile.realm == .midi,
+               profile.mappings.contains(where: { !$0.modifierControls.isEmpty }) {
+                throw ValidationError.remoteModifiersOnMIDIProfile(profile.name)
+            }
+            for modifier in profile.remoteModifierControls {
+                guard modifier.isModifierEligible else {
+                    throw ValidationError.invalidRemoteModifierControl(
+                        profile: profile.name,
+                        control: modifier
+                    )
+                }
             }
             var titleControls = Set<RemoteControl>()
             for entry in profile.standardButtonTitles {
@@ -567,7 +687,20 @@ struct XPdConfiguration: Codable, Equatable {
             }
             var mappingKeys = Set<MappingKey>()
             for entry in profile.mappings {
-                let key = MappingKey(control: entry.control, gesture: entry.gesture)
+                for modifier in entry.modifierControls {
+                    guard modifier.isModifierEligible, modifier != entry.control else {
+                        throw ValidationError.invalidMappingModifierControl(
+                            profile: profile.name,
+                            primary: entry.control,
+                            modifier: modifier
+                        )
+                    }
+                }
+                let key = MappingKey(
+                    control: entry.control,
+                    gesture: entry.gesture,
+                    modifierControls: entry.modifierControls
+                )
                 guard mappingKeys.insert(key).inserted else {
                     throw ValidationError.duplicateMappingKey(
                         profile: profile.name,
@@ -613,6 +746,8 @@ struct XPdConfiguration: Codable, Equatable {
             try validateV3()
         case Self.preTitlesVersion:
             try validateV4()
+        case Self.preRemoteLayersVersion:
+            try validateV5()
         case Self.currentVersion:
             try validate()
         default:
@@ -631,7 +766,10 @@ struct XPdConfiguration: Codable, Equatable {
                         let lhsControl = Self.controlIndex(lhs.control)
                         let rhsControl = Self.controlIndex(rhs.control)
                         if lhsControl != rhsControl { return lhsControl < rhsControl }
-                        return Self.gestureIndex(lhs.gesture) < Self.gestureIndex(rhs.gesture)
+                        let lhsGesture = Self.gestureIndex(lhs.gesture)
+                        let rhsGesture = Self.gestureIndex(rhs.gesture)
+                        if lhsGesture != rhsGesture { return lhsGesture < rhsGesture }
+                        return Self.modifierSetIndex(lhs.modifierControls) < Self.modifierSetIndex(rhs.modifierControls)
                     },
                     hidBindings: profile.hidBindings.sorted {
                         Self.controlIndex($0.control) < Self.controlIndex($1.control)
@@ -640,7 +778,10 @@ struct XPdConfiguration: Codable, Equatable {
                     midiSettings: Self.sortedMIDISettings(profile.midiSettings),
                     standardButtonTitles: profile.standardButtonTitles.sorted {
                         Self.controlIndex($0.control) < Self.controlIndex($1.control)
-                    }
+                    },
+                    remoteModifierControls: Set(RemoteControl.allCases.filter {
+                        profile.remoteModifierControls.contains($0)
+                    })
                 )
             },
             profileName: profileName,
@@ -687,6 +828,13 @@ struct XPdConfiguration: Codable, Equatable {
 
     private static func gestureIndex(_ gesture: GestureKind) -> Int {
         GestureKind.allCases.firstIndex(of: gesture) ?? Int.max
+    }
+
+    private static func modifierSetIndex(_ controls: Set<RemoteControl>) -> String {
+        RemoteControl.allCases
+            .filter { controls.contains($0) }
+            .map(\.rawValue)
+            .joined(separator: "\u{1F}")
     }
 }
 

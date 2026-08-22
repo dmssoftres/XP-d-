@@ -75,6 +75,160 @@ final class XPdConfigurationTests: XCTestCase {
         XCTAssertEqual(first, try decoded.encodedData())
     }
 
+    func testRemoteModifierDesignationsAndExactLayersRoundTrip() throws {
+        let configuration = XPdConfiguration(
+            profiles: [
+                .init(
+                    name: "Global",
+                    mappings: [
+                        .init(
+                            control: .k1,
+                            gesture: .tap,
+                            mapping: Mapping(action: .openApplication, command: "stacked"),
+                            modifierControls: [.k4, .k3]
+                        ),
+                        .init(
+                            control: .k1,
+                            gesture: .tap,
+                            mapping: Mapping(action: .openApplication, command: "base")
+                        )
+                    ],
+                    hidBindings: [],
+                    remoteModifierControls: [.k4, .k3]
+                )
+            ],
+            profileName: "Global",
+            showsInputOverlay: true
+        )
+
+        let encoded = try configuration.encodedData()
+        let decoded = try XPdConfiguration.decode(encoded)
+        XCTAssertEqual(decoded.profiles[0].remoteModifierControls, [.k3, .k4])
+        XCTAssertEqual(
+            decoded.profiles[0].mappings.first(where: { !$0.modifierControls.isEmpty })?.modifierControls,
+            [.k3, .k4]
+        )
+        XCTAssertEqual(encoded, try decoded.encodedData())
+    }
+
+    func testVersionFiveMigratesToEmptyRemoteModifierState() throws {
+        let legacy = XPdConfiguration(
+            version: XPdConfiguration.preRemoteLayersVersion,
+            profiles: [
+                .init(
+                    name: "Global",
+                    mappings: [.init(control: .k1, gesture: .tap, mapping: Mapping(command: "legacy"))],
+                    hidBindings: [],
+                    standardButtonTitles: [.init(control: .k1, title: "Legacy")]
+                )
+            ],
+            profileName: "Global",
+            showsInputOverlay: true
+        )
+
+        let upgraded = try XPdConfiguration.decode(JSONEncoder().encode(legacy))
+        XCTAssertEqual(upgraded.version, XPdConfiguration.currentVersion)
+        XCTAssertTrue(upgraded.profiles[0].remoteModifierControls.isEmpty)
+        XCTAssertTrue(upgraded.profiles[0].mappings.allSatisfy { $0.modifierControls.isEmpty })
+        XCTAssertEqual(upgraded.profiles[0].standardButtonTitles.first?.title, "Legacy")
+    }
+
+    func testLegacyAndMIDIProfilesRejectRemoteLayers() throws {
+        let legacyWithLayer = XPdConfiguration(
+            version: XPdConfiguration.preRemoteLayersVersion,
+            profiles: [
+                .init(
+                    name: "Global",
+                    mappings: [.init(
+                        control: .k1,
+                        gesture: .tap,
+                        mapping: Mapping(command: "invalid legacy layer"),
+                        modifierControls: [.k3]
+                    )],
+                    hidBindings: []
+                )
+            ],
+            profileName: "Global",
+            showsInputOverlay: true
+        )
+        XCTAssertThrowsError(try XPdConfiguration.decode(JSONEncoder().encode(legacyWithLayer))) { error in
+            XCTAssertEqual(
+                error as? XPdConfiguration.ValidationError,
+                .remoteLayersInLegacyProfile("Global")
+            )
+        }
+
+        let midiWithLayer = XPdConfiguration(
+            profiles: [
+                .init(name: "Global", mappings: [], hidBindings: []),
+                .init(
+                    name: "MIDI",
+                    mappings: [.init(
+                        control: .k1,
+                        gesture: .tap,
+                        mapping: Mapping(command: "invalid MIDI layer"),
+                        modifierControls: [.k3]
+                    )],
+                    hidBindings: [],
+                    realm: .midi,
+                    midiSettings: MIDIProfileSettings()
+                )
+            ],
+            profileName: "Global",
+            showsInputOverlay: true
+        )
+        XCTAssertThrowsError(try midiWithLayer.validate()) { error in
+            XCTAssertEqual(
+                error as? XPdConfiguration.ValidationError,
+                .remoteModifiersOnMIDIProfile("MIDI")
+            )
+        }
+    }
+
+    func testRemoteModifierValidationRejectsWheelsAndSelfLayers() {
+        let invalidDesignation = XPdConfiguration(
+            profiles: [
+                .init(
+                    name: "Global",
+                    mappings: [],
+                    hidBindings: [],
+                    remoteModifierControls: [.wheelCW]
+                )
+            ],
+            profileName: "Global",
+            showsInputOverlay: true
+        )
+        XCTAssertThrowsError(try invalidDesignation.validate()) { error in
+            XCTAssertEqual(
+                error as? XPdConfiguration.ValidationError,
+                .invalidRemoteModifierControl(profile: "Global", control: .wheelCW)
+            )
+        }
+
+        let invalidLayer = XPdConfiguration(
+            profiles: [
+                .init(
+                    name: "Global",
+                    mappings: [.init(
+                        control: .k1,
+                        gesture: .tap,
+                        mapping: Mapping(command: "self"),
+                        modifierControls: [.k1]
+                    )],
+                    hidBindings: []
+                )
+            ],
+            profileName: "Global",
+            showsInputOverlay: true
+        )
+        XCTAssertThrowsError(try invalidLayer.validate()) { error in
+            XCTAssertEqual(
+                error as? XPdConfiguration.ValidationError,
+                .invalidMappingModifierControl(profile: "Global", primary: .k1, modifier: .k1)
+            )
+        }
+    }
+
     func testVersionFourMigratesToEmptyStandardButtonTitles() throws {
         let legacy = XPdConfiguration(
             version: XPdConfiguration.preTitlesVersion,

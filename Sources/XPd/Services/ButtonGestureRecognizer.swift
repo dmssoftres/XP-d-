@@ -10,6 +10,28 @@ struct ButtonGestureTiming: Equatable {
     let doubleTapInterval: TimeInterval
 }
 
+/// Everything that makes two physical presses eligible to form one Double.
+/// K layers and keyboard/F-key gates are part of the identity so separate
+/// mappings can never be merged into a hybrid gesture.
+struct ButtonGestureIdentity: Hashable {
+    let control: RemoteControl
+    let modifierControls: Set<RemoteControl>
+    let keyboardModifiers: Set<KeyboardShortcut.Modifier>
+    let functionKeys: Set<UInt16>
+
+    init(
+        control: RemoteControl,
+        modifierControls: Set<RemoteControl> = [],
+        keyboardModifiers: Set<KeyboardShortcut.Modifier> = [],
+        functionKeys: Set<UInt16> = []
+    ) {
+        self.control = control
+        self.modifierControls = modifierControls
+        self.keyboardModifiers = keyboardModifiers
+        self.functionKeys = functionKeys
+    }
+}
+
 @MainActor
 final class GestureScheduledAction {
     private var cancellation: (() -> Void)?
@@ -52,11 +74,11 @@ final class ButtonGestureRecognizer {
         return GestureScheduledAction { task.cancel() }
     }
 
-    var onGesture: ((RemoteControl, GestureKind) -> Void)?
+    var onGesture: ((ButtonGestureIdentity, GestureKind) -> Void)?
 
     private let timing: ButtonGestureTiming
     private let schedule: Schedule
-    private var states: [RemoteControl: ControlState] = [:]
+    private var states: [ButtonGestureIdentity: ControlState] = [:]
 
     init(
         timing: ButtonGestureTiming = .standard,
@@ -66,8 +88,8 @@ final class ButtonGestureRecognizer {
         self.schedule = schedule
     }
 
-    func press(_ control: RemoteControl) {
-        var state = states[control] ?? ControlState()
+    func press(_ identity: ButtonGestureIdentity) {
+        var state = states[identity] ?? ControlState()
         guard !state.isPressed else { return }
 
         state.isPressed = true
@@ -83,13 +105,13 @@ final class ButtonGestureRecognizer {
         }
 
         state.holdAction = schedule(timing.holdThreshold) { [weak self] in
-            self?.recognizeHold(for: control, generation: generation)
+            self?.recognizeHold(for: identity, generation: generation)
         }
-        states[control] = state
+        states[identity] = state
     }
 
-    func release(_ control: RemoteControl) {
-        guard var state = states[control], state.isPressed else { return }
+    func release(_ identity: ButtonGestureIdentity) {
+        guard var state = states[identity], state.isPressed else { return }
 
         state.isPressed = false
         state.holdAction?.cancel()
@@ -97,14 +119,14 @@ final class ButtonGestureRecognizer {
 
         if state.holdRecognized {
             state.tapAction?.cancel()
-            states.removeValue(forKey: control)
+            states.removeValue(forKey: identity)
             return
         }
 
         if state.isSecondPress {
             state.tapAction?.cancel()
-            states.removeValue(forKey: control)
-            onGesture?(control, .doubleTap)
+            states.removeValue(forKey: identity)
+            onGesture?(identity, .doubleTap)
             return
         }
 
@@ -112,26 +134,66 @@ final class ButtonGestureRecognizer {
         state.generation += 1
         let generation = state.generation
         state.tapAction = schedule(timing.doubleTapInterval) { [weak self] in
-            self?.recognizeTap(for: control, generation: generation)
+            self?.recognizeTap(for: identity, generation: generation)
         }
-        states[control] = state
+        states[identity] = state
     }
 
-    func cancel(_ control: RemoteControl) {
-        guard let state = states.removeValue(forKey: control) else { return }
+    /// Moves a still-held physical press to a newly resolved exact identity.
+    /// If the old press was tentatively the second half of a Double, restore
+    /// its first Tap rather than discarding it when a K layer joins late.
+    func reclassifyPress(
+        from oldIdentity: ButtonGestureIdentity,
+        to newIdentity: ButtonGestureIdentity
+    ) -> Bool {
+        guard oldIdentity != newIdentity,
+              var oldState = states[oldIdentity],
+              oldState.isPressed,
+              !oldState.holdRecognized else { return false }
+
+        oldState.holdAction?.cancel()
+        oldState.holdAction = nil
+        oldState.isPressed = false
+
+        if oldState.isSecondPress {
+            oldState.isSecondPress = false
+            oldState.awaitingSecondTap = true
+            oldState.holdRecognized = false
+            oldState.generation += 1
+            let generation = oldState.generation
+            oldState.tapAction = schedule(timing.doubleTapInterval) { [weak self] in
+                self?.recognizeTap(for: oldIdentity, generation: generation)
+            }
+            states[oldIdentity] = oldState
+        } else {
+            oldState.tapAction?.cancel()
+            states.removeValue(forKey: oldIdentity)
+        }
+
+        press(newIdentity)
+        return true
+    }
+
+    func cancel(_ identity: ButtonGestureIdentity) {
+        guard let state = states.removeValue(forKey: identity) else { return }
         state.holdAction?.cancel()
         state.tapAction?.cancel()
     }
 
+    // Convenience overloads keep direct recognizer callers concise.
+    func press(_ control: RemoteControl) { press(ButtonGestureIdentity(control: control)) }
+    func release(_ control: RemoteControl) { release(ButtonGestureIdentity(control: control)) }
+    func cancel(_ control: RemoteControl) { cancel(ButtonGestureIdentity(control: control)) }
+
     func cancelAll() {
-        let controls = Array(states.keys)
-        for control in controls {
-            cancel(control)
+        let identities = Array(states.keys)
+        for identity in identities {
+            cancel(identity)
         }
     }
 
-    private func recognizeHold(for control: RemoteControl, generation: Int) {
-        guard var state = states[control],
+    private func recognizeHold(for identity: ButtonGestureIdentity, generation: Int) {
+        guard var state = states[identity],
               state.generation == generation,
               state.isPressed else { return }
 
@@ -141,17 +203,17 @@ final class ButtonGestureRecognizer {
         state.tapAction?.cancel()
         state.tapAction = nil
         state.holdAction = nil
-        states[control] = state
-        onGesture?(control, .hold)
+        states[identity] = state
+        onGesture?(identity, .hold)
     }
 
-    private func recognizeTap(for control: RemoteControl, generation: Int) {
-        guard let state = states[control],
+    private func recognizeTap(for identity: ButtonGestureIdentity, generation: Int) {
+        guard let state = states[identity],
               state.generation == generation,
               state.awaitingSecondTap,
               !state.isPressed else { return }
 
-        states.removeValue(forKey: control)
-        onGesture?(control, .tap)
+        states.removeValue(forKey: identity)
+        onGesture?(identity, .tap)
     }
 }

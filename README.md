@@ -89,6 +89,21 @@ the held keys exactly match its saved trigger; clear the trigger keys to restore
 the plain K-button behavior. One modifier-gated trigger is stored per K-button
 gesture.
 
+## K-button modifier layers
+
+In a Standard profile, any K1–K10 button can be marked **K modifier**. The
+button remains a normal Tap action when pressed by itself, but holding it with
+another K button selects that button's alternate mapping layer. The mapping
+layer menu supports exact combinations such as `K3`, `K4`, or `K3 + K4`, and
+the controls may be pressed in either order during the same HID cycle. This
+lets one physical button send a normal shortcut on its Base layer and open a
+different app when one or more designated K modifiers are held.
+
+Designated modifiers are Tap-only when used alone because a standalone Hold
+would conflict with their held-layer role. Layer stacks require exactly one
+non-modifier primary K button; ambiguous multi-primary input is consumed.
+Turning a designation off hides its layers without deleting their mappings.
+
 In Standard profiles, select K1–K10 to set an optional **Button title**. The
 title appears as one compact line at the top of that button and is shared by
 its Tap, Hold, and Double mappings. Titles are profile-specific, limited to 24

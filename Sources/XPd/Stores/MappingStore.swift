@@ -115,8 +115,16 @@ final class MappingStore {
         }
     }
 
-    var selectedControl: RemoteControl = .k1
+    var selectedControl: RemoteControl = .k1 {
+        didSet { sanitizeSelectedMappingModifier() }
+    }
     var selectedGesture: GestureKind = .tap
+    /// The alternate Standard-mode layer currently being edited. An empty
+    /// set is the base layer; non-empty values are sanitized against the
+    /// active profile's designated modifier set whenever selection changes.
+    var selectedMappingModifiers: Set<RemoteControl> = [] {
+        didSet { sanitizeSelectedMappingModifier() }
+    }
     var selectedMIDILayer: MIDIMappingLayer = .primary
     var profileName = "Global" {
         didSet {
@@ -135,6 +143,9 @@ final class MappingStore {
     }
     private(set) var mappings: [MappingKey: Mapping] = [:]
     private(set) var hidBindings: [RemoteControl: String] = [:]
+    /// K buttons designated as dual-role Standard-mode modifiers. The set is
+    /// profile-scoped and intentionally empty when decoding older data.
+    private(set) var remoteModifierControls: Set<RemoteControl> = []
     /// Optional labels for Standard-mode K buttons. MIDI profiles never
     /// populate this dictionary; titles are shared across gestures.
     private(set) var standardButtonTitles: [RemoteControl: String] = [:]
@@ -234,6 +245,7 @@ final class MappingStore {
         var mappings: [MappingKey: Mapping]
         var hidBindings: [RemoteControl: String]
         var standardButtonTitles: [RemoteControl: String]
+        var remoteModifierControls: Set<RemoteControl>
         var realm: ProfileRealm
         var midiSettings: MIDIProfileSettings?
 
@@ -241,12 +253,14 @@ final class MappingStore {
             mappings: [MappingKey: Mapping],
             hidBindings: [RemoteControl: String],
             standardButtonTitles: [RemoteControl: String] = [:],
+            remoteModifierControls: Set<RemoteControl> = [],
             realm: ProfileRealm = .standard,
             midiSettings: MIDIProfileSettings? = nil
         ) {
             self.mappings = mappings
             self.hidBindings = hidBindings
             self.standardButtonTitles = standardButtonTitles
+            self.remoteModifierControls = remoteModifierControls
             self.realm = realm
             self.midiSettings = midiSettings
         }
@@ -256,12 +270,13 @@ final class MappingStore {
             mappings = try container.decodeIfPresent([MappingKey: Mapping].self, forKey: .mappings) ?? [:]
             hidBindings = try container.decodeIfPresent([RemoteControl: String].self, forKey: .hidBindings) ?? [:]
             standardButtonTitles = try container.decodeIfPresent([RemoteControl: String].self, forKey: .standardButtonTitles) ?? [:]
+            remoteModifierControls = try container.decodeIfPresent(Set<RemoteControl>.self, forKey: .remoteModifierControls) ?? []
             realm = try container.decodeIfPresent(ProfileRealm.self, forKey: .realm) ?? .standard
             midiSettings = try container.decodeIfPresent(MIDIProfileSettings.self, forKey: .midiSettings)
         }
 
         private enum CodingKeys: String, CodingKey {
-            case mappings, hidBindings, standardButtonTitles, realm, midiSettings
+            case mappings, hidBindings, standardButtonTitles, remoteModifierControls, realm, midiSettings
         }
     }
 
@@ -320,11 +335,12 @@ final class MappingStore {
     }
 
     private let defaults: UserDefaults
-    private let profilesDefaultsKey = "XPd.profiles.v5"
-    private let previousProfilesDefaultsKey = "XPd.profiles.v4"
+    private let profilesDefaultsKey = "XPd.profiles.v6"
+    private let previousProfilesDefaultsKey = "XPd.profiles.v5"
+    private let preTitlesProfilesDefaultsKey = "XPd.profiles.v4"
     private let legacyProfilesDefaultsKey = "XPd.profiles.v3"
     private let legacyLegacyProfilesDefaultsKey = "XPd.profiles.v2"
-    private let profilesMigrationKey = "XPd.profiles.v5.migrated"
+    private let profilesMigrationKey = "XPd.profiles.v6.migrated"
     private let defaultsKey = "XPd.mappings.v1"
     private let hidBindingsKey = "XPd.hidBindings.v1"
     private let profileNameDefaultsKey = "XPd.profileName.v1"
@@ -360,8 +376,14 @@ final class MappingStore {
     private let remoteModifierProvider: RemoteModifierProvider
     private let remoteFunctionKeyProvider: RemoteFunctionKeyProvider
     private let buttonGestureRecognizer: ButtonGestureRecognizer
-    private var pendingRemoteTriggerModifiers: [RemoteControl: Set<KeyboardShortcut.Modifier>] = [:]
-    private var pendingRemoteTriggerFunctionKeys: [RemoteControl: Set<UInt16>] = [:]
+    /// Standard-mode K-button cycles can contain one non-modifier primary
+    /// plus any number of designated K modifiers. The generic HID stream has
+    /// one release boundary, so retain the complete active set until nil.
+    private var activeStandardControls: Set<RemoteControl> = []
+    private var activeStandardKeyboardModifiers: [RemoteControl: Set<KeyboardShortcut.Modifier>] = [:]
+    private var activeStandardFunctionKeys: [RemoteControl: Set<UInt16>] = [:]
+    private var activeStandardGestureIdentity: ButtonGestureIdentity?
+    private var ambiguousStandardCycles: Set<RemoteControl> = []
     private var remoteTriggerCaptureHandler: ((RemoteControl) -> Void)?
     @ObservationIgnored private lazy var inputOverlay = InputOverlayController(displayDuration: inputOverlayDuration)
     @ObservationIgnored private let terminationObserver = MIDIShutdownObserver()
@@ -435,8 +457,8 @@ final class MappingStore {
             self?.refreshMIDIEndpointStatus()
             self?.closeProfileSelector()
         }
-        buttonGestureRecognizer.onGesture = { [weak self] control, gesture in
-            self?.recognizedButtonGesture(control: control, gesture: gesture)
+        buttonGestureRecognizer.onGesture = { [weak self] identity, gesture in
+            self?.recognizedButtonGesture(identity: identity, gesture: gesture)
         }
         let midiService = self.midiOutputService
         let monitorRelay = MIDIMonitorRelay(store: self)
@@ -469,8 +491,38 @@ final class MappingStore {
         }
     }
 
-    func mapping(for control: RemoteControl, gesture: GestureKind) -> Mapping {
-        mappings[MappingKey(control: control, gesture: gesture)] ?? Mapping()
+    func mapping(
+        for control: RemoteControl,
+        gesture: GestureKind,
+        modifierControls: Set<RemoteControl> = []
+    ) -> Mapping {
+        mappings[MappingKey(control: control, gesture: gesture, modifierControls: modifierControls)] ?? Mapping()
+    }
+
+    /// Returns the currently designated Standard-mode K-button modifiers.
+    /// MIDI profiles and non-button controls always expose an empty set.
+    func isRemoteModifier(_ control: RemoteControl) -> Bool {
+        activeRealm == .standard && remoteModifierControls.contains(control)
+    }
+
+    @discardableResult
+    func setRemoteModifier(_ control: RemoteControl, enabled: Bool) -> Bool {
+        guard activeRealm == .standard, control.isModifierEligible else { return false }
+        guard remoteModifierControls.contains(control) != enabled else { return true }
+        cancelPendingButtonGestures()
+        if enabled {
+            remoteModifierControls.insert(control)
+            if selectedControl == control {
+                selectedGesture = .tap
+                selectedMappingModifiers = []
+            }
+        } else {
+            remoteModifierControls.remove(control)
+            selectedMappingModifiers.remove(control)
+        }
+        sanitizeSelectedMappingModifier()
+        save()
+        return true
     }
 
     /// Starts a temporary Standard-mode capture. Matching K-button input is
@@ -744,8 +796,11 @@ final class MappingStore {
     /// Returns the application target currently configured for a control's
     /// Tap mapping.  The target is intentionally read on demand so Hold and
     /// Double mappings follow later Tap edits without copying stale data.
-    func inheritedTapApplication(for control: RemoteControl) -> Result<String, MappingResolutionError> {
-        let tap = mapping(for: control, gesture: .tap)
+    func inheritedTapApplication(
+        for control: RemoteControl,
+        modifierControls: Set<RemoteControl> = []
+    ) -> Result<String, MappingResolutionError> {
+        let tap = mapping(for: control, gesture: .tap, modifierControls: modifierControls)
         guard tap.action.isApplicationAction else {
             return .failure(.tapMappingMustBeApplication)
         }
@@ -760,15 +815,19 @@ final class MappingStore {
     /// Resolves an action mapping immediately before execution.  Only Hold
     /// and Double application actions can opt into Tap inheritance; all other
     /// mappings are returned unchanged for backward compatibility.
-    func resolvedMapping(for control: RemoteControl, gesture: GestureKind) -> Result<Mapping, MappingResolutionError> {
-        let mapping = mapping(for: control, gesture: gesture)
+    func resolvedMapping(
+        for control: RemoteControl,
+        gesture: GestureKind,
+        modifierControls: Set<RemoteControl> = []
+    ) -> Result<Mapping, MappingResolutionError> {
+        let mapping = mapping(for: control, gesture: gesture, modifierControls: modifierControls)
         guard (gesture == .hold || gesture == .doubleTap),
               mapping.action.isApplicationAction,
               mapping.usesTapApplication else {
             return .success(mapping)
         }
 
-        switch inheritedTapApplication(for: control) {
+        switch inheritedTapApplication(for: control, modifierControls: modifierControls) {
         case let .success(command):
             var resolved = mapping
             resolved.command = command
@@ -781,8 +840,14 @@ final class MappingStore {
         }
     }
 
-    func update(_ mapping: Mapping, for control: RemoteControl, gesture: GestureKind) {
-        mappings[MappingKey(control: control, gesture: gesture)] = mapping
+    func update(
+        _ mapping: Mapping,
+        for control: RemoteControl,
+        gesture: GestureKind,
+        modifierControls: Set<RemoteControl> = []
+    ) {
+        let sanitizedModifiers = sanitizedMappingModifiers(modifierControls, for: control)
+        mappings[MappingKey(control: control, gesture: gesture, modifierControls: sanitizedModifiers)] = mapping
         save()
     }
 
@@ -792,9 +857,10 @@ final class MappingStore {
     func executeMapping(
         for control: RemoteControl,
         gesture: GestureKind,
+        modifierControls: Set<RemoteControl> = [],
         completion: @escaping @MainActor (ActionExecutionResult) -> Void
     ) {
-        switch resolvedMapping(for: control, gesture: gesture) {
+        switch resolvedMapping(for: control, gesture: gesture, modifierControls: modifierControls) {
         case let .success(mapping):
             if let actionExecutionOverride {
                 actionExecutionOverride(mapping, completion)
@@ -804,6 +870,20 @@ final class MappingStore {
         case let .failure(error):
             completion(.failure(error.localizedDescription))
         }
+    }
+
+    private func sanitizedMappingModifiers(
+        _ modifierControls: Set<RemoteControl>,
+        for control: RemoteControl
+    ) -> Set<RemoteControl> {
+        guard activeRealm == .standard, control.isModifierEligible else { return [] }
+        return modifierControls.intersection(remoteModifierControls).subtracting([control])
+    }
+
+    private func sanitizeSelectedMappingModifier() {
+        let sanitized = sanitizedMappingModifiers(selectedMappingModifiers, for: selectedControl)
+        guard sanitized != selectedMappingModifiers else { return }
+        selectedMappingModifiers = sanitized
     }
 
     /// Adds a profile with an independent copy of the default mapping/HID
@@ -976,7 +1056,8 @@ final class MappingStore {
                 hidBindings: Self.hidBindingEntries(from: state.hidBindings),
                 realm: state.realm,
                 midiSettings: state.midiSettings,
-                standardButtonTitles: Self.standardButtonTitleEntries(from: state.standardButtonTitles)
+                standardButtonTitles: Self.standardButtonTitleEntries(from: state.standardButtonTitles),
+                remoteModifierControls: state.remoteModifierControls
             )
         }
         let configuration = XPdConfiguration(
@@ -1023,7 +1104,11 @@ final class MappingStore {
         for profile in configuration.profiles {
             var importedMappings: [MappingKey: Mapping] = [:]
             for entry in profile.mappings {
-                importedMappings[MappingKey(control: entry.control, gesture: entry.gesture)] = entry.mapping
+                importedMappings[MappingKey(
+                    control: entry.control,
+                    gesture: entry.gesture,
+                    modifierControls: entry.modifierControls
+                )] = entry.mapping
             }
 
             var importedHIDBindings: [RemoteControl: String] = [:]
@@ -1041,6 +1126,7 @@ final class MappingStore {
                 mappings: importedMappings,
                 hidBindings: importedHIDBindings,
                 standardButtonTitles: importedStandardButtonTitles,
+                remoteModifierControls: profile.remoteModifierControls,
                 realm: profile.realm,
                 midiSettings: profile.midiSettings
             )
@@ -1108,18 +1194,22 @@ final class MappingStore {
         guard showsInputOverlay else { return }
         inputOverlay.pulse(
             control: selectedControl,
-            tap: overlayMapping(for: selectedControl, gesture: .tap),
-            hold: overlayMapping(for: selectedControl, gesture: .hold),
-            doubleTap: overlayMapping(for: selectedControl, gesture: .doubleTap)
+            tap: overlayMapping(for: selectedControl, gesture: .tap, modifierControls: selectedMappingModifiers),
+            hold: overlayMapping(for: selectedControl, gesture: .hold, modifierControls: selectedMappingModifiers),
+            doubleTap: overlayMapping(for: selectedControl, gesture: .doubleTap, modifierControls: selectedMappingModifiers)
         )
     }
 
-    func overlayMapping(for control: RemoteControl, gesture: GestureKind) -> Mapping {
-        switch resolvedMapping(for: control, gesture: gesture) {
+    func overlayMapping(
+        for control: RemoteControl,
+        gesture: GestureKind,
+        modifierControls: Set<RemoteControl> = []
+    ) -> Mapping {
+        switch resolvedMapping(for: control, gesture: gesture, modifierControls: modifierControls) {
         case .success(let resolved):
             return resolved
         case .failure:
-            let unresolved = mapping(for: control, gesture: gesture)
+            let unresolved = mapping(for: control, gesture: gesture, modifierControls: modifierControls)
             return Mapping(action: unresolved.action)
         }
     }
@@ -1159,6 +1249,11 @@ final class MappingStore {
                     handleMIDIControlRelease(liveControl)
                 }
                 self.liveControl = nil
+                return
+            }
+            if activeRealm == .standard, !activeStandardControls.isEmpty {
+                releaseStandardCycle()
+                liveControl = nil
                 return
             }
             if isWheelCenterHeld {
@@ -1201,24 +1296,7 @@ final class MappingStore {
             return
         }
 
-        if activeRealm == .standard, matched.isMIDIButton,
-           pendingRemoteTriggerModifiers[matched] == nil {
-            pendingRemoteTriggerModifiers[matched] = remoteModifierProvider()
-            pendingRemoteTriggerFunctionKeys[matched] = remoteFunctionKeyProvider()
-        }
-
-        if let displacedControl = liveControl, displacedControl != matched {
-            if activeRealm == .midi {
-                handleMIDIControlRelease(displacedControl)
-            } else {
-                buttonGestureRecognizer.cancel(displacedControl)
-                pendingRemoteTriggerModifiers.removeValue(forKey: displacedControl)
-                pendingRemoteTriggerFunctionKeys.removeValue(forKey: displacedControl)
-                if showsInputOverlay, !displacedControl.isWheelRotation {
-                    inputOverlay.release(control: displacedControl)
-                }
-            }
-        }
+        let previousLiveControl = liveControl
         selectedControl = matched
         liveControl = matched
 
@@ -1254,11 +1332,15 @@ final class MappingStore {
         }
 
         if activeRealm == .midi {
+            if let displacedControl = previousLiveControl, displacedControl != matched {
+                handleMIDIControlRelease(displacedControl)
+            }
             handleMIDIControlPress(matched)
             return
         }
 
         if matched.isWheelRotation {
+            cancelStandardCycle()
             actionRunner.scroll(
                 direction: matched == .wheelCW ? .down : .up,
                 sensitivity: wheelSensitivity
@@ -1269,20 +1351,115 @@ final class MappingStore {
             return
         }
 
-        buttonGestureRecognizer.press(matched)
+        handleStandardKPress(matched)
     }
 
-    private func recognizedButtonGesture(control: RemoteControl, gesture: GestureKind) {
-        let modifiers = pendingRemoteTriggerModifiers.removeValue(forKey: control) ?? []
-        let functionKeys = pendingRemoteTriggerFunctionKeys.removeValue(forKey: control) ?? []
-        let mapping = mapping(for: control, gesture: gesture)
+    /// Routes a Standard K-button press through the dual-role layer state
+    /// machine. A designated K is held as a modifier candidate; exactly one
+    /// non-designated K is the primary. The order is intentionally irrelevant
+    /// and all designated K buttons may participate in the selected layer.
+    private func handleStandardKPress(_ control: RemoteControl) {
+        guard activeRealm == .standard, control.isMIDIButton else { return }
+        guard !activeStandardControls.contains(control) else { return }
+
+        activeStandardKeyboardModifiers[control] = remoteModifierProvider()
+        activeStandardFunctionKeys[control] = remoteFunctionKeyProvider()
+        activeStandardControls.insert(control)
+
+        let modifiers = activeStandardControls.filter(isRemoteModifier)
+        let primaries = activeStandardControls.filter { !isRemoteModifier($0) }
+        guard primaries.count <= 1 else {
+            ambiguousStandardCycles.formUnion(primaries)
+            cancelActiveStandardPrimaryGestures()
+            return
+        }
+        guard let primary = primaries.first else { return }
+
+        let identity = ButtonGestureIdentity(
+            control: primary,
+            modifierControls: Set(modifiers),
+            keyboardModifiers: activeStandardKeyboardModifiers[primary] ?? [],
+            functionKeys: activeStandardFunctionKeys[primary] ?? []
+        )
+        if let previousIdentity = activeStandardGestureIdentity,
+           previousIdentity != identity {
+            if buttonGestureRecognizer.reclassifyPress(from: previousIdentity, to: identity) {
+                activeStandardGestureIdentity = identity
+            }
+        } else if activeStandardGestureIdentity == nil {
+            buttonGestureRecognizer.press(identity)
+            activeStandardGestureIdentity = identity
+        }
+    }
+
+    private func releaseStandardCycle() {
+        let controls = activeStandardControls
+        activeStandardControls.removeAll()
+        defer {
+            activeStandardKeyboardModifiers.removeAll()
+            activeStandardFunctionKeys.removeAll()
+            activeStandardGestureIdentity = nil
+            ambiguousStandardCycles.removeAll()
+            liveControl = nil
+        }
+
+        let modifiers = controls.filter(isRemoteModifier)
+        let primaries = controls.filter { !isRemoteModifier($0) }
+        guard ambiguousStandardCycles.isEmpty,
+              primaries.count == 1,
+              modifiers.count <= remoteModifierControls.count else {
+            cancelActiveStandardPrimaryGestures()
+            // Multiple modifier-only cycles are consumed. A single
+            // designated K remains a normal Tap mapping.
+            if primaries.isEmpty, modifiers.count == 1 {
+                let modifier = modifiers.first!
+                recognizedButtonGesture(
+                    identity: ButtonGestureIdentity(
+                        control: modifier,
+                        keyboardModifiers: activeStandardKeyboardModifiers[modifier] ?? [],
+                        functionKeys: activeStandardFunctionKeys[modifier] ?? []
+                    ),
+                    gesture: .tap
+                )
+            }
+            return
+        }
+
+        if let identity = activeStandardGestureIdentity {
+            buttonGestureRecognizer.release(identity)
+        }
+    }
+
+    private func cancelActiveStandardPrimaryGestures() {
+        if let identity = activeStandardGestureIdentity {
+            buttonGestureRecognizer.cancel(identity)
+            activeStandardGestureIdentity = nil
+        }
+    }
+
+    private func cancelStandardCycle() {
+        cancelActiveStandardPrimaryGestures()
+        activeStandardControls.removeAll()
+        activeStandardKeyboardModifiers.removeAll()
+        activeStandardFunctionKeys.removeAll()
+        ambiguousStandardCycles.removeAll()
+    }
+
+    private func recognizedButtonGesture(identity: ButtonGestureIdentity, gesture: GestureKind) {
+        let control = identity.control
+        let layer = identity.modifierControls
+        guard mappings[MappingKey(control: control, gesture: gesture, modifierControls: layer)] != nil else {
+            return
+        }
+        let mapping = mapping(for: control, gesture: gesture, modifierControls: layer)
         let expectedFunctionKeys = mapping.remoteTriggerFunctionKey.map { Set([$0]) } ?? []
-        guard mapping.remoteTriggerModifiers == modifiers, functionKeys == expectedFunctionKeys else { return }
-        showOverlayPress(for: control)
+        guard mapping.remoteTriggerModifiers == identity.keyboardModifiers,
+              identity.functionKeys == expectedFunctionKeys else { return }
+        showOverlayPress(for: control, modifierControls: layer)
         if showsInputOverlay {
             inputOverlay.recognize(control: control, gesture: gesture)
         }
-        executeMapping(for: control, gesture: gesture) { [weak self] result in
+        executeMapping(for: control, gesture: gesture, modifierControls: layer) { [weak self] result in
             self?.lastActionResult = result
         }
     }
@@ -1431,9 +1608,8 @@ final class MappingStore {
     }
 
     private func cancelPendingButtonGestures() {
+        cancelStandardCycle()
         buttonGestureRecognizer.cancelAll()
-        pendingRemoteTriggerModifiers.removeAll()
-        pendingRemoteTriggerFunctionKeys.removeAll()
         remoteTriggerCaptureHandler = nil
         if let liveControl, showsInputOverlay, !liveControl.isWheelRotation {
             inputOverlay.release(control: liveControl)
@@ -1517,13 +1693,16 @@ final class MappingStore {
         profileSelectorTimeoutTask = nil
     }
 
-    private func showOverlayPress(for control: RemoteControl) {
+    private func showOverlayPress(
+        for control: RemoteControl,
+        modifierControls: Set<RemoteControl> = []
+    ) {
         guard showsInputOverlay else { return }
         inputOverlay.press(
             control: control,
-            tap: overlayMapping(for: control, gesture: .tap),
-            hold: overlayMapping(for: control, gesture: .hold),
-            doubleTap: overlayMapping(for: control, gesture: .doubleTap)
+            tap: overlayMapping(for: control, gesture: .tap, modifierControls: modifierControls),
+            hold: overlayMapping(for: control, gesture: .hold, modifierControls: modifierControls),
+            doubleTap: overlayMapping(for: control, gesture: .doubleTap, modifierControls: modifierControls)
         )
     }
 
@@ -1787,6 +1966,7 @@ final class MappingStore {
             mappings: mappings,
             hidBindings: hidBindings,
             standardButtonTitles: activeRealm == .standard ? standardButtonTitles : [:],
+            remoteModifierControls: activeRealm == .standard ? remoteModifierControls : [],
             realm: activeRealm,
             midiSettings: activeRealm == .midi ? midiSettings : nil
         )
@@ -1798,6 +1978,8 @@ final class MappingStore {
             mappings = [:]
             hidBindings = [:]
             standardButtonTitles = [:]
+            remoteModifierControls = []
+            selectedMappingModifiers = []
             activeRealm = .standard
             midiSettings = nil
             syncMIDIOverlay()
@@ -1806,6 +1988,8 @@ final class MappingStore {
         mappings = state.mappings
         hidBindings = state.hidBindings
         standardButtonTitles = state.standardButtonTitles
+        remoteModifierControls = state.remoteModifierControls.filter(\.isModifierEligible)
+        selectedMappingModifiers = []
         activeRealm = state.realm
         midiSettings = state.midiSettings
         if activeRealm == .midi {
@@ -1866,11 +2050,56 @@ final class MappingStore {
             return false
         }
 
-        // v4 persisted the current dynamic profile/realm shape but predates
-        // Standard button titles. ProfileState's compatibility decoder gives
-        // every migrated state an empty title dictionary, then saveAllProfiles
-        // writes the explicit v5 payload.
+        // v5 persisted the current dynamic profile/realm/title shape but
+        // predates remote modifier designations. ProfileState's compatibility
+        // decoder gives every migrated state an empty modifier set, then
+        // saveAllProfiles writes the explicit v6 payload.
         if let data = defaults.data(forKey: previousProfilesDefaultsKey),
+           let decoded = try? JSONDecoder().decode(PersistedProfiles.self, from: data),
+           decoded.version == XPdConfiguration.preRemoteLayersVersion {
+            availableProfiles = decoded.profiles.map(\.name)
+            profileStates = Dictionary(uniqueKeysWithValues: decoded.profiles.map { profile in
+                (
+                    profile.name,
+                    ProfileState(
+                        mappings: profile.state.mappings,
+                        hidBindings: profile.state.hidBindings,
+                        standardButtonTitles: profile.state.standardButtonTitles,
+                        remoteModifierControls: [],
+                        realm: profile.state.realm,
+                        midiSettings: profile.state.midiSettings
+                    )
+                )
+            })
+            let upgraded = PersistedProfiles(
+                version: XPdConfiguration.currentVersion,
+                profiles: availableProfiles.compactMap { name in
+                    profileStates[name].map { PersistedProfile(name: name, state: $0) }
+                },
+                activeProfileName: decoded.activeProfileName,
+                activeRealm: decoded.activeRealm,
+                lastStandardProfileName: decoded.lastStandardProfileName,
+                lastMIDIProfileName: decoded.lastMIDIProfileName,
+                midiLocked: decoded.midiLocked,
+                workspaceLockControl: decoded.workspaceLockControl
+            )
+            guard isValidPersistedProfiles(upgraded) else {
+                availableProfiles = XPdConfiguration.defaultProfileNames
+                profileStates = Self.defaultProfileStates()
+                return false
+            }
+            loadedProfileName = decoded.activeProfileName
+            loadedActiveRealm = decoded.activeRealm
+            loadedLastStandardProfileName = decoded.lastStandardProfileName
+            loadedLastMIDIProfileName = decoded.lastMIDIProfileName
+            loadedMIDIIsLocked = decoded.midiLocked
+            loadedWorkspaceLockControl = decoded.workspaceLockControl
+            saveAllProfiles()
+            return false
+        }
+
+        // v4 had the current realm shape but predates Standard button titles.
+        if let data = defaults.data(forKey: preTitlesProfilesDefaultsKey),
            let decoded = try? JSONDecoder().decode(PersistedProfiles.self, from: data),
            decoded.version == XPdConfiguration.preTitlesVersion {
             availableProfiles = decoded.profiles.map(\.name)
@@ -1881,6 +2110,7 @@ final class MappingStore {
                         mappings: profile.state.mappings,
                         hidBindings: profile.state.hidBindings,
                         standardButtonTitles: [:],
+                        remoteModifierControls: [],
                         realm: profile.state.realm,
                         midiSettings: profile.state.midiSettings
                     )
@@ -2004,7 +2234,8 @@ final class MappingStore {
                     midiSettings: profile.state.midiSettings,
                     standardButtonTitles: profile.state.standardButtonTitles.map {
                         XPdConfiguration.StandardButtonTitleEntry(control: $0.key, title: $0.value)
-                    }
+                    },
+                    remoteModifierControls: profile.state.remoteModifierControls
                 )
             },
             profileName: persisted.activeProfileName,
@@ -2079,15 +2310,30 @@ final class MappingStore {
     }
 
     private static func mappingEntries(from mappings: [MappingKey: Mapping]) -> [XPdConfiguration.MappingEntry] {
-        RemoteControl.allCases.flatMap { control in
-            GestureKind.allCases.map { gesture in
-                let key = MappingKey(control: control, gesture: gesture)
-                return XPdConfiguration.MappingEntry(
-                    control: control,
-                    gesture: gesture,
-                    mapping: mappings[key] ?? Mapping()
-                )
+        var keys = Set<MappingKey>()
+        for control in RemoteControl.allCases {
+            for gesture in GestureKind.allCases {
+                keys.insert(MappingKey(control: control, gesture: gesture))
             }
+        }
+        keys.formUnion(mappings.keys)
+        return keys.sorted { lhs, rhs in
+            let lhsControl = RemoteControl.allCases.firstIndex(of: lhs.control) ?? Int.max
+            let rhsControl = RemoteControl.allCases.firstIndex(of: rhs.control) ?? Int.max
+            if lhsControl != rhsControl { return lhsControl < rhsControl }
+            let lhsGesture = GestureKind.allCases.firstIndex(of: lhs.gesture) ?? Int.max
+            let rhsGesture = GestureKind.allCases.firstIndex(of: rhs.gesture) ?? Int.max
+            if lhsGesture != rhsGesture { return lhsGesture < rhsGesture }
+            let lhsModifiers = RemoteControl.allCases.filter { lhs.modifierControls.contains($0) }
+            let rhsModifiers = RemoteControl.allCases.filter { rhs.modifierControls.contains($0) }
+            return lhsModifiers.map(\.rawValue).joined() < rhsModifiers.map(\.rawValue).joined()
+        }.map { key in
+            XPdConfiguration.MappingEntry(
+                control: key.control,
+                gesture: key.gesture,
+                mapping: mappings[key] ?? Mapping(),
+                modifierControls: key.modifierControls
+            )
         }
     }
 
