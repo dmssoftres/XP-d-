@@ -11,7 +11,7 @@ No backend, database, cloud account, telemetry service, or third-party package d
 | Component | Responsibility | Interfaces | Owner |
 |---|---|---|---|
 | `XPdApp` / `AppDelegate` | Application lifecycle, menu-bar/window setup, initial input permission request | SwiftUI, AppKit, IOKit permission API | Unknown |
-| `HIDService` | Match `10429:514`, manage HID lifecycle, publish input reports/wheel values, and combine exact HID/BLE battery sources | IOKit HID callbacks/properties | Unknown |
+| `HIDService` | Match and exclusively seize `10429:514`, fail closed if ownership is unavailable, receive raw reports and values through that manager, retain a bounded connection-local diagnostic trace before semantic filtering, and combine exact HID/BLE battery sources | IOKit HID callbacks/properties | Unknown |
 | `ShortcutRemoteBatteryMonitor` | Verify the target BLE PnP identity, enable its two notify-only vendor characteristics, and parse exact battery packets | CoreBluetooth | Unknown |
 | `ButtonGestureRecognizer` | Convert K1–K10 down/release reports into mutually exclusive Tap, Hold, and Double events with cancellable timing | Main-actor scheduler seam | Unknown |
 | `MappingStore` | Ordered Standard/MIDI profiles, mapping/HID/MIDI state, migration, persistence, imports, selector/Fn routing, action dispatch | SwiftUI observable state, `UserDefaults` | Unknown |
@@ -19,16 +19,60 @@ No backend, database, cloud account, telemetry service, or third-party package d
 | `MIDIOutputService` | Create Control/Performance virtual sources, encode MIDI 1.0 UMP, track active output, pitch return, cleanup, and exact send-result monitor events | CoreMIDI actor and injectable backend | Unknown |
 | Configuration models/document | Codable configuration schema, validation, JSON import/export | Foundation, SwiftUI `FileDocument` | Unknown |
 | `ContentView`, `RemoteView`, `MappingInspector`, `KeyboardShortcutCaptureField` | Hardware editor, mapping controls, click-to-record shortcut entry, live status, import/export | SwiftUI, AppKit local events | Unknown |
-| Input overlay controller/model/view | Click-through recent-input HUD, hold progress, profile selection | AppKit panel, SwiftUI | Unknown |
+| Input overlay controller/model/view | Click-through recent-input HUD, hold progress, profile selection, and a narrowly isolated interactive Dismiss panel for ordinary cards | AppKit panels, SwiftUI | Unknown |
 | `build_and_run.sh` | Swift build, app-bundle assembly, icon/plist creation, stable ad-hoc signing, launch/debug/log modes | SwiftPM, codesign, macOS tools | Unknown |
 
 ## Data flow
 
-Shortcut Remote HID value/report → `HIDService` → `MappingStore` snapshots global modifier flags, F keys, and only configured ordinary keyboard key codes at K1–K10 button-down → `ButtonGestureRecognizer` → exact persisted trigger-chord match → mapping resolution → optional same-control Tap application resolution → `ActionRunner` side effect and input-overlay presentation. Tap waits through the Double window; Hold and Double suppress Tap. Profile changes, imports, learning, disconnects, and displaced live controls cancel pending gestures. Inherited Hold/Double application targets are read at execution time; invalid Tap mappings stop before side effects.
+Exact VID/PID match → `HIDService` requests exclusive ownership for current and
+future devices → on success, Shortcut Remote HID value/report → `MappingStore`
+snapshots global modifier flags, F keys, and only configured ordinary keyboard
+key codes at K1–K10 button-down → `ButtonGestureRecognizer` → exact persisted
+trigger-chord match → mapping resolution → optional same-control Tap application
+resolution → `ActionRunner` side effect and input-overlay presentation. A failed
+exclusive open routes no production input and is shown as unsafe/unavailable;
+there is no passive fallback. Tap waits through the Double window; Hold and
+Double suppress Tap. Profile changes, imports, learning, disconnects, and
+displaced live controls cancel pending gestures. Inherited Hold/Double
+application targets are read at execution time; invalid Tap mappings stop before
+side effects.
 
 Configuration UI/profile-manager edits → `MappingStore` → one ordered version-7 profile collection in `UserDefaults`. Standard K1–K10 titles and designated K-modifier controls are profile-scoped and excluded from MIDI profiles. Mapping keys include an exact, deterministically encoded set of K-modifier controls; an empty set is the Base layer. A mapping stores keyboard modifier flags plus at most one ordinary key condition; the legacy F-key field remains losslessly supported. Renaming a non-Global profile replaces its name identity atomically while preserving order, realm, mappings, HID bindings, button titles, modifier designations, active selection, and remembered workspace targets. Versions 2–6 migrate without dropping supported data; v6 local profiles and portable documents are explicitly upgraded to v7. Imports validate realms, remembered profiles, typed MIDI values, exact mapping layers, keyboard trigger keys, bindings, and Standard metadata before one replacement.
 
-Standard K-layer input → accumulate K reports until the generic HID release boundary → classify every designated K as a modifier and require exactly one non-designated primary → route Tap/Hold/Double through the exact modifier-set `MappingKey`. Pending gesture identity includes the primary, exact K layer, keyboard modifiers, F keys, and configured ordinary keys so only equivalent presses may form a Double; a primary-first press is reclassified when a K modifier joins its active cycle. A modifier-only press snapshots the global local-only standalone threshold (default 0.5 seconds, normalized to 0.2–1.5 in 0.1-second steps). Expiry marks Base Tap eligible but performs no action. A primary arriving before physical release, even after expiry, cancels standalone and selects the exact layer. At release the modifier remains pending for the existing 0.30-second split-report window; a primary in that window still wins, otherwise one eligible modifier commits Base Tap and a quick release expires inert. Sequential released modifiers merge into an exact stacked layer. Same-cycle modifier-only stacks and multi-primary cycles remain consumed. Press order is irrelevant within a rollover cycle. Profile/import/learning/disconnect/wheel boundaries cancel active and pending state. Physical timing still requires owner acceptance on the target remote.
+Standard profile activation/modifier enablement → if a designated K has no HID
+binding, consult its exact known factory binding → restore and persist only when
+that signature is unused. Existing learned bindings always win and conflicts are
+reported without reassignment. Clearing a designated modifier binding cancels
+pending input, removes the designation in the same save, and preserves all saved
+exact-layer mappings; clearing an unrelated control remains a plain clear.
+
+Standard K-layer input → accumulate report-6 K reports until an empty report-6
+release boundary → ignore empty reports 1, 7, and 9 from the device's unrelated
+mouse/digitizer collections → classify every designated K as a modifier and
+require exactly one non-designated primary → route Tap/Hold/Double through the
+exact modifier-set `MappingKey`. Pending gesture identity includes the primary,
+exact K layer, keyboard modifiers, F keys, and configured ordinary keys so only
+equivalent presses may form a Double. A destination-first press is reclassified
+when a K modifier joins its active report-6 cycle. A modifier-only press snapshots the
+global local-only standalone threshold (default 0.5 seconds, normalized to
+0.2–1.5 in 0.1-second steps). Expiry immediately executes Base Tap when exactly
+one modifier remains physically held and no primary participated, then consumes
+the rest of that report-6 cycle. A destination arriving while the modifier is
+still physically held and strictly before expiry cancels standalone and selects
+the exact layer. A report-6 release before expiry makes a lone modifier inert;
+the next K starts a new Base cycle. Physically overlapped modifier stacks remain
+eligible for an exact stacked layer; sequential released modifiers do not merge.
+Same-cycle modifier-only stacks and multi-primary cycles remain consumed. Press
+order is irrelevant within one active rollover cycle. Profile/import/learning/
+disconnect/wheel boundaries cancel active state. Physical timing still requires
+owner acceptance on the target remote.
+
+Raw report callback → normalize a possible report-ID prefix → append the report
+to a 12-entry chronological in-memory trace before duplicate/empty semantic
+filtering → expose it read-only under Standard `Status & Input`. Connection and
+disconnection clear the trace. The trace is not persisted, transmitted, or used
+for action routing; it exists to distinguish physical rollover packets from
+decoder/state-machine behavior.
 
 Standard mapping inspector → keep Base bound to the left action column → bind
 the chosen exact K-modifier set to the right action column → render one complete
@@ -92,9 +136,13 @@ The build script compiles `XPd`, assembles `dist/XP[d].app`, creates its Info.pl
 ## Failure modes
 
 - Remote absent or mismatched: HID manager opens but no supported device connects.
+- Exclusive HID ownership unavailable: keep learning/mapping input disabled and
+  warn that factory input is not blocked; never continue with passive routing.
 - Privacy approval stale after rebuild: the app may connect or post events incorrectly until the stable signed bundle is approved/relaunched.
 - Invalid import: reject atomically without replacing any in-memory or persisted profile state.
 - Unknown/changed HID report: learning or mapped control resolution fails; capture evidence before changing decoding.
+- Empty composite report 1, 7, or 9 during a report-6 K hold: ignore it; only an
+  empty report 6 may release the K cycle.
 - Missing release or conflicting live-button reports: cancel the displaced/pending gesture rather than execute an ambiguous action.
 - Missing/mismatched BLE identity or notification: retain an exact HID property if available; otherwise show battery unavailable rather than estimating.
 - Wheel-center report changes or loses its device-specific standalone empty report-6 distinction: selector confirmation may regress and requires controlled real-hardware recapture.

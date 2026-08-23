@@ -7,14 +7,12 @@ import OSLog
 
 private final class HIDResources: @unchecked Sendable {
     var manager: IOHIDManager?
-    let reportBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: 64)
 
     deinit {
         if let manager {
             IOHIDManagerUnscheduleFromRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
             IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone))
         }
-        reportBuffer.deallocate()
     }
 }
 
@@ -23,12 +21,18 @@ private final class HIDResources: @unchecked Sendable {
 final class HIDService {
     static let vendorID = 10429
     static let productID = 514
+    static let exclusiveManagerOpenOptions = IOOptionBits(kIOHIDOptionsTypeSeizeDevice)
 
     private(set) var isConnected = false
     private(set) var hasInputAccess = false
+    private(set) var hasExclusiveControl = false
     private(set) var batteryPercentage: Int?
     private(set) var lastEvent = "Waiting for Shortcut Remote…"
     private(set) var recentReports: [String] = []
+    /// Chronological, memory-only diagnostic trace of reports delivered to
+    /// the decoder. It intentionally includes duplicate and empty reports;
+    /// semantic filtering is performed only after this trace is recorded.
+    private(set) var rawReportTrace: [String] = []
 
     var onInput: ((String?) -> Void)?
     var onDisconnect: (() -> Void)?
@@ -49,6 +53,7 @@ final class HIDService {
         "BatteryStrength"
     ]
     private static let batteryRefreshInterval: TimeInterval = 15
+    static let rawReportTraceLimit = 12
 
     init(startHardware: Bool = true) {
         bluetoothBatteryMonitor.onBatteryPercentage = { [weak self] percentage in
@@ -90,8 +95,8 @@ final class HIDService {
                 let service = Unmanaged<HIDService>.fromOpaque(context).takeUnretainedValue()
                 service.report6ControlIsActive = false
                 service.wheelCenterIsHeld = false
+                service.rawReportTrace.removeAll()
                 service.connectedDevice = device
-                service.registerInputReports(for: device)
                 service.isConnected = true
                 service.refreshBattery(force: true)
                 service.bluetoothBatteryMonitor.startMonitoring()
@@ -112,6 +117,15 @@ final class HIDService {
             }
         }, context)
 
+        IOHIDManagerRegisterInputReportCallback(manager, { context, result, _, _, reportID, report, reportLength in
+            guard let context, result == kIOReturnSuccess else { return }
+            let bytes = Array(UnsafeBufferPointer(start: report, count: reportLength))
+            MainActor.assumeIsolated {
+                let service = Unmanaged<HIDService>.fromOpaque(context).takeUnretainedValue()
+                service.receivedHardwareReport(reportID: reportID, bytes: bytes)
+            }
+        }, context)
+
         IOHIDManagerRegisterInputValueCallback(manager, { context, _, _, value in
             guard let context else { return }
             let element = IOHIDValueGetElement(value)
@@ -124,6 +138,7 @@ final class HIDService {
 
             MainActor.assumeIsolated {
                 let service = Unmanaged<HIDService>.fromOpaque(context).takeUnretainedValue()
+                guard service.hasExclusiveControl else { return }
                 service.receivedWheel(
                     value: integerValue,
                     usagePage: usagePage,
@@ -134,32 +149,19 @@ final class HIDService {
         }, context)
 
         IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
-        let result = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+        let result = IOHIDManagerOpen(manager, Self.exclusiveManagerOpenOptions)
         if result != kIOReturnSuccess {
-            hasInputAccess = false
-            lastEvent = "Unable to open HID manager (\(result))"
-            logger.error("Unable to open HID manager: \(result)")
+            hasExclusiveControl = false
+            hasInputAccess = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
+            lastEvent = hasInputAccess
+                ? "Exclusive control unavailable (\(result))"
+                : "Input Monitoring permission required"
+            logger.error("Unable to seize HID manager: \(result)")
         } else {
             hasInputAccess = true
-            logger.info("HID manager opened")
+            hasExclusiveControl = true
+            logger.info("HID manager opened with exclusive control")
         }
-    }
-
-    private func registerInputReports(for device: IOHIDDevice) {
-        IOHIDDeviceRegisterInputReportCallback(
-            device,
-            resources.reportBuffer,
-            64,
-            { context, result, _, _, reportID, report, reportLength in
-                guard let context, result == kIOReturnSuccess else { return }
-                let bytes = Array(UnsafeBufferPointer(start: report, count: reportLength))
-                MainActor.assumeIsolated {
-                    let service = Unmanaged<HIDService>.fromOpaque(context).takeUnretainedValue()
-                    service.received(reportID: reportID, bytes: bytes)
-                }
-            },
-            UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
-        )
     }
 
     private func received(reportID: UInt32, bytes: [UInt8]) {
@@ -172,9 +174,19 @@ final class HIDService {
             payloadBytes = bytes
         }
 
+        recordRawReport(reportID: reportID, payloadBytes: payloadBytes)
+
         let isEmptyReport = payloadBytes.allSatisfy({ $0 == 0 })
 
-        if reportID == 6, isEmptyReport {
+        if isEmptyReport {
+            // The supported remote is a composite HID device. Its mouse and
+            // digitizer collections (report IDs 1, 7, and 9) can emit empty
+            // packets while a report-6 keyboard key is still held. Those
+            // packets are not keyboard releases and must not terminate the
+            // modifier cycle in MappingStore. Report 6 is the only learned
+            // K-button collection and remains the sole release boundary.
+            guard reportID == 6 else { return }
+
             if report6ControlIsActive {
                 // A report-6 empty packet immediately after a wheel detent is
                 // that detent's release. While center is held, it must not
@@ -210,17 +222,6 @@ final class HIDService {
             return
         }
 
-        if isEmptyReport {
-            if wheelCenterIsHeld {
-                // Do not let an unrelated release from a rollover sequence
-                // terminate the center-held selector. The verified center
-                // release is a standalone empty report 6 handled above.
-                return
-            }
-            onInput?(nil)
-            return
-        }
-
         if reportID == 6 {
             report6ControlIsActive = true
         }
@@ -253,6 +254,19 @@ final class HIDService {
         onInput?(signature)
     }
 
+    private func receivedHardwareReport(reportID: UInt32, bytes: [UInt8]) {
+        guard hasExclusiveControl else { return }
+        received(reportID: reportID, bytes: bytes)
+    }
+
+    private func recordRawReport(reportID: UInt32, payloadBytes: [UInt8]) {
+        let payload = payloadBytes.map { String(format: "%02X", $0) }.joined(separator: " ")
+        rawReportTrace.append("r\(reportID):\(payload)")
+        if rawReportTrace.count > Self.rawReportTraceLimit {
+            rawReportTrace.removeFirst(rawReportTrace.count - Self.rawReportTraceLimit)
+        }
+    }
+
     private func receivedWheel(value: Int, usagePage: UInt32, usage: UInt32, reportID: UInt32) {
         refreshBatteryIfNeeded()
 
@@ -270,6 +284,7 @@ final class HIDService {
         connectedDevice = nil
         report6ControlIsActive = false
         wheelCenterIsHeld = false
+        rawReportTrace.removeAll()
         hidBatteryPercentage = nil
         bluetoothBatteryPercentage = nil
         batteryPercentage = nil
@@ -286,6 +301,12 @@ final class HIDService {
     /// decoding without opening a real HID manager.
     func simulateInputReportForTesting(reportID: UInt32, bytes: [UInt8]) {
         received(reportID: reportID, bytes: bytes)
+    }
+
+    /// Internal test seam for proving that the production report boundary
+    /// remains fail-closed when the manager did not obtain exclusive control.
+    func simulateHardwareInputReportForTesting(reportID: UInt32, bytes: [UInt8]) {
+        receivedHardwareReport(reportID: reportID, bytes: bytes)
     }
 
     private func refreshBatteryIfNeeded() {

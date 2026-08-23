@@ -123,11 +123,12 @@ condition while retaining the physical K chord.
 ## K-button modifier layers
 
 In a Standard profile, any K1–K10 button can be marked **K modifier**. Holding
-one by itself through the configured threshold makes its Base Tap eligible; it
-runs only after release if no destination participated. Pressing another K at
-any time while the modifier remains held—before or after the threshold—cancels
-standalone and selects that destination's exact alternate layer. Exact
-combinations such as `K3`, `K4`, or `K3 + K4` remain independent.
+one by itself through the configured threshold runs its Base Tap immediately.
+Pressing a destination K while the modifier remains physically held and before
+the threshold cancels standalone and selects that destination's exact alternate
+layer. Once the timer fires, later K input in that physical cycle is consumed
+and cannot retroactively become a layer. Exact combinations such as `K3`, `K4`,
+or `K3 + K4` remain independent.
 
 Designated modifiers use their Base Tap mapping as the standalone hold action;
 their Hold and Double mappings remain unavailable because those gestures would
@@ -140,13 +141,27 @@ Every designated modifier is marked with a persistent `MOD` corner badge on
 the graphical remote. The badge overlays the existing button presentation, so
 its K number, optional title, and application icon remain in place.
 
-XP[d] accepts both remote report patterns. If the hardware reports the modifier
-and primary in one cycle, the exact layer is selected immediately. If it emits
-a generic release between them, the modifier remains pending for 0.30 seconds.
-A primary during that window wins even when the hold threshold was already
-reached. When the window closes, an eligible single modifier runs Base Tap;
-an unconsumed quick release does nothing. Sequential designated modifiers can
-be stacked before the primary in the same way.
+The modifier and destination must overlap in one physical report-6 cycle. A
+report-6 release before the threshold makes a lone modifier inert; a later K is
+then a new Base cycle. Empty reports 1, 7, and 9 from the remote's unrelated
+composite collections are ignored and cannot fake that release. Multiple
+designated modifiers may be physically overlapped before one destination to
+select an exact stacked layer.
+
+Within one held report-6 cycle, either press order may select the same exact
+layer. A destination-first gesture is reclassified when its designated modifier
+arrives before the shared release boundary.
+
+For hardware diagnosis, expand **Status & Input** and read **Raw HID trace**.
+It shows the newest 12 normalized reports in chronological order, including
+repeated and empty packets. The trace clears on connection changes, remains
+local to memory, and does not affect action routing.
+
+A designated modifier must have a usable HID binding. When an older profile is
+missing that binding, XP[d] restores only the remote's exact factory signature
+when it is not assigned elsewhere; learned bindings are never overwritten.
+Clearing a designated modifier's HID binding also turns off its designation but
+keeps its saved layer mappings for later re-enabling.
 
 For a non-modifier K button, the inspector keeps the Base action visible in a
 left column and shows one chosen exact modifier layer in a right column. Each

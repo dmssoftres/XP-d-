@@ -406,22 +406,12 @@ final class MappingStore {
     private var activeStandardKeyboardKeys: [RemoteControl: Set<UInt16>] = [:]
     private var activeStandardGestureIdentity: ButtonGestureIdentity?
     private var activeStandardModifierHoldTasks: [RemoteControl: GestureScheduledAction] = [:]
-    /// Reaching the threshold only marks this state eligible. The standalone
-    /// action is committed at the release/grace boundary so a later K press
-    /// can still become an exact layer.
-    private var activeStandardModifierStandaloneEligible = false
+    /// Once a lone modifier reaches its threshold, its Base Tap has already
+    /// fired and the rest of that physical HID cycle is consumed. This keeps
+    /// a later destination from retroactively becoming a layer.
+    private var activeStandardModifierCycleConsumed = false
     private var activeStandardModifierGeneration = 0
     private var ambiguousStandardCycles: Set<RemoteControl> = []
-    private struct PendingStandardModifierCycle {
-        var modifiers: Set<RemoteControl>
-        var keyboardModifiers: [RemoteControl: Set<KeyboardShortcut.Modifier>]
-        var functionKeys: [RemoteControl: Set<UInt16>]
-        var keyboardKeys: [RemoteControl: Set<UInt16>]
-        var standaloneActionEligible: Bool
-    }
-    private var pendingStandardModifierCycle: PendingStandardModifierCycle?
-    private var pendingStandardModifierTapTask: GestureScheduledAction?
-    private var pendingStandardModifierGeneration = 0
     private var isRemoteTriggerCaptureActive = false
     private var remoteTriggerModifierCaptureHandler: ((RemoteControl) -> Void)?
     @ObservationIgnored private lazy var inputOverlay = InputOverlayController(displayDuration: inputOverlayDuration)
@@ -575,6 +565,16 @@ final class MappingStore {
         cancelPendingButtonGestures()
         if enabled {
             remoteModifierControls.insert(control)
+            let hadExplicitBinding = hidBindings[control] != nil
+            _ = repairMissingModifierBinding(for: control)
+            guard hadExplicitBinding || hidBindings[control] != nil else {
+                // A designated modifier must not be enabled without a
+                // usable input. The repair helper has already reported a
+                // factory-signature conflict when one caused this failure.
+                remoteModifierControls.remove(control)
+                sanitizeSelectedMappingModifier()
+                return false
+            }
             if selectedControl == control {
                 selectedGesture = .tap
                 selectedMappingModifiers = []
@@ -1123,8 +1123,17 @@ final class MappingStore {
     }
 
     func clearHIDBinding(for control: RemoteControl) {
+        if remoteModifierControls.contains(control) {
+            cancelPendingButtonGestures()
+        }
         hidBindings.removeValue(forKey: control)
-        saveHIDBindings()
+        if remoteModifierControls.remove(control) != nil {
+            selectedMappingModifiers.remove(control)
+            sanitizeSelectedMappingModifier()
+            save()
+        } else {
+            saveHIDBindings()
+        }
     }
 
     func hidBinding(for control: RemoteControl) -> String? {
@@ -1481,8 +1490,10 @@ final class MappingStore {
 
     /// Routes a Standard K-button press through the dual-role layer state
     /// machine. A designated K is held as a modifier candidate; exactly one
-    /// non-designated K is the primary. The order is intentionally irrelevant
-    /// and all designated K buttons may participate in the selected layer.
+    /// non-designated K is the primary. A modifier must arrive first so the
+    /// physical cycle is unambiguously a modifier-first layer gesture; a
+    /// destination-first cycle remains on the destination's Base mapping.
+    /// All designated K buttons may participate in a modifier-first layer.
     private func handleStandardKPress(_ control: RemoteControl) {
         guard activeRealm == .standard, control.isMIDIButton else { return }
         guard !activeStandardControls.contains(control) else { return }
@@ -1490,19 +1501,13 @@ final class MappingStore {
         let startsNewCycle = activeStandardControls.isEmpty
         if startsNewCycle {
             activeStandardModifierGeneration &+= 1
-            activeStandardModifierStandaloneEligible = false
+            activeStandardModifierCycleConsumed = false
         }
 
-        // A modifier-only cycle is ambiguous until the next K press. If a
-        // primary arrives before the short grace window expires, carry those
-        // modifiers into this cycle and suppress their standalone action.
-        if startsNewCycle, let pending = consumePendingStandardModifierCycle() {
-            activeStandardControls.formUnion(pending.modifiers)
-            activeStandardKeyboardModifiers.merge(pending.keyboardModifiers) { current, _ in current }
-            activeStandardFunctionKeys.merge(pending.functionKeys) { current, _ in current }
-            activeStandardKeyboardKeys.merge(pending.keyboardKeys) { current, _ in current }
-            activeStandardModifierStandaloneEligible = pending.standaloneActionEligible
-        }
+        // A standalone modifier whose threshold already fired consumed this
+        // physical cycle. Ignore every later K press until the report-6
+        // release boundary resets the cycle.
+        guard !activeStandardModifierCycleConsumed else { return }
 
         activeStandardKeyboardModifiers[control] = remoteModifierProvider()
         activeStandardFunctionKeys[control] = remoteFunctionKeyProvider()
@@ -1512,7 +1517,7 @@ final class MappingStore {
         let modifiers = activeStandardControls.filter(isRemoteModifier)
         let primaries = activeStandardControls.filter { !isRemoteModifier($0) }
         if primaries.isEmpty {
-            if modifiers.count == 1, !activeStandardModifierStandaloneEligible,
+            if modifiers.count == 1,
                let modifier = modifiers.first {
                 scheduleStandaloneStandardModifier(for: modifier)
             } else {
@@ -1536,6 +1541,9 @@ final class MappingStore {
             functionKeys: activeStandardFunctionKeys[primary] ?? [],
             keyboardKeys: activeStandardKeyboardKeys[primary] ?? []
         )
+        // If a modifier joins after the destination press, move the still-held
+        // gesture to the exact layer identity for this same report-6 cycle.
+        // Modifier-first presses still begin directly with that identity.
         if let previousIdentity = activeStandardGestureIdentity,
            previousIdentity != identity {
             if buttonGestureRecognizer.reclassifyPress(from: previousIdentity, to: identity) {
@@ -1550,7 +1558,7 @@ final class MappingStore {
     private func scheduleStandaloneStandardModifier(for control: RemoteControl) {
         guard activeStandardModifierHoldTasks[control] == nil,
               activeStandardControls.count == 1,
-              activeStandardModifierStandaloneEligible == false,
+              activeStandardModifierCycleConsumed == false,
               activeStandardGestureIdentity == nil else { return }
 
         let keyboardModifiers = activeStandardKeyboardModifiers[control] ?? []
@@ -1567,14 +1575,14 @@ final class MappingStore {
         // subsequent modifier presses.
         let threshold = standardModifierHoldThreshold
         activeStandardModifierHoldTasks[control] = gestureSchedule(threshold) { [weak self] in
-            self?.markStandaloneStandardModifierEligible(
+            self?.fireStandaloneStandardModifier(
                 identity: identity,
                 generation: generation
             )
         }
     }
 
-    private func markStandaloneStandardModifierEligible(
+    private func fireStandaloneStandardModifier(
         identity: ButtonGestureIdentity,
         generation: Int
     ) {
@@ -1582,82 +1590,21 @@ final class MappingStore {
               activeStandardControls.count == 1,
               activeStandardControls.contains(identity.control),
               isRemoteModifier(identity.control),
-              activeStandardModifierStandaloneEligible == false,
+              activeStandardModifierCycleConsumed == false,
               activeStandardGestureIdentity == nil else { return }
 
-        activeStandardModifierStandaloneEligible = true
+        // Mark the cycle consumed before executing user-configured work. Even
+        // when the Base Tap is absent or its trigger conditions do not match,
+        // a later destination must not be allowed to form a layer from this
+        // already-expired modifier hold.
+        activeStandardModifierCycleConsumed = true
         activeStandardModifierHoldTasks.removeValue(forKey: identity.control)
         cancelActiveStandardModifierHoldTasks()
-    }
-
-    private func enqueuePendingStandardModifierCycle(
-        modifiers: Set<RemoteControl>,
-        keyboardModifiers: [RemoteControl: Set<KeyboardShortcut.Modifier>],
-        functionKeys: [RemoteControl: Set<UInt16>],
-        keyboardKeys: [RemoteControl: Set<UInt16>],
-        standaloneActionEligible: Bool
-    ) {
-        guard !modifiers.isEmpty else { return }
-
-        if var pending = pendingStandardModifierCycle {
-            pending.modifiers.formUnion(modifiers)
-            pending.keyboardModifiers.merge(keyboardModifiers) { current, _ in current }
-            pending.functionKeys.merge(functionKeys) { current, _ in current }
-            pending.keyboardKeys.merge(keyboardKeys) { current, _ in current }
-            pending.standaloneActionEligible = pending.standaloneActionEligible || standaloneActionEligible
-            pendingStandardModifierCycle = pending
-        } else {
-            pendingStandardModifierCycle = PendingStandardModifierCycle(
-                modifiers: modifiers,
-                keyboardModifiers: keyboardModifiers,
-                functionKeys: functionKeys,
-                keyboardKeys: keyboardKeys,
-                standaloneActionEligible: standaloneActionEligible
-            )
-        }
-
-        pendingStandardModifierTapTask?.cancel()
-        pendingStandardModifierGeneration &+= 1
-        let generation = pendingStandardModifierGeneration
-        pendingStandardModifierTapTask = gestureSchedule(ButtonGestureTiming.standard.doubleTapInterval) { [weak self] in
-            guard let self,
-                  self.pendingStandardModifierGeneration == generation else { return }
-            self.flushPendingStandardModifierCycle()
-        }
-    }
-
-    private func consumePendingStandardModifierCycle() -> PendingStandardModifierCycle? {
-        guard let pending = pendingStandardModifierCycle else { return nil }
-        pendingStandardModifierTapTask?.cancel()
-        pendingStandardModifierTapTask = nil
-        pendingStandardModifierCycle = nil
-        pendingStandardModifierGeneration &+= 1
-        return pending
-    }
-
-    private func flushPendingStandardModifierCycle() {
-        guard let pending = pendingStandardModifierCycle else { return }
-        pendingStandardModifierCycle = nil
-        pendingStandardModifierTapTask = nil
-
-        // A quick release is intentionally a no-op. Once the hold threshold
-        // was reached, commit only now—after the split-report grace window
-        // has closed and no primary converted the chord into a layer.
-        guard pending.standaloneActionEligible,
-              pending.modifiers.count == 1,
-              let modifier = pending.modifiers.first else { return }
-        let identity = ButtonGestureIdentity(
-            control: modifier,
-            keyboardModifiers: pending.keyboardModifiers[modifier] ?? [],
-            functionKeys: pending.functionKeys[modifier] ?? [],
-            keyboardKeys: pending.keyboardKeys[modifier] ?? []
-        )
         recognizedButtonGesture(identity: identity, gesture: .tap)
     }
 
     private func releaseStandardCycle() {
         let controls = activeStandardControls
-        let standaloneActionEligible = activeStandardModifierStandaloneEligible
         cancelActiveStandardModifierHoldTasks()
         activeStandardControls.removeAll()
         defer {
@@ -1665,7 +1612,7 @@ final class MappingStore {
             activeStandardFunctionKeys.removeAll()
             activeStandardKeyboardKeys.removeAll()
             activeStandardGestureIdentity = nil
-            activeStandardModifierStandaloneEligible = false
+            activeStandardModifierCycleConsumed = false
             activeStandardModifierGeneration &+= 1
             ambiguousStandardCycles.removeAll()
             liveControl = nil
@@ -1674,18 +1621,10 @@ final class MappingStore {
         let modifiers = controls.filter(isRemoteModifier)
         let primaries = controls.filter { !isRemoteModifier($0) }
         guard ambiguousStandardCycles.isEmpty,
+              !activeStandardModifierCycleConsumed,
               primaries.count == 1,
               modifiers.count <= remoteModifierControls.count else {
             cancelActiveStandardPrimaryGestures()
-            if primaries.isEmpty, !modifiers.isEmpty {
-                enqueuePendingStandardModifierCycle(
-                    modifiers: Set(modifiers),
-                    keyboardModifiers: activeStandardKeyboardModifiers,
-                    functionKeys: activeStandardFunctionKeys,
-                    keyboardKeys: activeStandardKeyboardKeys,
-                    standaloneActionEligible: standaloneActionEligible
-                )
-            }
             return
         }
 
@@ -1704,15 +1643,11 @@ final class MappingStore {
     private func cancelStandardCycle() {
         cancelActiveStandardPrimaryGestures()
         cancelActiveStandardModifierHoldTasks()
-        pendingStandardModifierTapTask?.cancel()
-        pendingStandardModifierTapTask = nil
-        pendingStandardModifierCycle = nil
-        pendingStandardModifierGeneration &+= 1
         activeStandardControls.removeAll()
         activeStandardKeyboardModifiers.removeAll()
         activeStandardFunctionKeys.removeAll()
         activeStandardKeyboardKeys.removeAll()
-        activeStandardModifierStandaloneEligible = false
+        activeStandardModifierCycleConsumed = false
         activeStandardModifierGeneration &+= 1
         ambiguousStandardCycles.removeAll()
     }
@@ -2279,6 +2214,12 @@ final class MappingStore {
         selectedMappingModifiers = []
         activeRealm = state.realm
         midiSettings = state.midiSettings
+        if repairMissingModifierBindings() {
+            // The callers already persist profile activation. Updating the
+            // in-memory profile state here makes that existing save include
+            // any repaired modifier binding without changing the schema.
+            saveActiveProfile(named: name)
+        }
         if activeRealm == .midi {
             lastMIDIProfileName = name
             midiLocked = true
@@ -2294,6 +2235,41 @@ final class MappingStore {
                 systemImage: "lock.open"
             )
         }
+    }
+
+    /// Restores only the known factory binding for a designated Standard K
+    /// modifier when that binding is absent. Learned/custom bindings remain
+    /// authoritative, and a factory signature already owned by another
+    /// control is never stolen.
+    @discardableResult
+    private func repairMissingModifierBindings() -> Bool {
+        var repaired = false
+        for control in RemoteControl.allCases where remoteModifierControls.contains(control) {
+            repaired = repairMissingModifierBinding(for: control) || repaired
+        }
+        return repaired
+    }
+
+    @discardableResult
+    private func repairMissingModifierBinding(for control: RemoteControl) -> Bool {
+        guard activeRealm == .standard,
+              remoteModifierControls.contains(control),
+              hidBindings[control] == nil,
+              let factoryBinding = Self.defaultHIDBindings[control] else {
+            return false
+        }
+
+        if let conflictingControl = hidBindings.first(where: { otherControl, binding in
+            otherControl != control && binding == factoryBinding
+        })?.key {
+            lastActionResult = .failure(
+                "\(control.rawValue) remains unbound because its factory HID input is already assigned to \(conflictingControl.rawValue)."
+            )
+            return false
+        }
+
+        hidBindings[control] = factoryBinding
+        return true
     }
 
     private func saveAllProfiles() {

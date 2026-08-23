@@ -100,6 +100,42 @@ final class InputOverlayModelTests: XCTestCase {
     }
 
     @MainActor
+    func testDismissNormalEntriesImmediatelyClearsCardsAndHidesOverlay() {
+        let model = InputOverlayModel(displayDuration: 0.01)
+        let presentation = InputOverlayPresentation(mapping: Mapping(action: .noAction))
+        var visibilityChanges: [Bool] = []
+        var regularEntriesVisibilityChanges: [Bool] = []
+        model.visibilityDidChange = { visibilityChanges.append($0) }
+        model.regularEntriesVisibilityDidChange = { regularEntriesVisibilityChanges.append($0) }
+
+        model.press(control: .k1, tap: presentation, hold: presentation, doubleTap: presentation)
+        model.release(control: .k1)
+        model.dismissNormalEntries()
+
+        XCTAssertTrue(model.entries.isEmpty)
+        XCTAssertEqual(visibilityChanges.suffix(2), [true, false])
+        XCTAssertEqual(regularEntriesVisibilityChanges.suffix(2), [true, false])
+
+        let invalidatedTimerDidNotNotify = expectation(description: "dismissed entry timer stays invalidated")
+        invalidatedTimerDidNotNotify.isInverted = true
+        model.visibilityDidChange = { _ in invalidatedTimerDidNotNotify.fulfill() }
+        wait(for: [invalidatedTimerDidNotNotify], timeout: 0.1)
+    }
+
+    @MainActor
+    func testDismissNormalEntriesPreservesProfileSelector() {
+        let model = InputOverlayModel()
+        let presentation = InputOverlayPresentation(mapping: Mapping(action: .noAction))
+
+        model.press(control: .k1, tap: presentation, hold: presentation, doubleTap: presentation)
+        model.showProfiles(["Global", "Finder"], selectedProfile: "Global")
+        model.dismissNormalEntries()
+
+        XCTAssertTrue(model.entries.isEmpty)
+        XCTAssertEqual(model.profileSelection?.selectedProfile, "Global")
+    }
+
+    @MainActor
     func testMIDIOverlayShowsLockProfileLayerAndMessage() {
         let model = InputOverlayModel()
 

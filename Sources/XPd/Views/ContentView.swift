@@ -150,14 +150,15 @@ struct ContentView: View {
     }
 
     private var deviceStatus: String {
-        if !store.hid.isConnected { return "Waiting for Shortcut Remote" }
         if !store.hid.hasInputAccess { return "Input Monitoring permission required" }
-        return "Shortcut Remote connected"
+        if !store.hid.hasExclusiveControl { return "Exclusive remote control unavailable" }
+        if !store.hid.isConnected { return "Waiting for Shortcut Remote" }
+        return "Shortcut Remote connected exclusively"
     }
 
     private var connectionColor: Color {
+        if !store.hid.hasInputAccess || !store.hid.hasExclusiveControl { return .orange }
         if !store.hid.isConnected { return .red }
-        if !store.hid.hasInputAccess { return .orange }
         return .green
     }
 

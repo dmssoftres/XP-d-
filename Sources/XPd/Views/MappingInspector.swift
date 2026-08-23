@@ -50,7 +50,11 @@ struct MappingInspector: View {
                 VStack(alignment: .leading, spacing: 18) {
                     HStack(spacing: 12) {
                         statusCard(title: "Current profile", value: store.profileName, detail: "local mappings")
-                        statusCard(title: "Device", value: store.hid.isConnected ? "Connected" : "Offline", detail: "VID 10429 · PID 514")
+                        statusCard(
+                            title: "Device",
+                            value: deviceControlStatus,
+                            detail: store.hid.hasExclusiveControl ? "Exclusive control" : "Factory input not blocked"
+                        )
                     }
 
             GroupBox("Live HID") {
@@ -67,7 +71,7 @@ struct MappingInspector: View {
                         Button(store.learningControl == store.selectedControl ? "Waiting for input…" : "Learn selected control") {
                             store.learnSelectedControl()
                         }
-                        .disabled(!store.hid.isConnected || !store.hid.hasInputAccess || store.learningControl != nil)
+                        .disabled(!store.hid.isConnected || !store.hid.hasInputAccess || !store.hid.hasExclusiveControl || store.learningControl != nil)
 
                         if store.hidBinding(for: store.selectedControl) != nil {
                             Button("Clear", role: .destructive) {
@@ -91,11 +95,44 @@ struct MappingInspector: View {
                         Text("Allow XP[d] in System Settings › Privacy & Security › Input Monitoring, then relaunch.")
                             .font(.caption)
                             .foregroundStyle(.orange)
+                    } else if !store.hid.hasExclusiveControl {
+                        Text("XP[d] could not take exclusive control. Factory remote shortcuts are not safely blocked.")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
                     } else {
                         Text(store.hid.lastEvent)
                             .font(.caption.monospaced())
                             .foregroundStyle(.secondary)
                             .textSelection(.enabled)
+                    }
+                }
+                .padding(6)
+            }
+
+            GroupBox("Raw HID trace") {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Decoder input · oldest first. Repeated and empty reports are shown before interpretation.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if store.hid.rawReportTrace.isEmpty {
+                        Text("No raw reports received yet.")
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ScrollView(.vertical) {
+                            LazyVStack(alignment: .leading, spacing: 3) {
+                                ForEach(Array(store.hid.rawReportTrace.enumerated()), id: \.offset) { _, report in
+                                    Text(report)
+                                        .font(.caption.monospaced())
+                                        .textSelection(.enabled)
+                                        .lineLimit(1)
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .frame(maxHeight: 132)
                     }
                 }
                 .padding(6)
@@ -155,7 +192,7 @@ struct MappingInspector: View {
                         ) { Text("Adjust standalone hold threshold") }
                         .labelsHidden()
                     }
-                    Text("Holding a designated K this long makes its Base Tap eligible. Release it alone to run Base, or press another K at any time while it is held to run that exact layer instead.")
+                    Text("A designated K held alone runs its Base Tap when this timer expires. Press a destination K while the modifier is still held and before the timer expires to run that exact layer instead.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -188,6 +225,12 @@ struct MappingInspector: View {
             ensureModifierLayerSelection()
         }
         .onAppear(perform: ensureModifierLayerSelection)
+    }
+
+    private var deviceControlStatus: String {
+        if !store.hid.hasInputAccess { return "Permission required" }
+        if !store.hid.hasExclusiveControl { return "Control unavailable" }
+        return store.hid.isConnected ? "Connected" : "Offline"
     }
 
     // MARK: MIDI editor
@@ -620,16 +663,22 @@ struct MappingInspector: View {
                     Button(store.learningControl == store.selectedControl ? "Waiting for input…" : "Learn selected control") {
                         store.learnSelectedControl()
                     }
-                    .disabled(!store.hid.isConnected || !store.hid.hasInputAccess || store.learningControl != nil)
+                    .disabled(!store.hid.isConnected || !store.hid.hasInputAccess || !store.hid.hasExclusiveControl || store.learningControl != nil)
                     if store.hidBinding(for: store.selectedControl) != nil {
                         Button("Clear", role: .destructive) { store.clearHIDBinding(for: store.selectedControl) }
                     }
                     Button("Input Monitoring") { store.hid.openInputMonitoringSettings() }
                 }
-                Text(store.hid.lastEvent)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                if !store.hid.hasExclusiveControl, store.hid.hasInputAccess {
+                    Text("Exclusive control unavailable · factory input not blocked")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                } else {
+                    Text(store.hid.lastEvent)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
             }
             .padding(4)
         }
@@ -837,7 +886,7 @@ struct MappingInspector: View {
             .controlSize(.small)
 
             if store.isRemoteModifier(store.selectedControl) {
-                Text("Hold alone for Base Tap; combine with another K for its layer")
+                Text("Hold alone until the timer, or press a destination K before it expires")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

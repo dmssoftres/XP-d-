@@ -156,6 +156,10 @@ final class InputOverlayModel {
     var isEnabled = true
     private(set) var displayDuration: TimeInterval
     @ObservationIgnored var visibilityDidChange: ((Bool) -> Void)?
+    /// The regular input cards are the only overlay content a user may dismiss.
+    /// Profile selection, MIDI lock, and status notices retain their own lifecycles.
+    @ObservationIgnored var regularEntriesVisibilityDidChange: ((Bool) -> Void)?
+    @ObservationIgnored private var entryDismissalTimers: [UUID: Timer] = [:]
     @ObservationIgnored private var midiDismissalTimer: Timer?
     @ObservationIgnored private var statusNoticeDismissalTimer: Timer?
 
@@ -185,9 +189,13 @@ final class InputOverlayModel {
             recognizedGesture: nil
         ))
         if entries.count > 12 {
-            entries.removeFirst(entries.count - 12)
+            let removedEntries = entries.prefix(entries.count - 12)
+            for entry in removedEntries {
+                entryDismissalTimers.removeValue(forKey: entry.id)?.invalidate()
+            }
+            entries.removeFirst(removedEntries.count)
         }
-        visibilityDidChange?(true)
+        notifyVisibilityChanged()
     }
 
     /// Presents a gesture that was recognized after the physical HID release.
@@ -209,13 +217,16 @@ final class InputOverlayModel {
         entries[index].releasedAt = Date()
         let duration = displayDuration
 
+        entryDismissalTimers[id]?.invalidate()
         let expirationTimer = Timer(timeInterval: duration, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
+                self.entryDismissalTimers.removeValue(forKey: id)
                 self.entries.removeAll { $0.id == id }
-                self.visibilityDidChange?(self.hasVisibleContent)
+                self.notifyVisibilityChanged()
             }
         }
+        entryDismissalTimers[id] = expirationTimer
         RunLoop.main.add(expirationTimer, forMode: .common)
     }
 
@@ -228,17 +239,28 @@ final class InputOverlayModel {
         displayDuration = max(1, duration)
     }
 
+    /// Clears only the ordinary input cards and their expiry timers. It is a
+    /// recovery action for a stuck normal HUD entry, not a way to dismiss the
+    /// profile selector, MIDI lock, or status notice.
+    func dismissNormalEntries() {
+        guard !entries.isEmpty else { return }
+        entryDismissalTimers.values.forEach { $0.invalidate() }
+        entryDismissalTimers.removeAll()
+        entries.removeAll()
+        notifyVisibilityChanged()
+    }
+
     func showProfiles(_ profiles: [String], selectedProfile: String) {
         profileSelection = ProfileOverlaySelection(
             profiles: profiles,
             selectedProfile: selectedProfile
         )
-        visibilityDidChange?(true)
+        notifyVisibilityChanged()
     }
 
     func hideProfiles() {
         profileSelection = nil
-        visibilityDidChange?(hasVisibleContent)
+        notifyVisibilityChanged()
     }
 
     func showMIDI(
@@ -257,7 +279,7 @@ final class InputOverlayModel {
             control: control,
             summary: summary
         )
-        visibilityDidChange?(true)
+        notifyVisibilityChanged()
         scheduleMIDIDismissal()
     }
 
@@ -266,7 +288,7 @@ final class InputOverlayModel {
         midiDismissalTimer?.invalidate()
         midiDismissalTimer = nil
         midiPresentation = nil
-        visibilityDidChange?(hasVisibleContent)
+        notifyVisibilityChanged()
     }
 
     func showStatusNotice(title: String, message: String, systemImage: String) {
@@ -276,7 +298,7 @@ final class InputOverlayModel {
             message: message,
             systemImage: systemImage
         )
-        visibilityDidChange?(true)
+        notifyVisibilityChanged()
         statusNoticeDismissalTimer?.invalidate()
         let timer = Timer(timeInterval: displayDuration, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
@@ -292,10 +314,12 @@ final class InputOverlayModel {
         statusNoticeDismissalTimer?.invalidate()
         statusNoticeDismissalTimer = nil
         statusNotice = nil
-        visibilityDidChange?(hasVisibleContent)
+        notifyVisibilityChanged()
     }
 
     func reset() {
+        entryDismissalTimers.values.forEach { $0.invalidate() }
+        entryDismissalTimers.removeAll()
         entries.removeAll()
         midiDismissalTimer?.invalidate()
         midiDismissalTimer = nil
@@ -303,11 +327,20 @@ final class InputOverlayModel {
         statusNoticeDismissalTimer?.invalidate()
         statusNoticeDismissalTimer = nil
         statusNotice = nil
-        visibilityDidChange?(hasVisibleContent)
+        notifyVisibilityChanged()
     }
 
     private var hasVisibleContent: Bool {
         profileSelection != nil || midiPresentation != nil || statusNotice != nil || !entries.isEmpty
+    }
+
+    private var hasVisibleRegularEntries: Bool {
+        profileSelection == nil && midiPresentation == nil && statusNotice == nil && !entries.isEmpty
+    }
+
+    private func notifyVisibilityChanged() {
+        visibilityDidChange?(hasVisibleContent)
+        regularEntriesVisibilityDidChange?(hasVisibleRegularEntries)
     }
 
     private func scheduleMIDIDismissal() {

@@ -5,6 +5,7 @@ import SwiftUI
 final class InputOverlayController {
     private let model: InputOverlayModel
     private let panel: NSPanel
+    private let dismissPanel: NSPanel
     private var visibilityGeneration = 0
 
     init(displayDuration: TimeInterval = 4) {
@@ -26,8 +27,30 @@ final class InputOverlayController {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         panel.isReleasedWhenClosed = false
 
+        let dismissPanelSize = NSSize(width: 24, height: 24)
+        dismissPanel = NSPanel(
+            contentRect: NSRect(origin: .zero, size: dismissPanelSize),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        dismissPanel.contentView = NSHostingView(
+            rootView: DismissInputOverlayButton(action: model.dismissNormalEntries)
+        )
+        dismissPanel.isOpaque = false
+        dismissPanel.backgroundColor = .clear
+        dismissPanel.hasShadow = false
+        dismissPanel.level = .statusBar
+        dismissPanel.ignoresMouseEvents = false
+        dismissPanel.hidesOnDeactivate = false
+        dismissPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        dismissPanel.isReleasedWhenClosed = false
+
         model.visibilityDidChange = { [weak self] hasVisibleEntries in
             self?.updatePanelVisibility(hasVisibleEntries)
+        }
+        model.regularEntriesVisibilityDidChange = { [weak self] hasVisibleRegularEntries in
+            self?.updateDismissPanelVisibility(hasVisibleRegularEntries)
         }
 
         NotificationCenter.default.addObserver(
@@ -35,7 +58,10 @@ final class InputOverlayController {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.positionOnActiveScreen() }
+            MainActor.assumeIsolated {
+                self?.positionOnActiveScreen()
+                self?.positionDismissPanel()
+            }
         }
     }
 
@@ -166,6 +192,15 @@ final class InputOverlayController {
         }
     }
 
+    private func updateDismissPanelVisibility(_ hasVisibleRegularEntries: Bool) {
+        if hasVisibleRegularEntries {
+            positionDismissPanel()
+            dismissPanel.orderFrontRegardless()
+        } else {
+            dismissPanel.orderOut(nil)
+        }
+    }
+
     private func positionOnActiveScreen() {
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) }) ?? NSScreen.main
@@ -175,5 +210,38 @@ final class InputOverlayController {
             x: visible.maxX - panel.frame.width - margin,
             y: visible.maxY - panel.frame.height - margin
         ))
+    }
+
+    private func positionDismissPanel() {
+        // The newest card is always the first card at the top of the regular
+        // stack. Keep the interactive panel small and over that card only;
+        // the underlying HUD panel remains click-through everywhere else.
+        let cardInset: CGFloat = 10
+        let cornerInset: CGFloat = 8
+        dismissPanel.setFrameOrigin(NSPoint(
+            x: panel.frame.maxX - cardInset - cornerInset - dismissPanel.frame.width,
+            y: panel.frame.maxY - cardInset - cornerInset - dismissPanel.frame.height
+        ))
+    }
+}
+
+private struct DismissInputOverlayButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "xmark")
+                .font(.system(size: 9, weight: .semibold))
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Color.white.opacity(0.86))
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.black.opacity(0.38), in: Circle())
+        .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 0.7))
+        .contentShape(Circle())
+        .accessibilityLabel("Dismiss input overlay")
+        .accessibilityHint("Clears the current input HUD entries")
+        .help("Dismiss input HUD")
     }
 }
