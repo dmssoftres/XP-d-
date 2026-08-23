@@ -874,6 +874,17 @@ final class MappingStore {
         case let .success(mapping):
             if let actionExecutionOverride {
                 actionExecutionOverride(mapping, completion)
+            } else if mapping.action == .switchProfile {
+                let target = Self.normalizedProfileTarget(mapping.command)
+                guard !target.isEmpty else {
+                    completion(.failure("Choose a profile first"))
+                    return
+                }
+                guard selectProfile(target) else {
+                    completion(.failure(ProfileError.profileNotFound(target).localizedDescription))
+                    return
+                }
+                completion(.success("Switched to \(target)"))
             } else {
                 actionRunner.execute(mapping: mapping, completion: completion)
             }
@@ -972,6 +983,7 @@ final class MappingStore {
 
         profileStates[name] = state
         availableProfiles[profileIndex] = name
+        retargetSwitchProfileMappings(from: existingName, to: name)
         if lastStandardProfileName == existingName { lastStandardProfileName = name }
         if lastMIDIProfileName == existingName { lastMIDIProfileName = name }
 
@@ -985,6 +997,32 @@ final class MappingStore {
 
         saveAllProfiles()
         return name
+    }
+
+    private static func normalizedProfileTarget(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func retargetSwitchProfileMappings(from oldName: String, to newName: String) {
+        let normalizedOldName = Self.normalizedProfileTarget(oldName)
+        func retargeted(_ source: [MappingKey: Mapping]) -> [MappingKey: Mapping] {
+            source.mapValues { mapping in
+                guard mapping.action == .switchProfile,
+                      Self.normalizedProfileTarget(mapping.command) == normalizedOldName else {
+                    return mapping
+                }
+                var updated = mapping
+                updated.command = newName
+                return updated
+            }
+        }
+
+        mappings = retargeted(mappings)
+        for profile in Array(profileStates.keys) {
+            guard var state = profileStates[profile] else { continue }
+            state.mappings = retargeted(state.mappings)
+            profileStates[profile] = state
+        }
     }
 
     /// Deletes an inactive or active profile. Global is intentionally
@@ -1116,11 +1154,19 @@ final class MappingStore {
         for profile in configuration.profiles {
             var importedMappings: [MappingKey: Mapping] = [:]
             for entry in profile.mappings {
+                var mapping = entry.mapping
+                // Portable configuration may contain executable action data,
+                // but importing it must never arm that data automatically.
+                // Preserve the action and command so the user can review and
+                // explicitly enable it in the inspector.
+                if mapping.action.isProcessBackedAutomation {
+                    mapping.automationEnabled = false
+                }
                 importedMappings[MappingKey(
                     control: entry.control,
                     gesture: entry.gesture,
                     modifierControls: entry.modifierControls
-                )] = entry.mapping
+                )] = mapping
             }
 
             var importedHIDBindings: [RemoteControl: String] = [:]

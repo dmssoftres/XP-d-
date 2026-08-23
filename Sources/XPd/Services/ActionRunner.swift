@@ -2,6 +2,7 @@ import AppKit
 import ApplicationServices
 import CoreGraphics
 import Foundation
+import IOKit.hidsystem
 
 struct ActionExecutionResult: Equatable {
     let succeeded: Bool
@@ -16,13 +17,21 @@ struct ActionExecutionResult: Equatable {
     }
 }
 
-/// Executes the small set of actions currently supported by the v0.1 input
-/// path. Application mappings are intentionally resolved through Launch
-/// Services/AppKit; no shell command is involved.
+/// Executes configured Standard mappings through explicit native or process
+/// boundaries. Application mappings use Launch Services/AppKit; scripts and
+/// shell commands run only when the user deliberately assigns those actions.
 @MainActor
 final class ActionRunner {
     typealias EventPoster = (CGEvent) -> Void
     typealias PostEventAccessProvider = () -> Bool
+    typealias ProcessExecutor = @Sendable (URL, [String]) async -> ProcessExecutionOutcome
+    typealias WindowActionOverride = (WindowDisplayAction) -> ActionExecutionResult
+
+    enum ProcessExecutionOutcome: Sendable, Equatable {
+        case exited(Int32)
+        case launchFailure(String)
+        case timedOut
+    }
 
     enum ToggleOperation: Equatable {
         case minimize
@@ -67,6 +76,20 @@ final class ActionRunner {
 
     private let eventPoster: EventPoster
     private let postEventAccessProvider: PostEventAccessProvider
+    private let processExecutor: ProcessExecutor
+    private let windowActionOverride: WindowActionOverride?
+
+    /// Bound process-backed actions because a hardware control can be
+    /// triggered repeatedly and must not create unbounded child processes.
+    private static let maximumConcurrentProcesses = 4
+    private nonisolated static let processTimeout: TimeInterval = 30
+
+    private struct ProcessInvocation: Hashable {
+        let executableURL: URL
+        let arguments: [String]
+    }
+
+    private var inFlightProcessInvocations: Set<ProcessInvocation> = []
 
     init(
         postEventAccessProvider: @escaping PostEventAccessProvider = {
@@ -74,10 +97,14 @@ final class ActionRunner {
         },
         eventPoster: @escaping EventPoster = { event in
             event.post(tap: .cghidEventTap)
-        }
+        },
+        processExecutor: @escaping ProcessExecutor = ActionRunner.runProcess,
+        windowActionOverride: WindowActionOverride? = nil
     ) {
         self.postEventAccessProvider = postEventAccessProvider
         self.eventPoster = eventPoster
+        self.processExecutor = processExecutor
+        self.windowActionOverride = windowActionOverride
     }
 
     /// Pure seams shared by the AX implementation and focused tests.
@@ -174,12 +201,34 @@ final class ActionRunner {
         mapping: Mapping,
         completion: @escaping @MainActor (ActionExecutionResult) -> Void
     ) {
-        if mapping.action == .keyboardShortcut {
+        switch mapping.action {
+        case .keyboardShortcut:
             executeKeyboardShortcut(mapping, completion: completion)
             return
+        case .macOSShortcut:
+            executeMacOSShortcut(mapping, completion: completion)
+            return
+        case .appleScript:
+            executeAppleScript(mapping, completion: completion)
+            return
+        case .shellCommand:
+            executeShellCommand(mapping, completion: completion)
+            return
+        case .mediaControl:
+            executeMediaControl(mapping, completion: completion)
+            return
+        case .windowDisplay:
+            executeWindowDisplayAction(mapping, completion: completion)
+            return
+        case .switchProfile:
+            completion(.failure("Switch profile is unavailable outside the mapping store"))
+            return
+        case .noAction:
+            completion(.success("No action"))
+            return
+        case .openApplication, .toggleApplication:
+            break
         }
-
-        guard mapping.action == .openApplication || mapping.action == .toggleApplication else { return }
 
         let requestedName = mapping.command.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !requestedName.isEmpty else {
@@ -245,6 +294,375 @@ final class ActionRunner {
                 )
             }
         }
+    }
+
+    private func executeMacOSShortcut(
+        _ mapping: Mapping,
+        completion: @escaping @MainActor (ActionExecutionResult) -> Void
+    ) {
+        let name = mapping.command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else {
+            completion(.failure("Choose a macOS Shortcut first"))
+            return
+        }
+        guard mapping.automationEnabled else {
+            completion(.failure("Enable automation for this mapping before running it"))
+            return
+        }
+        executeProcess(
+            executableURL: URL(fileURLWithPath: "/usr/bin/shortcuts"),
+            arguments: ["run", name],
+            successMessage: "Ran shortcut \(name)",
+            failureLabel: "Shortcut \(name)",
+            completion: completion
+        )
+    }
+
+    private func executeAppleScript(
+        _ mapping: Mapping,
+        completion: @escaping @MainActor (ActionExecutionResult) -> Void
+    ) {
+        let script = mapping.command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !script.isEmpty else {
+            completion(.failure("Enter AppleScript code first"))
+            return
+        }
+        guard mapping.automationEnabled else {
+            completion(.failure("Enable automation for this mapping before running it"))
+            return
+        }
+        executeProcess(
+            executableURL: URL(fileURLWithPath: "/usr/bin/osascript"),
+            arguments: ["-e", script],
+            successMessage: "Ran AppleScript",
+            failureLabel: "AppleScript",
+            completion: completion
+        )
+    }
+
+    private func executeShellCommand(
+        _ mapping: Mapping,
+        completion: @escaping @MainActor (ActionExecutionResult) -> Void
+    ) {
+        let command = mapping.command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !command.isEmpty else {
+            completion(.failure("Enter a shell command first"))
+            return
+        }
+        guard mapping.automationEnabled else {
+            completion(.failure("Enable automation for this mapping before running it"))
+            return
+        }
+        executeProcess(
+            executableURL: URL(fileURLWithPath: "/bin/zsh"),
+            arguments: ["-c", command],
+            successMessage: "Ran shell command",
+            failureLabel: "Shell command",
+            completion: completion
+        )
+    }
+
+    private func executeProcess(
+        executableURL: URL,
+        arguments: [String],
+        successMessage: String,
+        failureLabel: String,
+        completion: @escaping @MainActor (ActionExecutionResult) -> Void
+    ) {
+        let invocation = ProcessInvocation(executableURL: executableURL, arguments: arguments)
+        guard inFlightProcessInvocations.insert(invocation).inserted else {
+            completion(.failure("This action is already running"))
+            return
+        }
+        guard inFlightProcessInvocations.count <= Self.maximumConcurrentProcesses else {
+            inFlightProcessInvocations.remove(invocation)
+            completion(.failure("Too many actions are already running; try again"))
+            return
+        }
+
+        let processExecutor = self.processExecutor
+        Task {
+            let outcome = await processExecutor(executableURL, arguments)
+            self.inFlightProcessInvocations.remove(invocation)
+            switch outcome {
+            case .exited(0):
+                completion(.success(successMessage))
+            case let .exited(status):
+                completion(.failure("\(failureLabel) failed with exit status \(status)"))
+            case let .launchFailure(message):
+                completion(.failure("Could not run \(failureLabel): \(message)"))
+            case .timedOut:
+                completion(.failure("\(failureLabel) timed out after \(Int(Self.processTimeout)) seconds"))
+            }
+        }
+    }
+
+    /// Synchronizes the process termination callback and timeout callback.
+    /// Process itself is not Sendable; this wrapper is the only value crossing
+    /// those callback boundaries and protects its mutable state with a lock.
+    private final class ProcessRunState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var completed = false
+        private var timedOut = false
+        private var process: Process?
+        private var timeoutWork: DispatchWorkItem?
+
+        func install(_ process: Process) {
+            lock.lock()
+            self.process = process
+            lock.unlock()
+        }
+
+        func installTimeout(_ work: DispatchWorkItem) {
+            lock.lock()
+            timeoutWork = work
+            lock.unlock()
+        }
+
+        /// Claims termination and atomically detaches every callback resource.
+        /// Clearing the handler before releasing the Process breaks the
+        /// Process -> handler -> state cycle on every actual terminal path.
+        /// A timeout is reported only after this handler fires, so a process
+        /// that ignores SIGTERM remains a bounded, retained in-flight slot.
+        func claimTermination() -> (claimed: Bool, timedOut: Bool) {
+            lock.lock()
+            guard !completed else {
+                lock.unlock()
+                return (false, false)
+            }
+            completed = true
+            let process = self.process
+            let work = timeoutWork
+            self.process = nil
+            timeoutWork = nil
+            lock.unlock()
+            process?.terminationHandler = nil
+            work?.cancel()
+            return (true, timedOut)
+        }
+
+        /// Marks the invocation timed out and sends a graceful termination to
+        /// the exact retained Foundation Process. The Process and its handler
+        /// deliberately remain retained until the handler fires; this keeps
+        /// the invocation slot occupied while a child ignores SIGTERM.
+        func markTimedOutAndTerminate() -> Bool {
+            lock.lock()
+            guard !completed, !timedOut else {
+                lock.unlock()
+                return false
+            }
+            timedOut = true
+            let process = self.process
+            let work = timeoutWork
+            timeoutWork = nil
+            lock.unlock()
+            work?.cancel()
+            process?.terminate()
+            return true
+        }
+    }
+
+    nonisolated private static func runProcess(
+        executableURL: URL,
+        arguments: [String]
+    ) async -> ProcessExecutionOutcome {
+        await runProcess(
+            executableURL: executableURL,
+            arguments: arguments,
+            timeout: processTimeout
+        )
+    }
+
+    /// Narrow internal seam used by lifecycle tests to exercise the real
+    /// Foundation Process runner with a short timeout. Production mappings
+    /// use the 30-second `runProcess` overload above.
+    nonisolated static func runProcessForTesting(
+        executableURL: URL,
+        arguments: [String],
+        timeout: TimeInterval
+    ) async -> ProcessExecutionOutcome {
+        await runProcess(
+            executableURL: executableURL,
+            arguments: arguments,
+            timeout: timeout
+        )
+    }
+
+    nonisolated private static func runProcess(
+        executableURL: URL,
+        arguments: [String],
+        timeout: TimeInterval
+    ) async -> ProcessExecutionOutcome {
+        await withCheckedContinuation { continuation in
+            let state = ProcessRunState()
+            let process = Process()
+            process.executableURL = executableURL
+            process.arguments = arguments
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            state.install(process)
+
+            let timeoutWork = DispatchWorkItem {
+                _ = state.markTimedOutAndTerminate()
+            }
+            state.installTimeout(timeoutWork)
+            process.terminationHandler = { finishedProcess in
+                let claim = state.claimTermination()
+                guard claim.claimed else { return }
+                continuation.resume(
+                    returning: claim.timedOut
+                        ? .timedOut
+                        : .exited(finishedProcess.terminationStatus)
+                )
+            }
+            do {
+                try process.run()
+                DispatchQueue.global(qos: .utility).asyncAfter(
+                    deadline: .now() + timeout,
+                    execute: timeoutWork
+                )
+            } catch {
+                let claim = state.claimTermination()
+                guard claim.claimed else { return }
+                continuation.resume(returning: .launchFailure(error.localizedDescription))
+            }
+        }
+    }
+
+    private func executeMediaControl(
+        _ mapping: Mapping,
+        completion: @escaping @MainActor (ActionExecutionResult) -> Void
+    ) {
+        guard let action = MediaControlAction(rawValue: mapping.command) else {
+            completion(.failure("Choose a media control first"))
+            return
+        }
+        guard hasPostEventAccess else {
+            completion(.failure("Allow XP[d] in Accessibility, then press again"))
+            return
+        }
+        guard postMediaKey(action) else {
+            completion(.failure("Could not create media control events"))
+            return
+        }
+        completion(.success(action.rawValue))
+    }
+
+    private func postMediaKey(_ action: MediaControlAction) -> Bool {
+        let keyCode: Int32 = switch action {
+        case .playPause: NX_KEYTYPE_PLAY
+        case .nextTrack: NX_KEYTYPE_FAST
+        case .previousTrack: NX_KEYTYPE_REWIND
+        case .volumeUp: NX_KEYTYPE_SOUND_UP
+        case .volumeDown: NX_KEYTYPE_SOUND_DOWN
+        case .mute: NX_KEYTYPE_MUTE
+        }
+
+        let pressState: Int32 = 0xA
+        let releaseState: Int32 = 0xB
+        guard let press = mediaKeyEvent(keyCode: keyCode, state: pressState),
+              let release = mediaKeyEvent(keyCode: keyCode, state: releaseState),
+              let pressEvent = press.cgEvent,
+              let releaseEvent = release.cgEvent else {
+            return false
+        }
+        eventPoster(pressEvent)
+        eventPoster(releaseEvent)
+        return true
+    }
+
+    private func mediaKeyEvent(keyCode: Int32, state: Int32) -> NSEvent? {
+        NSEvent.otherEvent(
+            with: .systemDefined,
+            location: .zero,
+            modifierFlags: NSEvent.ModifierFlags(rawValue: UInt(state << 8)),
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: 0,
+            context: nil,
+            subtype: Int16(NX_SUBTYPE_AUX_CONTROL_BUTTONS),
+            data1: Int((keyCode << 16) | (state << 8)),
+            data2: -1
+        )
+    }
+
+    private func executeWindowDisplayAction(
+        _ mapping: Mapping,
+        completion: @escaping @MainActor (ActionExecutionResult) -> Void
+    ) {
+        guard let action = WindowDisplayAction(rawValue: mapping.command) else {
+            completion(.failure("Choose a window or display action first"))
+            return
+        }
+        if let windowActionOverride {
+            completion(windowActionOverride(action))
+            return
+        }
+        if action == .sleepDisplays {
+            executeProcess(
+                executableURL: URL(fileURLWithPath: "/usr/bin/pmset"),
+                arguments: ["displaysleepnow"],
+                successMessage: "Put displays to sleep",
+                failureLabel: "Display sleep",
+                completion: completion
+            )
+            return
+        }
+
+        guard let application = workspace.frontmostApplication else {
+            completion(.failure("No frontmost application found"))
+            return
+        }
+        if action == .hideApplication {
+            completion(
+                application.hide()
+                    ? .success("Hid \(displayName(for: application, fallback: "application"))")
+                    : .failure("Could not hide \(displayName(for: application, fallback: "application"))")
+            )
+            return
+        }
+        guard hasAccessibilityAccess(prompt: false) else {
+            completion(.failure("Allow XP[d] in Accessibility, then press again"))
+            return
+        }
+
+        switch action {
+        case .minimize:
+            switch setMinimized(true, for: application) {
+            case .success(let count) where count > 0:
+                completion(.success("Minimized frontmost window"))
+            case .success:
+                completion(.failure("No minimizable window found"))
+            case .failure:
+                completion(.failure("Could not minimize frontmost window"))
+            }
+        case .toggleFullScreen:
+            completion(toggleFullScreen(for: application))
+        case .hideApplication, .sleepDisplays:
+            break
+        }
+    }
+
+    private func toggleFullScreen(for application: NSRunningApplication) -> ActionExecutionResult {
+        let applicationElement = AXUIElementCreateApplication(application.processIdentifier)
+        guard let window = targetWindows(for: applicationElement).first else {
+            return .failure("No frontmost window found")
+        }
+        let attribute = "AXFullScreen" as CFString
+        var currentValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(window, attribute, &currentValue) == .success,
+              let isFullScreen = currentValue as? Bool else {
+            return .failure("Frontmost window does not support full screen")
+        }
+        var isSettable = DarwinBoolean(false)
+        guard AXUIElementIsAttributeSettable(window, attribute, &isSettable) == .success,
+              isSettable.boolValue else {
+            return .failure("Frontmost window does not support full screen")
+        }
+        let nextValue: CFTypeRef = isFullScreen ? kCFBooleanFalse! : kCFBooleanTrue!
+        guard AXUIElementSetAttributeValue(window, attribute, nextValue) == .success else {
+            return .failure("Could not toggle full screen")
+        }
+        return .success(isFullScreen ? "Exited full screen" : "Entered full screen")
     }
 
     private func executeKeyboardShortcut(

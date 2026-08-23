@@ -972,7 +972,7 @@ private struct StandardMappingActionEditor: View {
                 }
             }
 
-            Picker("Action", selection: binding.action) {
+            Picker("Action", selection: actionBinding) {
                 ForEach(ActionKind.allCases) { action in
                     Text(action.rawValue).tag(action)
                 }
@@ -999,7 +999,9 @@ private struct StandardMappingActionEditor: View {
         .onChange(of: store.selectedGesture) { _, _ in cancelEditing() }
         .onChange(of: modifierControls) { _, _ in cancelEditing() }
         .onChange(of: store.profileName) { _, _ in cancelEditing() }
-        .onChange(of: selectedAction) { _, _ in cancelEditing() }
+        .onChange(of: selectedAction) { _, _ in
+            cancelEditing()
+        }
         .onChange(of: activeCaptureLayer) { _, activeLayer in
             if let activeLayer, activeLayer != modifierControls {
                 cancelEditing()
@@ -1012,39 +1014,127 @@ private struct StandardMappingActionEditor: View {
 
     @ViewBuilder
     private var commandEditor: some View {
-        if selectedAction == .keyboardShortcut {
+        switch selectedAction {
+        case .keyboardShortcut:
             KeyboardShortcutCaptureField(
-                command: binding.command,
+                command: commandBinding,
                 shortcut: binding.keyboardShortcut,
                 cancellationGeneration: shortcutCaptureCancellation,
                 onRecordingChange: updateCaptureState
             )
-        } else if isEditingCommand {
-            TextField(commandPlaceholder, text: binding.command)
-                .focused($isCommandFieldFocused)
-                .onSubmit(cancelEditing)
-                .onExitCommand(perform: cancelEditing)
-        } else {
-            Button(action: beginCommandEditing) {
-                HStack(spacing: 0) {
-                    Text(commandDisplayValue)
-                        .foregroundStyle(binding.wrappedValue.command.isEmpty ? .secondary : .primary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Spacer(minLength: 8)
+        case .openApplication, .toggleApplication, .macOSShortcut:
+            singleLineCommandEditor
+        case .appleScript:
+            multilineCommandEditor(
+                label: "AppleScript",
+                placeholder: "tell application \"Finder\" to activate"
+            )
+        case .shellCommand:
+            multilineCommandEditor(
+                label: "Shell command",
+                placeholder: "Enter a zsh command"
+            )
+            Text("Runs with your macOS user permissions.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .mediaControl:
+            Picker("Media action", selection: mediaActionBinding) {
+                Text("Choose media action…").tag(nil as MediaControlAction?)
+                ForEach(MediaControlAction.allCases) { action in
+                    Text(action.rawValue).tag(action as MediaControlAction?)
                 }
-                .padding(.horizontal, 7)
-                .frame(height: 22)
-                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 5))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 5)
-                        .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
-                }
-                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Edit command")
-            .help("Click to edit")
+        case .windowDisplay:
+            Picker("Window / display", selection: windowDisplayActionBinding) {
+                Text("Choose window action…").tag(nil as WindowDisplayAction?)
+                ForEach(WindowDisplayAction.allCases) { action in
+                    Text(action.rawValue).tag(action as WindowDisplayAction?)
+                }
+            }
+            if let windowAction = WindowDisplayAction(rawValue: binding.wrappedValue.command),
+               windowAction != .sleepDisplays {
+                Text("Frontmost-window actions may require Accessibility permission.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        case .switchProfile:
+            Picker("Profile", selection: profileActionBinding) {
+                Text("Choose profile…").tag(nil as String?)
+                ForEach(store.availableProfiles, id: \.self) { profile in
+                    Text(profile).tag(profile as String?)
+                }
+            }
+        case .noAction:
+            Text("This mapping will not perform an action.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+
+        if selectedAction.isProcessBackedAutomation {
+            automationConsentEditor
+        }
+    }
+
+    private var singleLineCommandEditor: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(commandFieldLabel)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if isEditingCommand {
+                TextField(commandPlaceholder, text: commandBinding)
+                    .focused($isCommandFieldFocused)
+                    .onSubmit(cancelEditing)
+                    .onExitCommand(perform: cancelEditing)
+            } else {
+                Button(action: beginCommandEditing) {
+                    HStack(spacing: 0) {
+                        Text(commandDisplayValue)
+                            .foregroundStyle(binding.wrappedValue.command.isEmpty ? .secondary : .primary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer(minLength: 8)
+                    }
+                    .padding(.horizontal, 7)
+                    .frame(height: 22)
+                    .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 5))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 5)
+                            .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Edit \(commandFieldLabel.lowercased())")
+                .help("Click to edit")
+            }
+        }
+    }
+
+    private func multilineCommandEditor(label: String, placeholder: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ZStack(alignment: .topLeading) {
+                TextEditor(text: commandBinding)
+                    .font(.system(.body, design: .monospaced))
+                    .frame(minHeight: 76)
+                    .scrollContentBackground(.hidden)
+                    .padding(3)
+                    .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 5))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 5)
+                            .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                    }
+                if binding.wrappedValue.command.isEmpty {
+                    Text(placeholder)
+                        .font(.system(.body, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 9)
+                        .allowsHitTesting(false)
+                }
+            }
         }
     }
 
@@ -1126,6 +1216,60 @@ private struct StandardMappingActionEditor: View {
         binding.wrappedValue.action
     }
 
+    private var actionBinding: Binding<ActionKind> {
+        Binding(
+            get: { binding.wrappedValue.action },
+            set: { action in
+                binding.wrappedValue = binding.wrappedValue.selectingAction(
+                    action,
+                    profileName: store.profileName
+                )
+            }
+        )
+    }
+
+    private var commandBinding: Binding<String> {
+        Binding(
+            get: { binding.wrappedValue.command },
+            set: { command in
+                binding.wrappedValue = binding.wrappedValue.editingCommand(command)
+            }
+        )
+    }
+
+    private var mediaActionBinding: Binding<MediaControlAction?> {
+        Binding(
+            get: { MediaControlAction(rawValue: binding.wrappedValue.command) },
+            set: { action in
+                guard let action else { return }
+                binding.wrappedValue = binding.wrappedValue.editingCommand(action.rawValue)
+            }
+        )
+    }
+
+    private var windowDisplayActionBinding: Binding<WindowDisplayAction?> {
+        Binding(
+            get: { WindowDisplayAction(rawValue: binding.wrappedValue.command) },
+            set: { action in
+                guard let action else { return }
+                binding.wrappedValue = binding.wrappedValue.editingCommand(action.rawValue)
+            }
+        )
+    }
+
+    private var profileActionBinding: Binding<String?> {
+        Binding(
+            get: {
+                let command = binding.wrappedValue.command
+                return store.availableProfiles.contains(command) ? command : nil
+            },
+            set: { profile in
+                guard let profile else { return }
+                binding.wrappedValue = binding.wrappedValue.editingCommand(profile)
+            }
+        )
+    }
+
     private var isApplicationAction: Bool {
         selectedAction.isApplicationAction
     }
@@ -1136,7 +1280,25 @@ private struct StandardMappingActionEditor: View {
     }
 
     private var commandPlaceholder: String {
-        isApplicationAction ? "Application name (for example, ChatGPT)" : "Command"
+        switch selectedAction {
+        case .openApplication, .toggleApplication:
+            "Application name (for example, ChatGPT)"
+        case .macOSShortcut:
+            "Name from the Shortcuts app"
+        default:
+            "Command"
+        }
+    }
+
+    private var commandFieldLabel: String {
+        switch selectedAction {
+        case .openApplication, .toggleApplication:
+            "Application"
+        case .macOSShortcut:
+            "Shortcut name"
+        default:
+            "Command"
+        }
     }
 
     private var commandDisplayValue: String {
@@ -1148,6 +1310,36 @@ private struct StandardMappingActionEditor: View {
         isEditingCommand = true
         Task { @MainActor in
             isCommandFieldFocused = true
+        }
+    }
+
+    private var automationConsentEditor: some View {
+        let mapping = binding.wrappedValue
+        let hasCommand = !mapping.command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+
+        return VStack(alignment: .leading, spacing: 8) {
+            Divider()
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: mapping.automationEnabled ? "checkmark.shield.fill" : "exclamationmark.shield.fill")
+                    .foregroundStyle(mapping.automationEnabled ? Color.green : Color.orange)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(mapping.automationEnabled ? "Automation enabled" : "Review required")
+                        .font(.caption.weight(.semibold))
+                    Text(mapping.automationEnabled
+                         ? "This \(selectedAction.automationDisplayName) may run from the remote."
+                         : "Stored content is preserved but will not run until enabled.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 6)
+                Button(mapping.automationEnabled ? "Disable" : "Enable automation") {
+                    var updated = binding.wrappedValue
+                    updated.automationEnabled.toggle()
+                    binding.wrappedValue = updated
+                }
+                .buttonStyle(.bordered)
+                .disabled(!hasCommand)
+            }
         }
     }
 

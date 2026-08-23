@@ -593,6 +593,111 @@ final class MappingStoreProfileTests: XCTestCase {
         XCTAssertEqual(store.profileName, "Editing")
     }
 
+    func testSwitchProfileMappingSelectsConfiguredProfileAndReportsMissingTarget() {
+        let store = makeStore()
+        store.update(
+            Mapping(action: .switchProfile, command: "Finder"),
+            for: .k1,
+            gesture: .tap
+        )
+
+        var success: ActionExecutionResult?
+        store.executeMapping(for: .k1, gesture: .tap) { success = $0 }
+        XCTAssertEqual(success, .success("Switched to Finder"))
+        XCTAssertEqual(store.profileName, "Finder")
+
+        store.update(
+            Mapping(action: .switchProfile, command: "Missing"),
+            for: .k2,
+            gesture: .tap
+        )
+        var failure: ActionExecutionResult?
+        store.executeMapping(for: .k2, gesture: .tap) { failure = $0 }
+        XCTAssertEqual(failure, .failure("Profile not found: Missing."))
+        XCTAssertEqual(store.profileName, "Finder")
+    }
+
+    func testSwitchProfileTargetWhitespaceExecutesRetargetsAndReloads() throws {
+        let store = makeStore()
+        store.update(
+            Mapping(action: .switchProfile, command: "  Finder\n"),
+            for: .k1,
+            gesture: .tap
+        )
+
+        var execution: ActionExecutionResult?
+        store.executeMapping(for: .k1, gesture: .tap) { execution = $0 }
+        XCTAssertEqual(execution, .success("Switched to Finder"))
+        XCTAssertEqual(store.profileName, "Finder")
+
+        store.profileName = "Global"
+        try store.renameProfile(named: "Finder", to: "Files")
+
+        XCTAssertEqual(store.mapping(for: .k1, gesture: .tap).command, "Files")
+
+        let reloaded = makeStore()
+        XCTAssertEqual(reloaded.mapping(for: .k1, gesture: .tap).command, "Files")
+
+        var reloadedExecution: ActionExecutionResult?
+        reloaded.executeMapping(for: .k1, gesture: .tap) { reloadedExecution = $0 }
+        XCTAssertEqual(reloadedExecution, .success("Switched to Files"))
+        XCTAssertEqual(reloaded.profileName, "Files")
+    }
+
+    func testImportedProcessAutomationIsDisarmedWithoutLosingContent() throws {
+        var mapping = Mapping(action: .shellCommand, command: "echo preserved")
+        mapping.automationEnabled = true
+        let profiles = XPdConfiguration.defaultProfileNames.map { name in
+            XPdConfiguration.Profile(
+                name: name,
+                mappings: name == "Global"
+                    ? [.init(control: .k1, gesture: .tap, mapping: mapping)]
+                    : [],
+                hidBindings: []
+            )
+        }
+        let data = try JSONEncoder().encode(XPdConfiguration(
+            profiles: profiles,
+            profileName: "Global",
+            showsInputOverlay: true
+        ))
+
+        let target = makeStore()
+        XCTAssertTrue(target.importConfiguration(data))
+        let imported = target.mapping(for: .k1, gesture: .tap)
+        XCTAssertEqual(imported.action, .shellCommand)
+        XCTAssertEqual(imported.command, "echo preserved")
+        XCTAssertFalse(imported.automationEnabled)
+
+        let reloaded = makeStore()
+        let persisted = reloaded.mapping(for: .k1, gesture: .tap)
+        XCTAssertEqual(persisted.action, .shellCommand)
+        XCTAssertEqual(persisted.command, "echo preserved")
+        XCTAssertFalse(persisted.automationEnabled)
+    }
+
+    func testProfileRenameRetargetsSwitchMappingsAcrossProfiles() throws {
+        let store = makeStore()
+        store.update(
+            Mapping(action: .switchProfile, command: "Finder"),
+            for: .k1,
+            gesture: .tap
+        )
+        store.profileName = "Finder"
+        store.update(
+            Mapping(action: .switchProfile, command: "Finder"),
+            for: .k2,
+            gesture: .tap
+        )
+        store.profileName = "Global"
+
+        try store.renameProfile(named: "Finder", to: "Files")
+
+        XCTAssertEqual(store.mapping(for: .k1, gesture: .tap).command, "Files")
+        store.profileName = "Files"
+        XCTAssertEqual(store.mapping(for: .k2, gesture: .tap).command, "Files")
+    }
+
     private func makeStore() -> MappingStore {
         MappingStore(userDefaults: defaults, startHardware: false)
     }

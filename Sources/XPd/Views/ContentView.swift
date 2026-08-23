@@ -64,31 +64,36 @@ struct ContentView: View {
             if store.hid.isConnected {
                 batteryIndicator
             }
-            Spacer()
-            workspaceControls
-            configurationControls
-            Picker("Profile", selection: profileSelectionBinding) {
-                ForEach(store.availableProfiles, id: \.self) { profile in
-                    HStack(spacing: 6) {
-                        Text(profile)
-                        Text(store.profileRealm(for: profile) == .midi ? "MIDI" : "Standard")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+            HStack(spacing: 12) {
+                workspaceControls
+                configurationControls
+                Picker("Profile", selection: profileSelectionBinding) {
+                    ForEach(store.availableProfiles, id: \.self) { profile in
+                        HStack(spacing: 6) {
+                            Text(profile)
+                            Text(store.profileRealm(for: profile) == .midi ? "MIDI" : "Standard")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        .tag(profile)
                     }
-                    .tag(profile)
                 }
+                .pickerStyle(.menu)
+                .controlSize(.regular)
+                .frame(width: 300, height: 24)
+                Button {
+                    isManagingProfiles = true
+                } label: {
+                    Image(systemName: "square.stack.3d.up")
+                }
+                .buttonStyle(.borderless)
+                .frame(height: 24)
+                .help("Add, rename, or remove profiles")
+                .accessibilityLabel("Manage profiles")
             }
-            .pickerStyle(.menu)
-            .frame(width: 150)
-            Button {
-                isManagingProfiles = true
-            } label: {
-                Image(systemName: "square.stack.3d.up")
-            }
-            .buttonStyle(.borderless)
-            .help("Add, rename, or remove profiles")
-            .accessibilityLabel("Manage profiles")
+            .frame(maxWidth: .infinity, alignment: .trailing)
         }
+        .frame(maxWidth: .infinity)
         .padding(.horizontal, 22)
         .padding(.vertical, 14)
     }
@@ -108,6 +113,7 @@ struct ContentView: View {
                 .padding(.horizontal, 7)
                 .padding(.vertical, 4)
                 .background(.quaternary, in: Capsule())
+                .frame(height: 24)
                 .accessibilityLabel("Active workspace: \(store.activeRealm == .midi ? "MIDI Lock" : "Standard")")
 
             Button {
@@ -115,7 +121,6 @@ struct ContentView: View {
             } label: {
                 Label(store.activeRealm == .midi ? "Unlock" : "MIDI", systemImage: store.activeRealm == .midi ? "lock.open" : "lock")
             }
-            .controlSize(.small)
             .disabled(store.activeRealm != .midi && store.midiProfiles.isEmpty)
             .help(store.activeRealm == .midi ? "Return to Standard profiles" : "Enter MIDI Lock")
 
@@ -125,10 +130,10 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                 Button("Panic", role: .destructive) { store.panicMIDI() }
-                    .controlSize(.small)
                     .help("Send MIDI All Notes Off")
             }
         }
+        .controlSize(.regular)
     }
 
     private var midiEndpointHeadline: String {
@@ -214,6 +219,7 @@ struct ContentView: View {
                 Label("Export", systemImage: "square.and.arrow.up")
             }
         }
+        .controlSize(.regular)
     }
 
     private func importConfiguration(_ result: Result<[URL], Error>) {

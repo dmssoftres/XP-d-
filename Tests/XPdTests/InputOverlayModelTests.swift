@@ -2,6 +2,45 @@ import XCTest
 @testable import XPd
 
 final class InputOverlayModelTests: XCTestCase {
+    func testScriptAndStructuredActionsUseConciseHUDTitles() {
+        XCTAssertEqual(
+            InputOverlayPresentation(
+                mapping: Mapping(
+                    action: .appleScript,
+                    command: "tell application \"Finder\" to activate",
+                    automationEnabled: true
+                )
+            ).title,
+            "AppleScript"
+        )
+        XCTAssertEqual(
+            InputOverlayPresentation(
+                mapping: Mapping(
+                    action: .shellCommand,
+                    command: "open -a Notes",
+                    automationEnabled: true
+                )
+            ).title,
+            "Shell command"
+        )
+        XCTAssertEqual(
+            InputOverlayPresentation(
+                mapping: Mapping(
+                    action: .macOSShortcut,
+                    command: "Morning Setup",
+                    automationEnabled: true
+                )
+            ).title,
+            "Shortcut · Morning Setup"
+        )
+        XCTAssertEqual(
+            InputOverlayPresentation(
+                mapping: Mapping(action: .switchProfile, command: "Logic Pro")
+            ).title,
+            "Profile · Logic Pro"
+        )
+    }
+
     @MainActor
     func testProfileSelectorKeepsOverlayVisibleUntilExplicitlyHidden() {
         let model = InputOverlayModel()

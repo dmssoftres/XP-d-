@@ -15,7 +15,7 @@ No backend, database, cloud account, telemetry service, or third-party package d
 | `ShortcutRemoteBatteryMonitor` | Verify the target BLE PnP identity, enable its two notify-only vendor characteristics, and parse exact battery packets | CoreBluetooth | Unknown |
 | `ButtonGestureRecognizer` | Convert K1–K10 down/release reports into mutually exclusive Tap, Hold, and Double events with cancellable timing | Main-actor scheduler seam | Unknown |
 | `MappingStore` | Ordered Standard/MIDI profiles, mapping/HID/MIDI state, migration, persistence, imports, selector/Fn routing, action dispatch | SwiftUI observable state, `UserDefaults` | Unknown |
-| `ActionRunner` | Execute scrolling, application actions, and captured keyboard chords; silently preflight routine event-posting access | Core Graphics, AppKit, ApplicationServices, process APIs | Unknown |
+| `ActionRunner` | Execute scrolling, application/window/display actions, keyboard/media events, and explicit Shortcuts/AppleScript/zsh processes; silently preflight routine event-posting/accessibility access | Core Graphics, AppKit, ApplicationServices, Process, IOKit system key definitions | Unknown |
 | `MIDIOutputService` | Create Control/Performance virtual sources, encode MIDI 1.0 UMP, track active output, pitch return, cleanup, and exact send-result monitor events | CoreMIDI actor and injectable backend | Unknown |
 | Configuration models/document | Codable configuration schema, validation, JSON import/export | Foundation, SwiftUI `FileDocument` | Unknown |
 | `ContentView`, `RemoteView`, `MappingInspector`, `KeyboardShortcutCaptureField` | Hardware editor, mapping controls, click-to-record shortcut entry, live status, import/export | SwiftUI, AppKit local events | Unknown |
@@ -37,6 +37,21 @@ Keyboard-shortcut and remote-trigger capture are mutually exclusive across the
 two columns so only one local event monitor/capture handler remains active.
 
 Keyboard-shortcut capture → local AppKit key-down/flags-changed monitor → in-view draft for exactly one simultaneous chord (zero or more modifiers plus one physical key) → second mouse click commits structured chord data and its readable display text. Escape, selection/action changes, and view removal cancel the draft without changing either mapping. Remote K-buttons remain mapping triggers and are never recorded as shortcut inputs. `ActionRunner` silently preflights post-event access and, only for a structured chord, posts one matching key-down/key-up pair; legacy command-text shortcuts remain visible but are rejected with re-record guidance.
+
+Additional Standard action editor → action-specific text editor or constrained
+picker → existing `Mapping.command` persistence field → `ActionRunner` native or
+process boundary. macOS Shortcuts run by exact name; AppleScript is passed as one
+`osascript -e` argument; shell content is passed as one `zsh -c` argument;
+all three remain review-required until locally enabled, and editing, changing
+action kind, or importing configuration disarms them without deleting content.
+Duplicate process invocations are rejected, four distinct runs may coexist, and
+the real process boundary requests graceful termination after 30 seconds. The
+original invocation keeps its bounded slot until its termination handler fires;
+XP[d] does not signal a potentially recycled integer PID.
+media controls post system auxiliary-key down/up events; frontmost-window actions
+use AppKit/Accessibility; display sleep uses `pmset displaysleepnow`. Profile
+switching stays in `MappingStore` because it mutates profile-owned state, and
+profile renames retarget normalized stored switch mappings across every profile.
 
 Remote-trigger capture → local modifier/function-key monitor plus a temporary
 `MappingStore` K1–K10 capture handler → in-view draft combining modifiers,

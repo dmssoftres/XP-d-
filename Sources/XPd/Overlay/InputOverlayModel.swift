@@ -17,12 +17,50 @@ struct InputOverlayPresentation: Equatable {
             shortcutTokens = []
             title = "No action"
             isConfigured = true
+        } else if mapping.action == .appleScript {
+            shortcutTokens = []
+            if command.isEmpty {
+                title = "AppleScript not set"
+                isConfigured = false
+            } else if mapping.automationEnabled {
+                title = "AppleScript"
+                isConfigured = true
+            } else {
+                title = "AppleScript · Review required"
+                isConfigured = false
+            }
+        } else if mapping.action == .shellCommand {
+            shortcutTokens = []
+            if command.isEmpty {
+                title = "Shell command not set"
+                isConfigured = false
+            } else if mapping.automationEnabled {
+                title = "Shell command"
+                isConfigured = true
+            } else {
+                title = "Shell command · Review required"
+                isConfigured = false
+            }
+        } else if mapping.action == .macOSShortcut {
+            shortcutTokens = []
+            if command.isEmpty {
+                title = "Shortcut not set"
+                isConfigured = false
+            } else if mapping.automationEnabled {
+                title = "Shortcut · " + command
+                isConfigured = true
+            } else {
+                title = "Shortcut · Review required"
+                isConfigured = false
+            }
         } else if !command.isEmpty {
             shortcutTokens = []
             if mapping.action == .openApplication || mapping.action == .toggleApplication {
                 title = URL(fileURLWithPath: command)
                     .deletingPathExtension()
                     .lastPathComponent
+            } else if mapping.action == .switchProfile {
+                title = "Profile · " + command
             } else {
                 title = command
             }

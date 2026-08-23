@@ -46,6 +46,51 @@ enum ActionKind: String, CaseIterable, Codable, Identifiable {
     var isApplicationAction: Bool {
         self == .openApplication || self == .toggleApplication
     }
+
+    /// Actions that hand user-authored text to another process.  These are
+    /// intentionally opt-in because importing or editing a mapping must not
+    /// silently arm executable automation.
+    var isProcessBackedAutomation: Bool {
+        switch self {
+        case .macOSShortcut, .appleScript, .shellCommand:
+            true
+        default:
+            false
+        }
+    }
+
+    var automationDisplayName: String {
+        switch self {
+        case .macOSShortcut: "macOS Shortcut"
+        case .appleScript: "AppleScript"
+        case .shellCommand: "shell command"
+        default: rawValue
+        }
+    }
+}
+
+/// Fixed choices stored in `Mapping.command` for Media control mappings. The
+/// raw values are deliberately user-readable so existing overlays and JSON
+/// exports remain understandable without a schema change.
+enum MediaControlAction: String, CaseIterable, Identifiable {
+    case playPause = "Play / pause"
+    case nextTrack = "Next track"
+    case previousTrack = "Previous track"
+    case volumeUp = "Volume up"
+    case volumeDown = "Volume down"
+    case mute = "Mute"
+
+    var id: String { rawValue }
+}
+
+/// Fixed choices stored in `Mapping.command` for Window / display mappings.
+enum WindowDisplayAction: String, CaseIterable, Identifiable {
+    case minimize = "Minimize frontmost window"
+    case toggleFullScreen = "Toggle full screen"
+    case hideApplication = "Hide frontmost application"
+    case sleepDisplays = "Sleep displays"
+
+    var id: String { rawValue }
 }
 
 struct MappingKey: Hashable, Codable {
@@ -99,6 +144,15 @@ struct MappingKey: Hashable, Codable {
 struct Mapping: Codable, Equatable {
     var action: ActionKind = .openApplication
     var command: String = ""
+    /// Dedicated storage keeps user-authored automation content available
+    /// while the active editor temporarily uses command for a typed
+    /// action such as Media control or Switch profile.
+    var macOSShortcutContent: String?
+    var appleScriptContent: String?
+    var shellCommandContent: String?
+    /// Process-backed automation is inert until the user explicitly enables
+    /// it in the inspector. Missing values decode as false for legacy files.
+    var automationEnabled: Bool = false
     /// Structured keyboard-chord data.  `command` remains the display value
     /// and legacy storage field so older configuration files continue to
     /// render, while only mappings with this value are executable as a
@@ -122,6 +176,10 @@ struct Mapping: Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case action
         case command
+        case macOSShortcutContent
+        case appleScriptContent
+        case shellCommandContent
+        case automationEnabled
         case keyboardShortcut
         case remoteTriggerModifiers
         case remoteTriggerFunctionKey
@@ -131,6 +189,10 @@ struct Mapping: Codable, Equatable {
     init(
         action: ActionKind = .openApplication,
         command: String = "",
+        macOSShortcutContent: String? = nil,
+        appleScriptContent: String? = nil,
+        shellCommandContent: String? = nil,
+        automationEnabled: Bool = false,
         keyboardShortcut: KeyboardShortcut? = nil,
         remoteTriggerModifiers: Set<KeyboardShortcut.Modifier> = [],
         remoteTriggerFunctionKey: UInt16? = nil,
@@ -138,6 +200,10 @@ struct Mapping: Codable, Equatable {
     ) {
         self.action = action
         self.command = command
+        self.macOSShortcutContent = macOSShortcutContent
+        self.appleScriptContent = appleScriptContent
+        self.shellCommandContent = shellCommandContent
+        self.automationEnabled = automationEnabled
         self.keyboardShortcut = keyboardShortcut
         self.remoteTriggerModifiers = remoteTriggerModifiers
         self.remoteTriggerFunctionKey = remoteTriggerFunctionKey
@@ -148,6 +214,10 @@ struct Mapping: Codable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         action = try container.decodeIfPresent(ActionKind.self, forKey: .action) ?? .openApplication
         command = try container.decodeIfPresent(String.self, forKey: .command) ?? ""
+        macOSShortcutContent = try container.decodeIfPresent(String.self, forKey: .macOSShortcutContent)
+        appleScriptContent = try container.decodeIfPresent(String.self, forKey: .appleScriptContent)
+        shellCommandContent = try container.decodeIfPresent(String.self, forKey: .shellCommandContent)
+        automationEnabled = try container.decodeIfPresent(Bool.self, forKey: .automationEnabled) ?? false
         keyboardShortcut = try container.decodeIfPresent(KeyboardShortcut.self, forKey: .keyboardShortcut)
         remoteTriggerModifiers = try container.decodeIfPresent(
             Set<KeyboardShortcut.Modifier>.self,
@@ -161,6 +231,10 @@ struct Mapping: Codable, Equatable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(action, forKey: .action)
         try container.encode(command, forKey: .command)
+        try container.encodeIfPresent(macOSShortcutContent, forKey: .macOSShortcutContent)
+        try container.encodeIfPresent(appleScriptContent, forKey: .appleScriptContent)
+        try container.encodeIfPresent(shellCommandContent, forKey: .shellCommandContent)
+        try container.encode(automationEnabled, forKey: .automationEnabled)
         try container.encodeIfPresent(keyboardShortcut, forKey: .keyboardShortcut)
         try container.encode(
             KeyboardShortcut.modifierOrder.filter { remoteTriggerModifiers.contains($0) },
@@ -168,5 +242,94 @@ struct Mapping: Codable, Equatable {
         )
         try container.encodeIfPresent(remoteTriggerFunctionKey, forKey: .remoteTriggerFunctionKey)
         try container.encode(usesTapApplication, forKey: .usesTapApplication)
+    }
+
+    /// Returns a copy suitable for an explicit action-picker transition.
+    /// Command content is preserved unless the chosen action is one of the
+    /// fixed-choice editors and the stored value is invalid. In every case,
+    /// changing the action disarms process-backed automation.
+    func selectingAction(_ action: ActionKind, profileName: String? = nil) -> Self {
+        var updated = self
+        updated.stashActiveProcessCommand()
+        updated.action = action
+        updated.automationEnabled = false
+
+        if action.isProcessBackedAutomation {
+            updated.command = updated.savedProcessCommand(for: action) ?? ""
+        } else if let defaultCommand = Self.defaultCommand(
+            for: action,
+            profileName: profileName,
+            replacingInvalid: true,
+            currentCommand: updated.command
+        ) {
+            updated.command = defaultCommand
+        }
+        return updated
+    }
+
+    /// Returns a copy after command text was deliberately edited. Keeping
+    /// the command is important for review workflows, but executable actions
+    /// must be re-enabled explicitly after any edit.
+    func editingCommand(_ command: String) -> Self {
+        var updated = self
+        updated.command = command
+        updated.updateActiveProcessContent()
+        updated.automationEnabled = false
+        return updated
+    }
+
+    private mutating func stashActiveProcessCommand() {
+        updateActiveProcessContent()
+    }
+
+    private mutating func updateActiveProcessContent() {
+        switch action {
+        case .macOSShortcut:
+            macOSShortcutContent = command
+        case .appleScript:
+            appleScriptContent = command
+        case .shellCommand:
+            shellCommandContent = command
+        default:
+            break
+        }
+    }
+
+    private func savedProcessCommand(for action: ActionKind) -> String? {
+        switch action {
+        case .macOSShortcut:
+            macOSShortcutContent
+        case .appleScript:
+            appleScriptContent
+        case .shellCommand:
+            shellCommandContent
+        default:
+            nil
+        }
+    }
+
+    static func defaultCommand(
+        for action: ActionKind,
+        profileName: String?,
+        replacingInvalid: Bool,
+        currentCommand: String
+    ) -> String? {
+        switch action {
+        case .mediaControl:
+            guard replacingInvalid, MediaControlAction(rawValue: currentCommand) == nil else { return nil }
+            return MediaControlAction.playPause.rawValue
+        case .windowDisplay:
+            guard replacingInvalid, WindowDisplayAction(rawValue: currentCommand) == nil else { return nil }
+            return WindowDisplayAction.minimize.rawValue
+        case .switchProfile:
+            guard replacingInvalid, let profileName, !profileName.isEmpty else { return nil }
+            return profileName
+        default:
+            return nil
+        }
+    }
+
+    var needsAutomationReview: Bool {
+        action.isProcessBackedAutomation && !automationEnabled
     }
 }

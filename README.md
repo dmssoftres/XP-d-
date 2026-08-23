@@ -77,6 +77,33 @@ post-event access is required; physical button input only checks that permission
 silently. Older text-only shortcut mappings remain visible but must be
 re-recorded before XP[d] will execute them.
 
+## Additional Standard actions
+
+- **Run macOS Shortcut** stores a Shortcut name and runs it through the system
+  `shortcuts` tool.
+- **Run AppleScript** provides a multiline AppleScript editor and executes the
+  saved source with `osascript`.
+- **Run shell command** provides a multiline zsh editor and runs the saved
+  command with the current macOS user's permissions.
+- **Media control** offers Play/Pause, Next, Previous, Volume Up, Volume Down,
+  and Mute.
+- **Window / display action** offers Minimize frontmost window, Toggle full
+  screen, Hide frontmost application, and Sleep displays.
+- **Switch profile** selects from the current profile list. Renaming a profile
+  retargets mappings that point to it; a deleted target fails visibly.
+- **No action** intentionally performs nothing and needs no configuration.
+
+Shortcut, AppleScript, and shell mappings preserve their stored content but stay
+in **Review required** state until **Enable automation** is selected. Editing the
+content or changing its action disables it again. Imported automation is always
+disabled locally, even if the exported file marked it enabled. At most four
+process-backed actions may run concurrently; duplicate invocations are rejected,
+and each run receives a termination request after 30 seconds. Its bounded slot
+remains occupied until that original process exits.
+
+Only import configurations containing automation from a trusted source. These
+actions can perform any operation available to the current user account.
+
 ## Remote trigger chords
 
 In a Standard K-button mapping, **Remote trigger** records the physical button
