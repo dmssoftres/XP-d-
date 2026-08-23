@@ -464,35 +464,31 @@ struct RemoteView: View {
             applicationRouteIcon(for: route.target, size: 14)
                 .frame(maxWidth: .infinity)
         } else {
-            HStack(spacing: 1) {
-                applicationRouteIcon(for: route.target, size: 9)
-                modifierRouteLabel(route.modifierControls)
-            }
-            .foregroundStyle(.white.opacity(0.95))
-            .padding(.horizontal, 2)
-            .frame(maxWidth: .infinity, minHeight: 15, maxHeight: 15)
-            .background {
-                modifierRouteFill(route.modifierControls)
-                    .clipShape(Capsule())
-            }
-            .overlay {
-                Capsule()
-                    .strokeBorder(
-                        modifierRouteStroke(route.modifierControls),
-                        lineWidth: 0.75
-                    )
-            }
+            applicationRouteIcon(for: route.target, size: 14)
+                .padding(2)
+                .frame(width: 18, height: 18)
+                .background {
+                    modifierRouteFill(route.modifierControls)
+                        .clipShape(Capsule())
+                }
+                .overlay {
+                    Capsule()
+                        .strokeBorder(
+                            modifierRouteStroke(route.modifierControls),
+                            lineWidth: 0.75
+                        )
+                }
         }
     }
 
     private func modifierRouteFill(_ modifiers: Set<RemoteControl>) -> some View {
         let colors = modifierRouteColors(modifiers)
         if colors.count <= 1 {
-            return AnyView((colors.first ?? ModifierColor.orange.swiftUIColor).opacity(0.30))
+            return AnyView((colors.first ?? ModifierColor.orange.swiftUIColor).opacity(0.48))
         }
         return AnyView(
             LinearGradient(
-                colors: colors.map { $0.opacity(0.30) },
+                colors: colors.map { $0.opacity(0.48) },
                 startPoint: .leading,
                 endPoint: .trailing
             )
@@ -513,28 +509,6 @@ struct RemoteView: View {
         RemoteControl.allCases
             .filter { modifiers.contains($0) }
             .map { store.modifierColor(for: $0).swiftUIColor }
-    }
-
-    @ViewBuilder
-    private func modifierRouteLabel(_ modifiers: Set<RemoteControl>) -> some View {
-        let labels = RemoteControl.allCases
-            .filter { modifiers.contains($0) }
-            .map(\.rawValue)
-        if labels.count <= 1 {
-            Text(labels.first ?? "MOD")
-                .font(.system(size: 5.5, weight: .bold, design: .rounded))
-                .lineLimit(1)
-                .minimumScaleFactor(0.6)
-        } else {
-            VStack(spacing: -2) {
-                ForEach(labels, id: \.self) { label in
-                    Text(label)
-                        .font(.system(size: 4.5, weight: .bold, design: .rounded))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.55)
-                }
-            }
-        }
     }
 
     private func standardButtonAccessibilityLabel(

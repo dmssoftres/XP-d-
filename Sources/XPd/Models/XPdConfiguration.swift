@@ -438,7 +438,20 @@ struct XPdConfiguration: Codable, Equatable {
             try legacy.validateV6()
             return XPdConfiguration(
                 version: currentVersion,
-                profiles: legacy.profiles,
+                profiles: legacy.profiles.map { profile in
+                    Profile(
+                        name: profile.name,
+                        mappings: profile.mappings,
+                        hidBindings: profile.hidBindings,
+                        realm: profile.realm,
+                        midiSettings: profile.midiSettings,
+                        standardButtonTitles: profile.standardButtonTitles,
+                        remoteModifierControls: profile.remoteModifierControls,
+                        modifierColors: profile.remoteModifierControls.map {
+                            ModifierColorEntry(control: $0, color: .orange)
+                        }
+                    )
+                },
                 profileName: legacy.profileName,
                 showsInputOverlay: legacy.showsInputOverlay,
                 activeRealm: legacy.activeRealm,

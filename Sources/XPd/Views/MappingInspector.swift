@@ -148,6 +148,8 @@ struct MappingInspector: View {
                 .padding(6)
             }
 
+            standardHIDCompatibility
+
             if store.selectedControl == .wheelCenter {
                 Label("Hold the center, rotate to highlight a profile, then release to confirm.", systemImage: "dial.medium")
                     .font(.callout)
@@ -241,6 +243,52 @@ struct MappingInspector: View {
         if !store.hid.hasInputAccess { return "Permission required" }
         if !store.hid.hasExclusiveControl { return "Control unavailable" }
         return store.hid.isConnected ? "Connected" : "Offline"
+    }
+
+    @ViewBuilder
+    private var standardHIDCompatibility: some View {
+        if store.activeRealm == .standard {
+            let kControls = RemoteControl.allCases.filter(\.isMIDIButton)
+            let learnedCount = kControls.reduce(into: 0) { count, control in
+                if store.hidBinding(for: control).flatMap(HIDKeyboardReport.init(signature:)) != nil {
+                    count += 1
+                }
+            }
+            let collisions = store.standardHIDCollisions()
+            let rolloverCollisions = store.standardHIDRolloverCollisions()
+
+            GroupBox("K-input compatibility") {
+                VStack(alignment: .leading, spacing: 6) {
+                    if learnedCount == kControls.count && collisions.isEmpty && rolloverCollisions.isEmpty {
+                        Label("All ten learned K inputs are independent.", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                    } else if collisions.isEmpty && rolloverCollisions.isEmpty {
+                        Text("Learned \(learnedCount) of \(kControls.count) parseable K inputs. Learn all ten to verify compatibility.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        if !collisions.isEmpty {
+                            Text("Learned keyboard assignments overlap:")
+                                .foregroundStyle(.orange)
+                            ForEach(collisions, id: \.self) { collision in
+                                Text("• \(collision.firstControl.rawValue) held → \(collision.hiddenControl.rawValue) hidden")
+                            }
+                        }
+                        if !rolloverCollisions.isEmpty {
+                            Text("Some learned pairs exceed six-key boot-keyboard rollover:")
+                                .foregroundStyle(.orange)
+                            ForEach(rolloverCollisions, id: \.self) { collision in
+                                Text("• \(collision.firstControl.rawValue) + \(collision.secondControl.rawValue) require \(collision.combinedOrdinaryKeyCount) ordinary keys")
+                            }
+                        }
+                        Text("This is inferred from the learned report-6 bindings, not a live hardware observation. Relearn affected buttons with distinct shortcuts in the remote settings.")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .font(.caption)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(4)
+            }
+        }
     }
 
     // MARK: MIDI editor
@@ -806,13 +854,28 @@ struct MappingInspector: View {
             for: store.selectedControl,
             modifierControls: store.selectedMappingModifiers
         )
+        let rolloverCollisions = store.standardHIDRolloverCollisions().filter { collision in
+            (collision.firstControl == store.selectedControl
+                && store.selectedMappingModifiers.contains(collision.secondControl))
+                || (collision.secondControl == store.selectedControl
+                    && store.selectedMappingModifiers.contains(collision.firstControl))
+        }
 
-        if !collisions.isEmpty {
+        if !collisions.isEmpty || !rolloverCollisions.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
                 ForEach(collisions, id: \.self) { collision in
                     Label {
                         Text(
-                            "This remote sends \(collision.firstControl.rawValue) then \(collision.hiddenControl.rawValue) as \(collision.firstControl.rawValue) only, so XP[d] cannot detect the second button. Assign either button a different shortcut in the remote's settings, then use Learn selected control in Status & Input."
+                            "The learned keyboard assignments overlap: \(collision.firstControl.rawValue) held can hide \(collision.hiddenControl.rawValue). XP[d] infers this from the saved report-6 bindings, so relearn one affected button with a distinct shortcut in the remote's settings, then use Learn selected control in Status & Input."
+                        )
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                    }
+                }
+                ForEach(rolloverCollisions, id: \.self) { collision in
+                    Label {
+                        Text(
+                            "The learned keyboard states for \(collision.firstControl.rawValue) + \(collision.secondControl.rawValue) require \(collision.combinedOrdinaryKeyCount) ordinary keys, exceeding the six-key boot-keyboard rollover capacity. XP[d] infers this from the saved report-6 bindings; relearn an affected button with a distinct shortcut in the remote's settings."
                         )
                     } icon: {
                         Image(systemName: "exclamationmark.triangle.fill")
@@ -930,30 +993,32 @@ struct MappingInspector: View {
         HStack(spacing: 10) {
             Text("K modifier")
 
-            HStack(spacing: 5) {
-                ForEach(ModifierColor.allCases) { color in
-                    Button {
-                        _ = store.setModifierColor(color, for: store.selectedControl)
-                    } label: {
-                        Circle()
-                            .fill(color.swiftUIColor)
-                            .frame(width: 17, height: 17)
-                            .overlay {
-                                Circle()
-                                    .stroke(.white, lineWidth: store.modifierColor(for: store.selectedControl) == color ? 2 : 0)
-                                if store.modifierColor(for: store.selectedControl) == color {
-                                    Image(systemName: "checkmark")
-                                        .font(.system(size: 8, weight: .bold))
-                                        .foregroundStyle(.black.opacity(0.72))
+            if store.isRemoteModifier(store.selectedControl) {
+                HStack(spacing: 5) {
+                    ForEach(ModifierColor.allCases) { color in
+                        Button {
+                            _ = store.setModifierColor(color, for: store.selectedControl)
+                        } label: {
+                            Circle()
+                                .fill(color.swiftUIColor)
+                                .frame(width: 17, height: 17)
+                                .overlay {
+                                    Circle()
+                                        .stroke(.white, lineWidth: store.modifierColor(for: store.selectedControl) == color ? 2 : 0)
+                                    if store.modifierColor(for: store.selectedControl) == color {
+                                        Image(systemName: "checkmark")
+                                            .font(.system(size: 8, weight: .bold))
+                                            .foregroundStyle(.black.opacity(0.78))
+                                    }
                                 }
-                            }
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("\(color.displayName) modifier colour")
+                        .accessibilityValue(
+                            store.modifierColor(for: store.selectedControl) == color ? "Selected" : "Not selected"
+                        )
+                        .help("Use \(color.displayName) for this modifier")
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("\(color.displayName) modifier colour")
-                    .accessibilityValue(
-                        store.modifierColor(for: store.selectedControl) == color ? "Selected" : "Not selected"
-                    )
-                    .help("Use \(color.displayName) for this modifier")
                 }
             }
 

@@ -244,8 +244,8 @@ final class MappingStore {
     /// profile-scoped and intentionally empty when decoding older data.
     private(set) var remoteModifierControls: Set<RemoteControl> = []
     /// Profile-scoped presentation metadata for eligible K controls. This is
-    /// independent of designation so a colour can be selected before enabling
-    /// a modifier and survives a later disable/re-enable cycle.
+    /// independent of designation so the selected colour survives a later
+    /// disable/re-enable cycle even though inactive controls hide the palette.
     private(set) var modifierColors: [RemoteControl: ModifierColor] = [:]
     /// Optional labels for Standard-mode K buttons. MIDI profiles never
     /// populate this dictionary; titles are shared across gestures.
@@ -836,20 +836,17 @@ final class MappingStore {
         guard remoteModifierControls.contains(control) != enabled else { return true }
         cancelPendingButtonGestures()
         if enabled {
-            remoteModifierControls.insert(control)
-            let hadExplicitBinding = hidBindings[control] != nil
-            _ = repairMissingModifierBinding(for: control)
-            guard hadExplicitBinding || hidBindings[control] != nil else {
-                // A designated modifier must not be enabled without a
-                // usable input. The repair helper has already reported a
-                // factory-signature conflict when one caused this failure.
-                remoteModifierControls.remove(control)
-                sanitizeSelectedMappingModifier()
+            guard let binding = hidBindings[control],
+                  !binding.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                lastActionResult = .failure(
+                    "Learn \(control.rawValue)'s HID input in Status & Input before enabling it as a modifier."
+                )
                 return false
             }
+            remoteModifierControls.insert(control)
             if modifierColors[control] == nil {
                 // Compute before this control participates in the active set;
-                // this is also what the pre-enable query returns.
+                // this matches the store's deterministic suggested colour.
                 modifierColors[control] = suggestedModifierColor(excluding: control)
             }
             if selectedControl == control {
@@ -1827,6 +1824,22 @@ final class MappingStore {
             modifierControls: modifierControls,
             bindings: hidBindings
         )
+    }
+
+    /// Reports every order-specific masking collision among the learned
+    /// report-6 keyboard states for K1–K10. This is inferred from persisted
+    /// bindings and intentionally does not claim a live hardware observation.
+    func standardHIDCollisions() -> [HIDKeyboardReportCollision] {
+        guard activeRealm == .standard else { return [] }
+        return HIDKeyboardReportCollisionAnalyzer.collisions(among: hidBindings)
+    }
+
+    /// Reports learned K pairs that exceed the six ordinary-key slots of the
+    /// report-6 boot-keyboard collection. This is inferred from saved
+    /// bindings and does not claim a live hardware observation.
+    func standardHIDRolloverCollisions() -> [HIDKeyboardReportRolloverCollision] {
+        guard activeRealm == .standard else { return [] }
+        return HIDKeyboardReportCollisionAnalyzer.rolloverCollisions(among: hidBindings)
     }
 
     /// Internal test seam for exercising HID-driven state transitions without
@@ -3076,16 +3089,27 @@ final class MappingStore {
         mappings = state.mappings
         hidBindings = state.hidBindings
         standardButtonTitles = state.standardButtonTitles
-        remoteModifierControls = state.remoteModifierControls.filter(\.isModifierEligible)
+        remoteModifierControls = state.remoteModifierControls.filter { control in
+            guard control.isModifierEligible,
+                  let binding = state.hidBindings[control] else { return false }
+            return !binding.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
         modifierColors = state.modifierColors.filter { $0.key.isModifierEligible }
         selectedMappingModifiers = []
         activeRealm = state.realm
         midiSettings = state.midiSettings
-        if repairMissingModifierBindings() {
-            // The callers already persist profile activation. Updating the
-            // in-memory profile state here makes that existing save include
-            // any repaired modifier binding without changing the schema.
+        let persistedModifiers = state.remoteModifierControls.filter(\.isModifierEligible)
+        let disabledUnboundModifiers = persistedModifiers.subtracting(remoteModifierControls)
+        if !disabledUnboundModifiers.isEmpty {
+            let controls = RemoteControl.allCases
+                .filter { disabledUnboundModifiers.contains($0) }
+                .map(\.rawValue)
+                .joined(separator: ", ")
+            lastActionResult = .failure(
+                "Disabled modifier designation for \(controls) because a learned HID input is missing. Learn each input in Status & Input first."
+            )
             saveActiveProfile(named: name)
+            saveAllProfiles()
         }
         if activeRealm == .midi {
             lastMIDIProfileName = name
@@ -3102,41 +3126,6 @@ final class MappingStore {
                 systemImage: "lock.open"
             )
         }
-    }
-
-    /// Restores only the known factory binding for a designated Standard K
-    /// modifier when that binding is absent. Learned/custom bindings remain
-    /// authoritative, and a factory signature already owned by another
-    /// control is never stolen.
-    @discardableResult
-    private func repairMissingModifierBindings() -> Bool {
-        var repaired = false
-        for control in RemoteControl.allCases where remoteModifierControls.contains(control) {
-            repaired = repairMissingModifierBinding(for: control) || repaired
-        }
-        return repaired
-    }
-
-    @discardableResult
-    private func repairMissingModifierBinding(for control: RemoteControl) -> Bool {
-        guard activeRealm == .standard,
-              remoteModifierControls.contains(control),
-              hidBindings[control] == nil,
-              let factoryBinding = Self.defaultHIDBindings[control] else {
-            return false
-        }
-
-        if let conflictingControl = hidBindings.first(where: { otherControl, binding in
-            otherControl != control && binding == factoryBinding
-        })?.key {
-            lastActionResult = .failure(
-                "\(control.rawValue) remains unbound because its factory HID input is already assigned to \(conflictingControl.rawValue)."
-            )
-            return false
-        }
-
-        hidBindings[control] = factoryBinding
-        return true
     }
 
     private func saveAllProfiles() {

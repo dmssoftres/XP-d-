@@ -191,6 +191,8 @@ final class XPdConfigurationTests: XCTestCase {
 
         XCTAssertEqual(upgraded.version, XPdConfiguration.currentVersion)
         XCTAssertEqual(upgraded.profiles[0].remoteModifierControls, [.k3])
+        XCTAssertEqual(upgraded.profiles[0].modifierColors.map(\.control), [.k3])
+        XCTAssertEqual(upgraded.profiles[0].modifierColors.map(\.color), [.orange])
         XCTAssertEqual(mapping.mapping.remoteTriggerModifiers, [.control])
         XCTAssertEqual(mapping.mapping.remoteTriggerFunctionKey, 118)
         XCTAssertNil(mapping.mapping.remoteTriggerKeyCode)

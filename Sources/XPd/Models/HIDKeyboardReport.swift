@@ -8,10 +8,11 @@ import Foundation
 /// signature supports both collision guidance and safe decomposition of
 /// unmatched composite reports.
 struct HIDKeyboardReport: Equatable {
+    /// The six ordinary-key slots in a USB boot-keyboard report.
+    static let bootKeyboardOrdinaryKeyCapacity = 6
+
     let modifierByte: UInt8
     let keyUsages: Set<UInt8>
-
-    private static let keySlotCount = 6
 
     init(modifierByte: UInt8, keyUsages: Set<UInt8>) {
         self.modifierByte = modifierByte
@@ -46,10 +47,10 @@ struct HIDKeyboardReport: Equatable {
             bytes.append(parsed)
         }
 
-        if bytes.count == Self.keySlotCount + 2, bytes.first == 0x06 {
+        if bytes.count == Self.bootKeyboardOrdinaryKeyCapacity + 2, bytes.first == 0x06 {
             bytes.removeFirst()
         }
-        guard bytes.count == Self.keySlotCount + 1 else { return nil }
+        guard bytes.count == Self.bootKeyboardOrdinaryKeyCapacity + 1 else { return nil }
 
         self.init(
             modifierByte: bytes[0],
@@ -63,7 +64,7 @@ struct HIDKeyboardReport: Equatable {
     /// an exact collision.
     func merged(with other: HIDKeyboardReport) -> HIDKeyboardReport? {
         let usages = keyUsages.union(other.keyUsages)
-        guard usages.count <= Self.keySlotCount else { return nil }
+        guard usages.count <= Self.bootKeyboardOrdinaryKeyCapacity else { return nil }
         return HIDKeyboardReport(
             modifierByte: modifierByte | other.modifierByte,
             keyUsages: usages
@@ -79,7 +80,80 @@ struct HIDKeyboardReportCollision: Equatable, Hashable {
     let hiddenControl: RemoteControl
 }
 
+/// A pair of individually parseable report-6 keyboard states whose ordinary
+/// key union exceeds the six-key boot-keyboard rollover capacity. Unlike a
+/// masking collision, neither control is asserted to be hidden; the combined
+/// state simply cannot be represented losslessly by this collection.
+struct HIDKeyboardReportRolloverCollision: Equatable, Hashable {
+    let firstControl: RemoteControl
+    let secondControl: RemoteControl
+    let combinedOrdinaryKeyCount: Int
+}
+
 enum HIDKeyboardReportCollisionAnalyzer {
+    /// Finds every order-specific masking collision among the learned K
+    /// controls. The report is a keyboard state snapshot, so a second
+    /// control is hidden when merging its learned state with the first
+    /// produces the first control's state unchanged.
+    ///
+    /// Results are deterministic: controls are compared in their physical
+    /// K-button order, and each pair is returned in the order(s) that mask.
+    static func collisions(
+        among bindings: [RemoteControl: String]
+    ) -> [HIDKeyboardReportCollision] {
+        let controls = RemoteControl.allCases.filter(\.isMIDIButton)
+        return controls.indices.dropLast().flatMap { firstIndex in
+            controls[(firstIndex + 1)...].flatMap { second in
+                collisions(
+                    between: controls[firstIndex],
+                    and: second,
+                    bindings: bindings
+                )
+            }
+        }
+    }
+
+    /// Finds every pair of learned K controls whose individually valid
+    /// report-6 states require more ordinary-key slots than boot-keyboard
+    /// rollover can carry. Results use physical K-button order.
+    static func rolloverCollisions(
+        among bindings: [RemoteControl: String]
+    ) -> [HIDKeyboardReportRolloverCollision] {
+        let controls = RemoteControl.allCases.filter(\.isMIDIButton)
+        return controls.indices.dropLast().flatMap { firstIndex in
+            controls[(firstIndex + 1)...].compactMap { second in
+                rolloverCollision(
+                    between: controls[firstIndex],
+                    and: second,
+                    bindings: bindings
+                )
+            }
+        }
+    }
+
+    /// Finds a rollover-incompatible pair in one physical order. The pair is
+    /// not a directional hidden-control claim: either order exceeds the same
+    /// ordinary-key capacity.
+    static func rolloverCollision(
+        between first: RemoteControl,
+        and second: RemoteControl,
+        bindings: [RemoteControl: String]
+    ) -> HIDKeyboardReportRolloverCollision? {
+        guard first != second,
+              let firstReport = bindings[first].flatMap(HIDKeyboardReport.init(signature:)),
+              let secondReport = bindings[second].flatMap(HIDKeyboardReport.init(signature:)) else {
+            return nil
+        }
+
+        let combinedCount = firstReport.keyUsages.union(secondReport.keyUsages).count
+        guard combinedCount > HIDKeyboardReport.bootKeyboardOrdinaryKeyCapacity else { return nil }
+        return HIDKeyboardReportRolloverCollision(
+            firstControl: first,
+            secondControl: second,
+            combinedOrdinaryKeyCount: combinedCount
+        )
+    }
+
     /// Finds exact masking collisions for one destination and its selected
     /// Standard modifier controls.
     static func collisions(

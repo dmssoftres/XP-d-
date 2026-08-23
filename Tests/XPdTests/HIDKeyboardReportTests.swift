@@ -81,6 +81,67 @@ final class HIDKeyboardReportTests: XCTestCase {
         )
     }
 
+    func testAllLearnedFactoryBindingsReportEveryOrderSpecificMaskingPair() {
+        let bindings: [RemoteControl: String] = [
+            .k1: "r6:01 12 00 00 00 00 00",
+            .k2: "r6:01 11 00 00 00 00 00",
+            .k3: "r6:00 3E 00 00 00 00 00",
+            .k4: "r6:02 00 00 00 00 00 00",
+            .k5: "r6:01 00 00 00 00 00 00",
+            .k6: "r6:04 00 00 00 00 00 00",
+            .k7: "r6:01 16 00 00 00 00 00",
+            .k8: "r6:01 1D 00 00 00 00 00",
+            .k9: "r6:00 2C 00 00 00 00 00",
+            .k10: "r6:03 1D 00 00 00 00 00"
+        ]
+
+        XCTAssertEqual(
+            Set(HIDKeyboardReportCollisionAnalyzer.collisions(among: bindings)),
+            Set([
+                HIDKeyboardReportCollision(firstControl: .k1, hiddenControl: .k5),
+                HIDKeyboardReportCollision(firstControl: .k2, hiddenControl: .k5),
+                HIDKeyboardReportCollision(firstControl: .k7, hiddenControl: .k5),
+                HIDKeyboardReportCollision(firstControl: .k8, hiddenControl: .k5),
+                HIDKeyboardReportCollision(firstControl: .k10, hiddenControl: .k4),
+                HIDKeyboardReportCollision(firstControl: .k10, hiddenControl: .k5),
+                HIDKeyboardReportCollision(firstControl: .k10, hiddenControl: .k8)
+            ])
+        )
+        XCTAssertTrue(HIDKeyboardReportCollisionAnalyzer.rolloverCollisions(among: bindings).isEmpty)
+    }
+
+    func testUniqueFunctionKeyBindingsHaveNoContainmentCollisions() {
+        let bindings = Dictionary(uniqueKeysWithValues: RemoteControl.allCases
+            .filter(\.isMIDIButton)
+            .enumerated()
+            .map { index, control in
+                (control, String(format: "r6:00 %02X 00 00 00 00 00", 0x68 + index))
+            })
+
+        XCTAssertTrue(HIDKeyboardReportCollisionAnalyzer.collisions(among: bindings).isEmpty)
+        XCTAssertTrue(HIDKeyboardReportCollisionAnalyzer.rolloverCollisions(among: bindings).isEmpty)
+    }
+
+    func testIndividuallyParseableMultiKeyReportsExposeRolloverCapacityPair() {
+        let first = "r6:00 04 05 06 07 00 00"
+        let second = "r6:00 08 09 0A 0B 00 00"
+        XCTAssertNotNil(HIDKeyboardReport(signature: first))
+        XCTAssertNotNil(HIDKeyboardReport(signature: second))
+
+        XCTAssertEqual(
+            HIDKeyboardReportCollisionAnalyzer.rolloverCollisions(
+                among: [.k1: first, .k2: second]
+            ),
+            [
+                HIDKeyboardReportRolloverCollision(
+                    firstControl: .k1,
+                    secondControl: .k2,
+                    combinedOrdinaryKeyCount: 8
+                )
+            ]
+        )
+    }
+
     func testReportParserNormalizesZeroSlotsAndKeyOrder() {
         let ordered = HIDKeyboardReport(signature: "r6:01 1D 00 00 00 00 00")
         let reordered = HIDKeyboardReport(signature: "R6:01 00 00 1D 00 00 00")

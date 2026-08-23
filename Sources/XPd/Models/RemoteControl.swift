@@ -27,10 +27,12 @@ enum RemoteControl: String, CaseIterable, Codable, Identifiable {
 enum ModifierColor: String, CaseIterable, Codable, Identifiable {
     case orange = "orange"
     case yellow = "yellow"
+    case green = "green"
     case cyan = "cyan"
     case blue = "blue"
     case purple = "purple"
     case pink = "pink"
+    case red = "red"
 
     var id: String { rawValue }
 

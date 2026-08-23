@@ -19,19 +19,22 @@ final class ModifierColorTests: XCTestCase {
         super.tearDown()
     }
 
-    func testPaletteHasSixStableChoicesInOrder() {
+    func testPaletteHasEightStableChoicesInOrder() {
         XCTAssertEqual(
             ModifierColor.allCases,
-            [.orange, .yellow, .cyan, .blue, .purple, .pink]
+            [.orange, .yellow, .green, .cyan, .blue, .purple, .pink, .red]
         )
         XCTAssertEqual(
             ModifierColor.allCases.map(\.rawValue),
-            ["orange", "yellow", "cyan", "blue", "purple", "pink"]
+            ["orange", "yellow", "green", "cyan", "blue", "purple", "pink", "red"]
         )
-        XCTAssertEqual(ModifierColor.allCases.map(\.displayName), ["Orange", "Yellow", "Cyan", "Blue", "Purple", "Pink"])
+        XCTAssertEqual(
+            ModifierColor.allCases.map(\.displayName),
+            ["Orange", "Yellow", "Green", "Cyan", "Blue", "Purple", "Pink", "Red"]
+        )
     }
 
-    func testPreEnableSuggestionMatchesColourAssignedWhenEnabled() {
+    func testSuggestedColourMatchesColourAssignedWhenEnabled() {
         let store = makeStore()
         let suggested = store.modifierColor(for: .k3)
 
@@ -68,13 +71,13 @@ final class ModifierColorTests: XCTestCase {
 
     func testPortableV8RoundTripIsDeterministic() throws {
         let store = makeStore()
-        XCTAssertTrue(store.setModifierColor(.yellow, for: .k8))
-        XCTAssertTrue(store.setModifierColor(.blue, for: .k3))
+        XCTAssertTrue(store.setModifierColor(.green, for: .k8))
+        XCTAssertTrue(store.setModifierColor(.red, for: .k3))
         let first = try XCTUnwrap(store.exportConfiguration())
         let decoded = try XPdConfiguration.decode(first)
         let global = try XCTUnwrap(decoded.profiles.first(where: { $0.name == "Global" }))
         XCTAssertEqual(global.modifierColors.map(\.control), [.k3, .k8])
-        XCTAssertEqual(global.modifierColors.map(\.color), [.blue, .yellow])
+        XCTAssertEqual(global.modifierColors.map(\.color), [.red, .green])
         XCTAssertEqual(first, try decoded.encodedData())
     }
 
@@ -105,6 +108,42 @@ final class ModifierColorTests: XCTestCase {
         XCTAssertEqual(profile.modifierColors.map(\.control), [.k3])
         XCTAssertEqual(profile.modifierColors.map(\.color), [.orange])
         XCTAssertEqual(profile.mappings.first?.mapping.command, "Finder")
+    }
+
+    func testPersistedVersionSevenProfilesMigrateToV8WithOrangeModifierColour() throws {
+        let source = makeStore()
+        XCTAssertTrue(source.setRemoteModifier(.k3, enabled: true))
+        source.update(
+            Mapping(action: .openApplication, command: "Finder"),
+            for: .k1,
+            gesture: .tap,
+            modifierControls: [.k3]
+        )
+
+        let currentData = try XCTUnwrap(defaults.data(forKey: "XPd.profiles.v8"))
+        var root = try XCTUnwrap(JSONSerialization.jsonObject(with: currentData) as? [String: Any])
+        root["version"] = XPdConfiguration.preModifierColorsVersion
+        var profiles = try XCTUnwrap(root["profiles"] as? [[String: Any]])
+        for index in profiles.indices {
+            var state = try XCTUnwrap(profiles[index]["state"] as? [String: Any])
+            state.removeValue(forKey: "modifierColors")
+            profiles[index]["state"] = state
+        }
+        root["profiles"] = profiles
+        defaults.set(
+            try JSONSerialization.data(withJSONObject: root),
+            forKey: "XPd.profiles.v7"
+        )
+        defaults.removeObject(forKey: "XPd.profiles.v8")
+
+        let restored = makeStore()
+        XCTAssertTrue(restored.isRemoteModifier(.k3))
+        XCTAssertEqual(restored.modifierColor(for: .k3), .orange)
+        XCTAssertEqual(
+            restored.mapping(for: .k1, gesture: .tap, modifierControls: [.k3]).command,
+            "Finder"
+        )
+        XCTAssertNotNil(defaults.data(forKey: "XPd.profiles.v8"))
     }
 
     func testModifierColourValidationRejectsDuplicateNonKAndMIDIEntries() throws {

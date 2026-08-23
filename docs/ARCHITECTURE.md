@@ -37,14 +37,15 @@ displaced live controls cancel pending gestures. Inherited Hold/Double
 application targets are read at execution time; invalid Tap mappings stop before
 side effects.
 
-Configuration UI/profile-manager edits → `MappingStore` → one ordered version-7 profile collection in `UserDefaults`. Standard K1–K10 titles and designated K-modifier controls are profile-scoped and excluded from MIDI profiles. Mapping keys include an exact, deterministically encoded set of K-modifier controls; an empty set is the Base layer. A mapping stores keyboard modifier flags plus at most one ordinary key condition; the legacy F-key field remains losslessly supported. Renaming a non-Global profile replaces its name identity atomically while preserving order, realm, mappings, HID bindings, button titles, modifier designations, active selection, and remembered workspace targets. Versions 2–6 migrate without dropping supported data; v6 local profiles and portable documents are explicitly upgraded to v7. Imports validate realms, remembered profiles, typed MIDI values, exact mapping layers, keyboard trigger keys, bindings, and Standard metadata before one replacement.
+Configuration UI/profile-manager edits → `MappingStore` → one ordered version-8 profile collection in `UserDefaults`. Standard K1–K10 titles, designated K-modifier controls, and modifier colours are profile-scoped and excluded from MIDI profiles. Mapping keys include an exact, deterministically encoded set of K-modifier controls; an empty set is the Base layer. A mapping stores keyboard modifier flags plus at most one ordinary key condition; the legacy F-key field remains losslessly supported. Renaming a non-Global profile replaces its name identity atomically while preserving order, realm, mappings, HID bindings, button titles, modifier designations, colours, active selection, and remembered workspace targets. Versions 2–7 migrate without dropping supported data; v7 modifiers migrate to Orange. Imports validate realms, remembered profiles, typed MIDI values, exact mapping layers, keyboard trigger keys, bindings, and Standard metadata before one replacement.
 
-Standard profile activation/modifier enablement → if a designated K has no HID
-binding, consult its exact known factory binding → restore and persist only when
-that signature is unused. Existing learned bindings always win and conflicts are
-reported without reassignment. Clearing a designated modifier binding cancels
-pending input, removes the designation in the same save, and preserves all saved
-exact-layer mappings; clearing an unrelated control remains a plain clear.
+Standard profile activation/modifier enablement → require a non-empty learned HID
+binding for every designated K. Missing input fails closed: activation disables
+the designation and enablement reports Learn-first guidance without synthesizing
+a factory signature. Exact-layer mappings remain saved. Status & Input audits all
+learned K report pairs for order-specific masking; this is inferred compatibility,
+not a live hardware claim. Clearing a designated modifier binding cancels pending
+input and removes the designation in the same save.
 
 Standard K-layer input → accumulate report-6 K reports until an empty report-6
 release boundary → ignore empty reports 1, 7, and 9 from the device's unrelated

@@ -22,41 +22,36 @@ final class MappingStoreModifierBindingTests: XCTestCase {
         super.tearDown()
     }
 
-    func testPersistedDesignatedK10MissingBindingRepairsAndPersistsAcrossReload() throws {
+    func testPersistedDesignatedK10MissingBindingDisablesAndPersistsWithoutLosingLayers() throws {
         let source = makeStore()
         XCTAssertTrue(source.setRemoteModifier(.k10, enabled: true))
+        let layerMapping = Mapping(action: .openApplication, command: "saved K10 layer")
+        source.update(
+            layerMapping,
+            for: .k8,
+            gesture: .tap,
+            modifierControls: [.k10]
+        )
         try mutatePersistedProfiles { state in
             state["hidBindings"] = try removingBinding(for: .k10, from: state["hidBindings"])
         }
 
         let restored = makeStore()
         XCTAssertEqual(restored.profileName, "Global")
-        XCTAssertTrue(restored.isRemoteModifier(.k10))
-        XCTAssertEqual(restored.hidBinding(for: .k10), factoryK10Signature)
-
-        let reloaded = makeStore()
-        XCTAssertTrue(reloaded.isRemoteModifier(.k10))
-        XCTAssertEqual(reloaded.hidBinding(for: .k10), factoryK10Signature)
-    }
-
-    func testRepairDoesNotStealFactorySignatureOwnedByAnotherControl() throws {
-        let source = makeStore()
-        XCTAssertTrue(source.setRemoteModifier(.k10, enabled: true))
-        try mutatePersistedProfiles { state in
-            var bindings = try bindingPairs(from: state["hidBindings"])
-            bindings = removingBinding(for: .k10, from: bindings)
-            bindings.append(RemoteControl.k8.rawValue)
-            bindings.append(factoryK10Signature)
-            state["hidBindings"] = bindings
-        }
-
-        let restored = makeStore()
+        XCTAssertFalse(restored.isRemoteModifier(.k10))
         XCTAssertNil(restored.hidBinding(for: .k10))
-        XCTAssertEqual(restored.hidBinding(for: .k8), factoryK10Signature)
+        XCTAssertEqual(
+            restored.mapping(for: .k8, gesture: .tap, modifierControls: [.k10]),
+            layerMapping
+        )
 
         let reloaded = makeStore()
+        XCTAssertFalse(reloaded.isRemoteModifier(.k10))
         XCTAssertNil(reloaded.hidBinding(for: .k10))
-        XCTAssertEqual(reloaded.hidBinding(for: .k8), factoryK10Signature)
+        XCTAssertEqual(
+            reloaded.mapping(for: .k8, gesture: .tap, modifierControls: [.k10]),
+            layerMapping
+        )
     }
 
     func testExplicitCustomK10BindingIsPreserved() {
@@ -89,6 +84,53 @@ final class MappingStoreModifierBindingTests: XCTestCase {
         let restored = makeStore()
         XCTAssertEqual(restored.hidBinding(for: .k8), factoryK8Signature)
         XCTAssertEqual(restored.hidBinding(for: .k10), factoryK10Signature)
+    }
+
+    func testStoreAuditsAllLearnedKInputCollisions() {
+        let source = makeStore()
+
+        XCTAssertEqual(
+            Set(source.standardHIDCollisions()),
+            Set([
+                HIDKeyboardReportCollision(firstControl: .k1, hiddenControl: .k5),
+                HIDKeyboardReportCollision(firstControl: .k2, hiddenControl: .k5),
+                HIDKeyboardReportCollision(firstControl: .k7, hiddenControl: .k5),
+                HIDKeyboardReportCollision(firstControl: .k8, hiddenControl: .k5),
+                HIDKeyboardReportCollision(firstControl: .k10, hiddenControl: .k4),
+                HIDKeyboardReportCollision(firstControl: .k10, hiddenControl: .k5),
+                HIDKeyboardReportCollision(firstControl: .k10, hiddenControl: .k8)
+            ])
+        )
+        XCTAssertTrue(source.standardHIDRolloverCollisions().isEmpty)
+    }
+
+    func testStoreAuditsRolloverCapacityForParseableMultiKeyBindings() {
+        let source = makeStore()
+        for control in RemoteControl.allCases where control.isMIDIButton {
+            source.clearHIDBinding(for: control)
+        }
+
+        learn("r6:00 04 05 06 07 00 00", for: .k1, in: source)
+        learn("r6:00 08 09 0A 0B 00 00", for: .k2, in: source)
+
+        XCTAssertEqual(
+            source.standardHIDRolloverCollisions(),
+            [
+                HIDKeyboardReportRolloverCollision(
+                    firstControl: .k1,
+                    secondControl: .k2,
+                    combinedOrdinaryKeyCount: 8
+                )
+            ]
+        )
+    }
+
+    func testStandardCompatibilityAuditsAreEmptyInMIDIProfile() throws {
+        let source = makeStore()
+        _ = try source.addMIDIProfile(named: "MIDI")
+
+        XCTAssertEqual(source.standardHIDCollisions(), [])
+        XCTAssertEqual(source.standardHIDRolloverCollisions(), [])
     }
 
     func testDisconnectCancelsPendingLearningBeforeNextInput() {
@@ -150,7 +192,7 @@ final class MappingStoreModifierBindingTests: XCTestCase {
         )
     }
 
-    func testEnablingUnboundK10RepairsWhenFactorySignatureIsFree() {
+    func testEnablingUnboundK10FailsWithoutRestoringFactorySignature() {
         let source = makeStore()
         source.clearHIDBinding(for: .k10)
 
@@ -158,13 +200,25 @@ final class MappingStoreModifierBindingTests: XCTestCase {
         XCTAssertFalse(restored.isRemoteModifier(.k10))
         XCTAssertNil(restored.hidBinding(for: .k10))
 
-        XCTAssertTrue(restored.setRemoteModifier(.k10, enabled: true))
-        XCTAssertEqual(restored.hidBinding(for: .k10), factoryK10Signature)
-        XCTAssertEqual(makeStore().hidBinding(for: .k10), factoryK10Signature)
+        XCTAssertFalse(restored.setRemoteModifier(.k10, enabled: true))
+        XCTAssertFalse(restored.isRemoteModifier(.k10))
+        XCTAssertNil(restored.hidBinding(for: .k10))
+        XCTAssertEqual(
+            restored.lastActionResult,
+            .failure("Learn K10's HID input in Status & Input before enabling it as a modifier.")
+        )
+        XCTAssertNil(makeStore().hidBinding(for: .k10))
     }
 
     private func makeStore() -> MappingStore {
         MappingStore(userDefaults: defaults, startHardware: false)
+    }
+
+    private func learn(_ signature: String, for control: RemoteControl, in store: MappingStore) {
+        store.selectedControl = control
+        store.learnSelectedControl()
+        store.simulateHIDInputForTesting(signature)
+        XCTAssertEqual(store.hidBinding(for: control), signature)
     }
 
     private typealias JSONDictionary = [String: Any]
