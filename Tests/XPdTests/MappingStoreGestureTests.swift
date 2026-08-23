@@ -284,6 +284,223 @@ final class MappingStoreGestureTests: XCTestCase {
         XCTAssertEqual(executed, ["K3 layer", "K3 layer"])
     }
 
+    func testSequentialModifierReleaseThenPrimaryUsesPendingLayer() {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeStore(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+        store.setRemoteModifier(.k3, enabled: true)
+        store.update(Mapping(action: .openApplication, command: "base"), for: .k1, gesture: .tap)
+        store.update(
+            Mapping(action: .openApplication, command: "K3 layer"),
+            for: .k1,
+            gesture: .tap,
+            modifierControls: [.k3]
+        )
+
+        store.simulateHIDInputForTesting(k3Signature)
+        store.simulateHIDInputForTesting(nil)
+        scheduler.advance(by: 0.10)
+        store.simulateHIDInputForTesting(k1Signature)
+        store.simulateHIDInputForTesting(nil)
+        scheduler.advance(by: 0.30)
+
+        XCTAssertEqual(executed, ["K3 layer"])
+    }
+
+    func testStandaloneModifierTapWaitsForGraceWindow() {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeStore(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+        store.setRemoteModifier(.k3, enabled: true)
+        store.update(Mapping(action: .openApplication, command: "K3 tap"), for: .k3, gesture: .tap)
+
+        store.simulateHIDInputForTesting(k3Signature)
+        store.simulateHIDInputForTesting(nil)
+        scheduler.advance(by: 0.29)
+        XCTAssertTrue(executed.isEmpty)
+
+        scheduler.advance(by: 0.01)
+        XCTAssertEqual(executed, ["K3 tap"])
+    }
+
+    func testSequentialStackedModifiersResolveExactLayer() {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeStore(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+        store.setRemoteModifier(.k3, enabled: true)
+        store.setRemoteModifier(.k4, enabled: true)
+        store.update(
+            Mapping(action: .openApplication, command: "stacked layer"),
+            for: .k1,
+            gesture: .tap,
+            modifierControls: [.k3, .k4]
+        )
+
+        store.simulateHIDInputForTesting(k3Signature)
+        store.simulateHIDInputForTesting(nil)
+        scheduler.advance(by: 0.10)
+        store.simulateHIDInputForTesting(k4Signature)
+        store.simulateHIDInputForTesting(nil)
+        scheduler.advance(by: 0.10)
+        store.simulateHIDInputForTesting(k1Signature)
+        store.simulateHIDInputForTesting(nil)
+        scheduler.advance(by: 0.30)
+
+        XCTAssertEqual(executed, ["stacked layer"])
+    }
+
+    func testSplitModifierThenRolloverPrimaryUsesBothModifiers() {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeStore(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+        store.setRemoteModifier(.k3, enabled: true)
+        store.setRemoteModifier(.k4, enabled: true)
+        store.update(
+            Mapping(action: .openApplication, command: "split stacked layer"),
+            for: .k1,
+            gesture: .tap,
+            modifierControls: [.k3, .k4]
+        )
+
+        store.simulateHIDInputForTesting(k3Signature)
+        store.simulateHIDInputForTesting(nil)
+        store.simulateHIDInputForTesting(k4Signature)
+        store.simulateHIDInputForTesting(k1Signature)
+        store.simulateHIDInputForTesting(nil)
+        scheduler.advance(by: 0.30)
+
+        XCTAssertEqual(executed, ["split stacked layer"])
+    }
+
+    func testHeldSecondModifierDoesNotLetFirstModifierTapFire() {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeStore(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+        store.setRemoteModifier(.k3, enabled: true)
+        store.setRemoteModifier(.k4, enabled: true)
+        store.update(Mapping(action: .openApplication, command: "K3 tap"), for: .k3, gesture: .tap)
+
+        store.simulateHIDInputForTesting(k3Signature)
+        store.simulateHIDInputForTesting(nil)
+        store.simulateHIDInputForTesting(k4Signature)
+        scheduler.advance(by: 0.31)
+        XCTAssertTrue(executed.isEmpty)
+
+        store.simulateHIDInputForTesting(nil)
+        scheduler.advance(by: 0.30)
+        XCTAssertTrue(executed.isEmpty)
+    }
+
+    func testModifierPrimaryAfterGraceExecutesStandaloneThenBase() {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeStore(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+        store.setRemoteModifier(.k3, enabled: true)
+        store.update(Mapping(action: .openApplication, command: "K3 tap"), for: .k3, gesture: .tap)
+        store.update(Mapping(action: .openApplication, command: "base"), for: .k1, gesture: .tap)
+
+        store.simulateHIDInputForTesting(k3Signature)
+        store.simulateHIDInputForTesting(nil)
+        scheduler.advance(by: 0.30)
+        store.simulateHIDInputForTesting(k1Signature)
+        store.simulateHIDInputForTesting(nil)
+        scheduler.advance(by: 0.30)
+
+        XCTAssertEqual(executed, ["K3 tap", "base"])
+    }
+
+    func testPendingModifierTapCancelsOnProfileChange() {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeStore(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+        store.setRemoteModifier(.k3, enabled: true)
+        store.update(Mapping(action: .openApplication, command: "K3 tap"), for: .k3, gesture: .tap)
+
+        store.simulateHIDInputForTesting(k3Signature)
+        store.simulateHIDInputForTesting(nil)
+        store.profileName = "Finder"
+        scheduler.advance(by: 1)
+
+        XCTAssertTrue(executed.isEmpty)
+    }
+
+    func testPendingModifierTapCancelsOnWheelCenterProfileSelectorEntry() {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeStore(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+        store.setRemoteModifier(.k3, enabled: true)
+        store.update(Mapping(action: .openApplication, command: "K3 tap"), for: .k3, gesture: .tap)
+
+        store.simulateHIDInputForTesting(k3Signature)
+        store.simulateHIDInputForTesting(nil)
+        store.simulateHIDInputForTesting("wheel:center")
+        scheduler.advance(by: 1)
+
+        XCTAssertTrue(store.isProfileSelectorVisibleForTesting)
+        XCTAssertTrue(executed.isEmpty)
+    }
+
+    func testPendingModifierTapCancelsWhenAddingProfileReplacesActiveState() throws {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeStore(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+        store.setRemoteModifier(.k3, enabled: true)
+        store.update(Mapping(action: .openApplication, command: "K3 tap"), for: .k3, gesture: .tap)
+        store.simulateHIDInputForTesting(k3Signature)
+        store.simulateHIDInputForTesting(nil)
+
+        XCTAssertEqual(try store.addProfile(named: "Scratch"), "Scratch")
+        scheduler.advance(by: 1)
+
+        XCTAssertTrue(executed.isEmpty)
+    }
+
+    func testPendingModifierTapCancelsWhenDeletingActiveProfile() throws {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeStore(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+        XCTAssertEqual(try store.addProfile(named: "Scratch"), "Scratch")
+        store.setRemoteModifier(.k3, enabled: true)
+        store.update(Mapping(action: .openApplication, command: "K3 tap"), for: .k3, gesture: .tap)
+        store.simulateHIDInputForTesting(k3Signature)
+        store.simulateHIDInputForTesting(nil)
+
+        try store.deleteProfile(named: "Scratch")
+        scheduler.advance(by: 1)
+
+        XCTAssertTrue(executed.isEmpty)
+    }
+
     func testStackedDesignatedModifiersResolveExactLayerInEitherOrder() {
         let scheduler = TestScheduler()
         var executed: [String] = []
@@ -459,6 +676,7 @@ final class MappingStoreGestureTests: XCTestCase {
         store.simulateHIDInputForTesting(k3Signature)
         scheduler.advance(by: 1)
         store.simulateHIDInputForTesting(nil)
+        scheduler.advance(by: 0.30)
 
         XCTAssertEqual(executed, ["modifier tap"])
     }

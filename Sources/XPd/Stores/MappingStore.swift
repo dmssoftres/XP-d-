@@ -373,6 +373,7 @@ final class MappingStore {
     private let midiShutdownGate = MIDIShutdownGate()
     private let actionRunner = ActionRunner()
     private let actionExecutionOverride: ActionExecutionOverride?
+    private let gestureSchedule: ButtonGestureRecognizer.Schedule
     private let remoteModifierProvider: RemoteModifierProvider
     private let remoteFunctionKeyProvider: RemoteFunctionKeyProvider
     private let buttonGestureRecognizer: ButtonGestureRecognizer
@@ -384,6 +385,14 @@ final class MappingStore {
     private var activeStandardFunctionKeys: [RemoteControl: Set<UInt16>] = [:]
     private var activeStandardGestureIdentity: ButtonGestureIdentity?
     private var ambiguousStandardCycles: Set<RemoteControl> = []
+    private struct PendingStandardModifierCycle {
+        var modifiers: Set<RemoteControl>
+        var keyboardModifiers: [RemoteControl: Set<KeyboardShortcut.Modifier>]
+        var functionKeys: [RemoteControl: Set<UInt16>]
+    }
+    private var pendingStandardModifierCycle: PendingStandardModifierCycle?
+    private var pendingStandardModifierTapTask: GestureScheduledAction?
+    private var pendingStandardModifierGeneration = 0
     private var remoteTriggerCaptureHandler: ((RemoteControl) -> Void)?
     @ObservationIgnored private lazy var inputOverlay = InputOverlayController(displayDuration: inputOverlayDuration)
     @ObservationIgnored private let terminationObserver = MIDIShutdownObserver()
@@ -416,6 +425,7 @@ final class MappingStore {
     ) {
         defaults = userDefaults
         hid = HIDService(startHardware: startHardware)
+        self.gestureSchedule = gestureSchedule
         buttonGestureRecognizer = ButtonGestureRecognizer(schedule: gestureSchedule)
         self.actionExecutionOverride = actionExecutionOverride
         self.midiOutputService = midiOutputService ?? MIDIOutputService(defaults: userDefaults)
@@ -910,6 +920,7 @@ final class MappingStore {
         } else {
             resolvedMIDISettings = nil
         }
+        cancelPendingButtonGestures()
         closeProfileSelector()
         resetMIDIState(force: true)
         saveActiveProfile()
@@ -984,6 +995,7 @@ final class MappingStore {
             throw ProfileError.profileNotFound(name)
         }
 
+        cancelPendingButtonGestures()
         closeProfileSelector()
         if profileName == name {
             resetMIDIState(force: true)
@@ -1362,6 +1374,16 @@ final class MappingStore {
         guard activeRealm == .standard, control.isMIDIButton else { return }
         guard !activeStandardControls.contains(control) else { return }
 
+        // A modifier-only cycle is ambiguous until the next K press. If a
+        // primary arrives before the short grace window expires, carry those
+        // modifiers into this cycle and suppress their standalone Tap.
+        if activeStandardControls.isEmpty,
+           let pending = consumePendingStandardModifierCycle() {
+            activeStandardControls.formUnion(pending.modifiers)
+            activeStandardKeyboardModifiers.merge(pending.keyboardModifiers) { current, _ in current }
+            activeStandardFunctionKeys.merge(pending.functionKeys) { current, _ in current }
+        }
+
         activeStandardKeyboardModifiers[control] = remoteModifierProvider()
         activeStandardFunctionKeys[control] = remoteFunctionKeyProvider()
         activeStandardControls.insert(control)
@@ -1392,6 +1414,65 @@ final class MappingStore {
         }
     }
 
+    private func enqueuePendingStandardModifierCycle(
+        modifiers: Set<RemoteControl>,
+        keyboardModifiers: [RemoteControl: Set<KeyboardShortcut.Modifier>],
+        functionKeys: [RemoteControl: Set<UInt16>]
+    ) {
+        guard !modifiers.isEmpty else { return }
+
+        if var pending = pendingStandardModifierCycle {
+            pending.modifiers.formUnion(modifiers)
+            pending.keyboardModifiers.merge(keyboardModifiers) { current, _ in current }
+            pending.functionKeys.merge(functionKeys) { current, _ in current }
+            pendingStandardModifierCycle = pending
+        } else {
+            pendingStandardModifierCycle = PendingStandardModifierCycle(
+                modifiers: modifiers,
+                keyboardModifiers: keyboardModifiers,
+                functionKeys: functionKeys
+            )
+        }
+
+        pendingStandardModifierTapTask?.cancel()
+        pendingStandardModifierGeneration &+= 1
+        let generation = pendingStandardModifierGeneration
+        pendingStandardModifierTapTask = gestureSchedule(ButtonGestureTiming.standard.doubleTapInterval) { [weak self] in
+            guard let self,
+                  self.pendingStandardModifierGeneration == generation else { return }
+            self.flushPendingStandardModifierCycle()
+        }
+    }
+
+    private func consumePendingStandardModifierCycle() -> PendingStandardModifierCycle? {
+        guard let pending = pendingStandardModifierCycle else { return nil }
+        pendingStandardModifierTapTask?.cancel()
+        pendingStandardModifierTapTask = nil
+        pendingStandardModifierCycle = nil
+        pendingStandardModifierGeneration &+= 1
+        return pending
+    }
+
+    private func flushPendingStandardModifierCycle() {
+        guard let pending = pendingStandardModifierCycle else { return }
+        pendingStandardModifierCycle = nil
+        pendingStandardModifierTapTask = nil
+
+        // Match the existing same-cycle rule: multiple designated modifiers
+        // without a primary are consumed, while a single modifier remains a
+        // normal Tap mapping after the grace window.
+        guard pending.modifiers.count == 1,
+              let modifier = pending.modifiers.first else { return }
+        recognizedButtonGesture(
+            identity: ButtonGestureIdentity(
+                control: modifier,
+                keyboardModifiers: pending.keyboardModifiers[modifier] ?? [],
+                functionKeys: pending.functionKeys[modifier] ?? []
+            ),
+            gesture: .tap
+        )
+    }
+
     private func releaseStandardCycle() {
         let controls = activeStandardControls
         activeStandardControls.removeAll()
@@ -1409,17 +1490,11 @@ final class MappingStore {
               primaries.count == 1,
               modifiers.count <= remoteModifierControls.count else {
             cancelActiveStandardPrimaryGestures()
-            // Multiple modifier-only cycles are consumed. A single
-            // designated K remains a normal Tap mapping.
-            if primaries.isEmpty, modifiers.count == 1 {
-                let modifier = modifiers.first!
-                recognizedButtonGesture(
-                    identity: ButtonGestureIdentity(
-                        control: modifier,
-                        keyboardModifiers: activeStandardKeyboardModifiers[modifier] ?? [],
-                        functionKeys: activeStandardFunctionKeys[modifier] ?? []
-                    ),
-                    gesture: .tap
+            if primaries.isEmpty, !modifiers.isEmpty {
+                enqueuePendingStandardModifierCycle(
+                    modifiers: Set(modifiers),
+                    keyboardModifiers: activeStandardKeyboardModifiers,
+                    functionKeys: activeStandardFunctionKeys
                 )
             }
             return
@@ -1439,6 +1514,10 @@ final class MappingStore {
 
     private func cancelStandardCycle() {
         cancelActiveStandardPrimaryGestures()
+        pendingStandardModifierTapTask?.cancel()
+        pendingStandardModifierTapTask = nil
+        pendingStandardModifierCycle = nil
+        pendingStandardModifierGeneration &+= 1
         activeStandardControls.removeAll()
         activeStandardKeyboardModifiers.removeAll()
         activeStandardFunctionKeys.removeAll()
@@ -1630,6 +1709,7 @@ final class MappingStore {
     }
 
     private func openProfileSelector() {
+        cancelStandardCycle()
         guard !isProfileSelectorVisible else { return }
         let profiles = availableProfilesInActiveRealm
         guard !profiles.isEmpty else { return }

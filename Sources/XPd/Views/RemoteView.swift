@@ -397,7 +397,22 @@ struct RemoteView: View {
             selected: store.selectedControl == control,
             live: store.liveControl == control
         ))
-        .accessibilityLabel(title.isEmpty ? control.rawValue : control.rawValue + ", " + title)
+        .overlay(alignment: .topTrailing) {
+            if store.isRemoteModifier(control) {
+                Text("MOD")
+                    .font(.system(size: 6.5, weight: .bold, design: .rounded))
+                    .foregroundStyle(.orange)
+                    .padding(.horizontal, 4)
+                    .frame(height: 12)
+                    .background(.black.opacity(0.52), in: Capsule())
+                    .padding(4)
+                    .allowsHitTesting(false)
+            }
+        }
+        .accessibilityLabel(
+            (title.isEmpty ? control.rawValue : control.rawValue + ", " + title)
+                + (store.isRemoteModifier(control) ? ", K modifier" : "")
+        )
     }
 
     private func keyLabelColor(_ control: RemoteControl) -> Color {
