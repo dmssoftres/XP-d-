@@ -15,8 +15,8 @@ struct InputOverlayPresentation: Equatable {
             isConfigured = true
         } else if mapping.action == .noAction {
             shortcutTokens = []
-            title = "No action"
-            isConfigured = true
+            title = "Not set"
+            isConfigured = false
         } else if mapping.action == .appleScript {
             shortcutTokens = []
             if command.isEmpty {

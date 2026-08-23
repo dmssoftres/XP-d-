@@ -21,6 +21,24 @@ enum RemoteControl: String, CaseIterable, Codable, Identifiable {
 
 }
 
+/// The fixed presentation palette for Standard-mode K modifiers. Raw values
+/// are part of the portable and local configuration formats; keep their
+/// spelling stable when changing the SwiftUI treatment.
+enum ModifierColor: String, CaseIterable, Codable, Identifiable {
+    case orange = "orange"
+    case yellow = "yellow"
+    case cyan = "cyan"
+    case blue = "blue"
+    case purple = "purple"
+    case pink = "pink"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        rawValue.capitalized
+    }
+}
+
 enum GestureKind: String, CaseIterable, Codable, Identifiable {
     case tap = "Tap"
     case hold = "Hold"
@@ -42,6 +60,10 @@ enum ActionKind: String, CaseIterable, Codable, Identifiable {
     case noAction = "No action"
 
     var id: String { rawValue }
+
+    var editorLabel: String {
+        self == .noAction ? "Empty" : rawValue
+    }
 
     var isApplicationAction: Bool {
         self == .openApplication || self == .toggleApplication
@@ -142,7 +164,7 @@ struct MappingKey: Hashable, Codable {
 }
 
 struct Mapping: Codable, Equatable {
-    var action: ActionKind = .openApplication
+    var action: ActionKind = .noAction
     var command: String = ""
     /// Dedicated storage keeps user-authored automation content available
     /// while the active editor temporarily uses command for a typed
@@ -196,7 +218,7 @@ struct Mapping: Codable, Equatable {
     }
 
     init(
-        action: ActionKind = .openApplication,
+        action: ActionKind = .noAction,
         command: String = "",
         macOSShortcutContent: String? = nil,
         appleScriptContent: String? = nil,
@@ -225,7 +247,7 @@ struct Mapping: Codable, Equatable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        action = try container.decodeIfPresent(ActionKind.self, forKey: .action) ?? .openApplication
+        action = try container.decodeIfPresent(ActionKind.self, forKey: .action) ?? .noAction
         command = try container.decodeIfPresent(String.self, forKey: .command) ?? ""
         macOSShortcutContent = try container.decodeIfPresent(String.self, forKey: .macOSShortcutContent)
         appleScriptContent = try container.decodeIfPresent(String.self, forKey: .appleScriptContent)
@@ -266,6 +288,8 @@ struct Mapping: Codable, Equatable {
     /// fixed-choice editors and the stored value is invalid. In every case,
     /// changing the action disarms process-backed automation.
     func selectingAction(_ action: ActionKind, profileName: String? = nil) -> Self {
+        guard action != .noAction else { return Mapping(action: .noAction) }
+
         var updated = self
         updated.stashActiveProcessCommand()
         updated.action = action

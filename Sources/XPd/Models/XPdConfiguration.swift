@@ -6,7 +6,7 @@ import Foundation
 /// meaningful to the wheel selector, while mapping/HID entries can be sorted
 /// before encoding for stable diffs.
 struct XPdConfiguration: Codable, Equatable {
-    static let currentVersion = 7
+    static let currentVersion = 8
     static let legacyVersion = 2
     static let previousVersion = 3
     /// Version 4 is the immediately previous schema.  It had no
@@ -19,6 +19,9 @@ struct XPdConfiguration: Codable, Equatable {
     /// Version 6 added dual-role K modifiers and exact remote layers but did
     /// not yet persist arbitrary ordinary keyboard trigger keys.
     static let preRemoteTriggerKeysVersion = 6
+    /// Version 7 added remote modifier designations but predates the
+    /// profile-scoped modifier colour metadata.
+    static let preModifierColorsVersion = 7
     static let defaultProfileNames = ["Global", "Finder", "Logic Pro"]
     static let defaultWorkspaceLockControl: RemoteControl = .k3
 
@@ -41,6 +44,7 @@ struct XPdConfiguration: Codable, Equatable {
         let midiSettings: MIDIProfileSettings?
         let standardButtonTitles: [StandardButtonTitleEntry]
         let remoteModifierControls: Set<RemoteControl>
+        let modifierColors: [ModifierColorEntry]
 
         var id: String { name }
 
@@ -55,7 +59,8 @@ struct XPdConfiguration: Codable, Equatable {
             realm: ProfileRealm = .standard,
             midiSettings: MIDIProfileSettings? = nil,
             standardButtonTitles: [StandardButtonTitleEntry] = [],
-            remoteModifierControls: Set<RemoteControl> = []
+            remoteModifierControls: Set<RemoteControl> = [],
+            modifierColors: [ModifierColorEntry] = []
         ) {
             self.name = name
             self.mappings = mappings
@@ -64,6 +69,7 @@ struct XPdConfiguration: Codable, Equatable {
             self.midiSettings = midiSettings
             self.standardButtonTitles = standardButtonTitles
             self.remoteModifierControls = remoteModifierControls
+            self.modifierColors = modifierColors
         }
 
         init(
@@ -73,7 +79,8 @@ struct XPdConfiguration: Codable, Equatable {
             profileRealm: ProfileRealm,
             midiSettings: MIDIProfileSettings? = nil,
             standardButtonTitles: [StandardButtonTitleEntry] = [],
-            remoteModifierControls: Set<RemoteControl> = []
+            remoteModifierControls: Set<RemoteControl> = [],
+            modifierColors: [ModifierColorEntry] = []
         ) {
             self.init(
                 name: name,
@@ -82,7 +89,8 @@ struct XPdConfiguration: Codable, Equatable {
                 realm: profileRealm,
                 midiSettings: midiSettings,
                 standardButtonTitles: standardButtonTitles,
-                remoteModifierControls: remoteModifierControls
+                remoteModifierControls: remoteModifierControls,
+                modifierColors: modifierColors
             )
         }
 
@@ -95,6 +103,7 @@ struct XPdConfiguration: Codable, Equatable {
             midiSettings = try container.decodeIfPresent(MIDIProfileSettings.self, forKey: .midiSettings)
             standardButtonTitles = try container.decodeIfPresent([StandardButtonTitleEntry].self, forKey: .standardButtonTitles) ?? []
             remoteModifierControls = try container.decodeIfPresent(Set<RemoteControl>.self, forKey: .remoteModifierControls) ?? []
+            modifierColors = try container.decodeIfPresent([ModifierColorEntry].self, forKey: .modifierColors) ?? []
         }
 
         func encode(to encoder: Encoder) throws {
@@ -109,10 +118,11 @@ struct XPdConfiguration: Codable, Equatable {
                 RemoteControl.allCases.filter { remoteModifierControls.contains($0) },
                 forKey: .remoteModifierControls
             )
+            try container.encode(modifierColors, forKey: .modifierColors)
         }
 
         private enum CodingKeys: String, CodingKey {
-            case name, mappings, hidBindings, realm, midiSettings, standardButtonTitles, remoteModifierControls
+            case name, mappings, hidBindings, realm, midiSettings, standardButtonTitles, remoteModifierControls, modifierColors
         }
     }
 
@@ -181,6 +191,19 @@ struct XPdConfiguration: Codable, Equatable {
         }
     }
 
+    /// A profile-scoped colour assignment. Entries are arrays instead of a
+    /// dictionary so portable JSON can be sorted deterministically and reject
+    /// duplicate controls during validation.
+    struct ModifierColorEntry: Codable, Equatable {
+        let control: RemoteControl
+        let color: ModifierColor
+
+        init(control: RemoteControl, color: ModifierColor) {
+            self.control = control
+            self.color = color
+        }
+    }
+
     enum ValidationError: LocalizedError, Equatable {
         case unsupportedVersion(Int)
         case duplicateProfileName(String)
@@ -209,6 +232,10 @@ struct XPdConfiguration: Codable, Equatable {
         case invalidStandardButtonTitleControl(profile: String, control: RemoteControl)
         case duplicateStandardButtonTitle(profile: String, control: RemoteControl)
         case standardButtonTitleTooLong(profile: String, control: RemoteControl)
+        case modifierColorsInLegacyProfile(String)
+        case modifierColorsOnMIDIProfile(String)
+        case invalidModifierColorControl(profile: String, control: RemoteControl)
+        case duplicateModifierColor(profile: String, control: RemoteControl)
 
         var errorDescription: String? {
             switch self {
@@ -266,6 +293,14 @@ struct XPdConfiguration: Codable, Equatable {
                 return "Duplicate Standard button title in \(profile) for \(control.rawValue)."
             case let .standardButtonTitleTooLong(profile, control):
                 return "Standard button title in \(profile) for \(control.rawValue) must be at most 24 characters."
+            case let .modifierColorsInLegacyProfile(profile):
+                return "Modifier colours are unsupported in the legacy profile schema: \(profile)."
+            case let .modifierColorsOnMIDIProfile(profile):
+                return "MIDI profile \(profile) cannot contain Standard modifier colours."
+            case let .invalidModifierColorControl(profile, control):
+                return "Modifier colour in \(profile) must target a K button: \(control.rawValue)."
+            case let .duplicateModifierColor(profile, control):
+                return "Duplicate modifier colour in \(profile) for \(control.rawValue)."
             }
         }
     }
@@ -371,6 +406,33 @@ struct XPdConfiguration: Codable, Equatable {
             let configuration = try decoder.decode(XPdConfiguration.self, from: data)
             try configuration.validate()
             return configuration
+        case preModifierColorsVersion:
+            let legacy = try decoder.decode(XPdConfiguration.self, from: data)
+            try legacy.validateV7()
+            return XPdConfiguration(
+                version: currentVersion,
+                profiles: legacy.profiles.map { profile in
+                    Profile(
+                        name: profile.name,
+                        mappings: profile.mappings,
+                        hidBindings: profile.hidBindings,
+                        realm: profile.realm,
+                        midiSettings: profile.midiSettings,
+                        standardButtonTitles: profile.standardButtonTitles,
+                        remoteModifierControls: profile.remoteModifierControls,
+                        modifierColors: profile.remoteModifierControls.map {
+                            ModifierColorEntry(control: $0, color: .orange)
+                        }
+                    )
+                },
+                profileName: legacy.profileName,
+                showsInputOverlay: legacy.showsInputOverlay,
+                activeRealm: legacy.activeRealm,
+                lastStandardProfileName: legacy.lastStandardProfileName,
+                lastMIDIProfileName: legacy.lastMIDIProfileName,
+                midiLocked: legacy.midiLocked,
+                workspaceLockControl: legacy.workspaceLockControl
+            )
         case preRemoteTriggerKeysVersion:
             let legacy = try decoder.decode(XPdConfiguration.self, from: data)
             try legacy.validateV6()
@@ -398,7 +460,8 @@ struct XPdConfiguration: Codable, Equatable {
                         realm: $0.realm,
                         midiSettings: $0.midiSettings,
                         standardButtonTitles: $0.standardButtonTitles,
-                        remoteModifierControls: []
+                        remoteModifierControls: [],
+                        modifierColors: []
                     )
                 },
                 profileName: legacy.profileName,
@@ -422,7 +485,8 @@ struct XPdConfiguration: Codable, Equatable {
                         realm: $0.realm,
                         midiSettings: $0.midiSettings,
                         standardButtonTitles: [],
-                        remoteModifierControls: []
+                        remoteModifierControls: [],
+                        modifierColors: []
                     )
                 },
                 profileName: legacy.profileName,
@@ -450,7 +514,8 @@ struct XPdConfiguration: Codable, Equatable {
                         realm: .standard,
                         midiSettings: nil,
                         standardButtonTitles: [],
-                        remoteModifierControls: []
+                        remoteModifierControls: [],
+                        modifierColors: []
                     )
                 },
                 profileName: legacy.profileName,
@@ -538,7 +603,8 @@ struct XPdConfiguration: Codable, Equatable {
             allowMIDISettings: false,
             allowStandardButtonTitles: false,
             allowRemoteLayers: false,
-            allowRemoteTriggerKeys: false
+            allowRemoteTriggerKeys: false,
+            allowModifierColors: false
         )
     }
 
@@ -573,7 +639,8 @@ struct XPdConfiguration: Codable, Equatable {
             allowMIDISettings: false,
             allowStandardButtonTitles: false,
             allowRemoteLayers: false,
-            allowRemoteTriggerKeys: false
+            allowRemoteTriggerKeys: false,
+            allowModifierColors: false
         )
     }
 
@@ -588,7 +655,8 @@ struct XPdConfiguration: Codable, Equatable {
         try validateEntries(
             allowStandardButtonTitles: false,
             allowRemoteLayers: false,
-            allowRemoteTriggerKeys: false
+            allowRemoteTriggerKeys: false,
+            allowModifierColors: false
         )
     }
 
@@ -601,7 +669,8 @@ struct XPdConfiguration: Codable, Equatable {
         try validateCurrentProfileShape()
         try validateEntries(
             allowRemoteLayers: false,
-            allowRemoteTriggerKeys: false
+            allowRemoteTriggerKeys: false,
+            allowModifierColors: false
         )
     }
 
@@ -613,7 +682,17 @@ struct XPdConfiguration: Codable, Equatable {
             throw ValidationError.unsupportedVersion(version)
         }
         try validateCurrentProfileShape()
-        try validateEntries(allowRemoteTriggerKeys: false)
+        try validateEntries(allowRemoteTriggerKeys: false, allowModifierColors: false)
+    }
+
+    /// Version 7 is the immediately previous schema. It supports remote
+    /// modifier designations and exact layers but has no colour metadata.
+    private func validateV7() throws {
+        guard version == Self.preModifierColorsVersion else {
+            throw ValidationError.unsupportedVersion(version)
+        }
+        try validateCurrentProfileShape()
+        try validateEntries(allowModifierColors: false)
     }
 
     private func validateCurrentProfileShape() throws {
@@ -662,13 +741,15 @@ struct XPdConfiguration: Codable, Equatable {
     private func validateEntries(
         allowMIDISettings: Bool = true,
         allowRemoteLayers: Bool = true,
-        allowRemoteTriggerKeys: Bool = true
+        allowRemoteTriggerKeys: Bool = true,
+        allowModifierColors: Bool = true
     ) throws {
         try validateEntries(
             allowMIDISettings: allowMIDISettings,
             allowStandardButtonTitles: true,
             allowRemoteLayers: allowRemoteLayers,
-            allowRemoteTriggerKeys: allowRemoteTriggerKeys
+            allowRemoteTriggerKeys: allowRemoteTriggerKeys,
+            allowModifierColors: allowModifierColors
         )
     }
 
@@ -676,7 +757,8 @@ struct XPdConfiguration: Codable, Equatable {
         allowMIDISettings: Bool = true,
         allowStandardButtonTitles: Bool,
         allowRemoteLayers: Bool = true,
-        allowRemoteTriggerKeys: Bool = true
+        allowRemoteTriggerKeys: Bool = true,
+        allowModifierColors: Bool = true
     ) throws {
         for profile in profiles {
             if profile.realm == .standard, profile.midiSettings != nil {
@@ -693,6 +775,27 @@ struct XPdConfiguration: Codable, Equatable {
             }
             if profile.realm == .midi, !profile.standardButtonTitles.isEmpty {
                 throw ValidationError.standardButtonTitlesOnMIDIProfile(profile.name)
+            }
+            if !allowModifierColors, !profile.modifierColors.isEmpty {
+                throw ValidationError.modifierColorsInLegacyProfile(profile.name)
+            }
+            if profile.realm == .midi, !profile.modifierColors.isEmpty {
+                throw ValidationError.modifierColorsOnMIDIProfile(profile.name)
+            }
+            var modifierColorControls = Set<RemoteControl>()
+            for entry in profile.modifierColors {
+                guard entry.control.isModifierEligible else {
+                    throw ValidationError.invalidModifierColorControl(
+                        profile: profile.name,
+                        control: entry.control
+                    )
+                }
+                guard modifierColorControls.insert(entry.control).inserted else {
+                    throw ValidationError.duplicateModifierColor(
+                        profile: profile.name,
+                        control: entry.control
+                    )
+                }
             }
             if profile.realm == .midi, !profile.remoteModifierControls.isEmpty {
                 throw ValidationError.remoteModifiersOnMIDIProfile(profile.name)
@@ -833,6 +936,8 @@ struct XPdConfiguration: Codable, Equatable {
             try validateV5()
         case Self.preRemoteTriggerKeysVersion:
             try validateV6()
+        case Self.preModifierColorsVersion:
+            try validateV7()
         case Self.currentVersion:
             try validate()
         default:
@@ -866,7 +971,10 @@ struct XPdConfiguration: Codable, Equatable {
                     },
                     remoteModifierControls: Set(RemoteControl.allCases.filter {
                         profile.remoteModifierControls.contains($0)
-                    })
+                    }),
+                    modifierColors: profile.modifierColors.sorted {
+                        Self.controlIndex($0.control) < Self.controlIndex($1.control)
+                    }
                 )
             },
             profileName: profileName,

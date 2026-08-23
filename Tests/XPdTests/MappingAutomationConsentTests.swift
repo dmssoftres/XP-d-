@@ -139,6 +139,18 @@ final class MappingAutomationConsentTests: XCTestCase {
         XCTAssertEqual(mapping.command, "ChatGPT", "The original mapping remains unchanged until explicitly selected")
     }
 
+    func testSelectingEmptyClearsTheWholeMapping() {
+        let mapping = Mapping(
+            action: .shellCommand,
+            command: "open -a Notes",
+            shellCommandContent: "open -a Notes",
+            automationEnabled: true,
+            remoteTriggerModifiers: [.command]
+        )
+
+        XCTAssertEqual(mapping.selectingAction(.noAction), Mapping())
+    }
+
     func testInvalidTypedValueRemainsVisibleToNonMutatingReaders() {
         let mapping = Mapping(action: .mediaControl, command: "legacy value")
 

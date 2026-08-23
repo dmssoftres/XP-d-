@@ -4,6 +4,7 @@ import XCTest
 
 @MainActor
 final class MappingStoreModifierBindingTests: XCTestCase {
+    private let factoryK8Signature = "r6:01 1D 00 00 00 00 00"
     private let factoryK10Signature = "r6:03 1D 00 00 00 00 00"
 
     nonisolated(unsafe) private var defaults: UserDefaults!
@@ -70,6 +71,46 @@ final class MappingStoreModifierBindingTests: XCTestCase {
         XCTAssertEqual(restored.hidBinding(for: .k10), "custom-k10")
     }
 
+    func testLearningBoundK8InputForK10FailsWithoutStealingEitherBinding() {
+        let source = makeStore()
+        source.selectedControl = .k10
+        source.learnSelectedControl()
+
+        source.simulateHIDInputForTesting(factoryK8Signature)
+
+        XCTAssertNil(source.learningControl)
+        XCTAssertEqual(source.hidBinding(for: .k8), factoryK8Signature)
+        XCTAssertEqual(source.hidBinding(for: .k10), factoryK10Signature)
+        XCTAssertEqual(
+            source.lastHIDLearningResult,
+            .failure("That input is already assigned to K8. Clear it there before learning it for K10.")
+        )
+
+        let restored = makeStore()
+        XCTAssertEqual(restored.hidBinding(for: .k8), factoryK8Signature)
+        XCTAssertEqual(restored.hidBinding(for: .k10), factoryK10Signature)
+    }
+
+    func testDisconnectCancelsPendingLearningBeforeNextInput() {
+        let source = makeStore()
+        source.selectedControl = .k10
+        source.learnSelectedControl()
+
+        source.hid.simulateDisconnectForTesting()
+
+        XCTAssertNil(source.learningControl)
+        XCTAssertEqual(
+            source.lastHIDLearningResult,
+            .failure("Learning canceled because the remote disconnected.")
+        )
+
+        source.simulateHIDInputForTesting(factoryK8Signature)
+
+        XCTAssertEqual(source.liveControl, .k8)
+        XCTAssertEqual(source.hidBinding(for: .k8), factoryK8Signature)
+        XCTAssertEqual(source.hidBinding(for: .k10), factoryK10Signature)
+    }
+
     func testClearingUnrelatedNonModifierRemainsCleared() {
         let source = makeStore()
         XCTAssertTrue(source.setRemoteModifier(.k10, enabled: true))
@@ -131,7 +172,7 @@ final class MappingStoreModifierBindingTests: XCTestCase {
     private func mutatePersistedProfiles(
         _ mutate: (inout JSONDictionary) throws -> Void
     ) throws {
-        let data = try XCTUnwrap(defaults.data(forKey: "XPd.profiles.v7"))
+        let data = try XCTUnwrap(defaults.data(forKey: "XPd.profiles.v8"))
         var root = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? JSONDictionary)
         var profiles = try XCTUnwrap(root["profiles"] as? [JSONDictionary])
         guard let globalIndex = profiles.firstIndex(where: { $0["name"] as? String == "Global" }) else {
@@ -142,7 +183,7 @@ final class MappingStoreModifierBindingTests: XCTestCase {
         try mutate(&state)
         profiles[globalIndex]["state"] = state
         root["profiles"] = profiles
-        defaults.set(try JSONSerialization.data(withJSONObject: root), forKey: "XPd.profiles.v7")
+        defaults.set(try JSONSerialization.data(withJSONObject: root), forKey: "XPd.profiles.v8")
     }
 
     private func bindingPairs(from value: Any?) throws -> [Any] {

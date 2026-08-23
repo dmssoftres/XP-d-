@@ -111,12 +111,12 @@ final class MappingStoreProfileTests: XCTestCase {
         source.setRemoteModifier(.k3, enabled: true)
         source.update(legacyMapping, for: .k1, gesture: .tap, modifierControls: [.k3])
 
-        let currentData = try XCTUnwrap(defaults.data(forKey: "XPd.profiles.v7"))
+        let currentData = try XCTUnwrap(defaults.data(forKey: "XPd.profiles.v8"))
         var object = try XCTUnwrap(JSONSerialization.jsonObject(with: currentData) as? [String: Any])
         object["version"] = XPdConfiguration.preRemoteTriggerKeysVersion
         let legacyData = try JSONSerialization.data(withJSONObject: object)
         defaults.set(legacyData, forKey: "XPd.profiles.v6")
-        defaults.removeObject(forKey: "XPd.profiles.v7")
+        defaults.removeObject(forKey: "XPd.profiles.v8")
 
         let restored = makeStore()
         XCTAssertTrue(restored.isRemoteModifier(.k3))
@@ -124,7 +124,7 @@ final class MappingStoreProfileTests: XCTestCase {
             restored.mapping(for: .k1, gesture: .tap, modifierControls: [.k3]),
             legacyMapping
         )
-        let migratedData = try XCTUnwrap(defaults.data(forKey: "XPd.profiles.v7"))
+        let migratedData = try XCTUnwrap(defaults.data(forKey: "XPd.profiles.v8"))
         let migratedObject = try XCTUnwrap(JSONSerialization.jsonObject(with: migratedData) as? [String: Any])
         XCTAssertEqual(migratedObject["version"] as? Int, XPdConfiguration.currentVersion)
     }
@@ -195,7 +195,7 @@ final class MappingStoreProfileTests: XCTestCase {
         XCTAssertNil(store.hidBinding(for: .k2))
 
         store.profileName = "Finder"
-        XCTAssertEqual(store.mapping(for: .k1, gesture: .tap).command, "ChatGPT")
+        XCTAssertEqual(store.mapping(for: .k1, gesture: .tap), Mapping())
         XCTAssertNotEqual(store.hidBinding(for: .k1), "r6:01 11 00 00 00 00 00")
     }
 
@@ -324,7 +324,7 @@ final class MappingStoreProfileTests: XCTestCase {
         store.simulateHIDInputForTesting(nil)
         XCTAssertFalse(store.isProfileSelectorVisibleForTesting)
         XCTAssertEqual(store.profileName, "Finder")
-        XCTAssertEqual(store.mapping(for: .k1, gesture: .tap).command, "ChatGPT")
+        XCTAssertEqual(store.mapping(for: .k1, gesture: .tap), Mapping())
 
         store.simulateHIDInputForTesting("wheel:center")
         XCTAssertTrue(store.isProfileSelectorVisibleForTesting)

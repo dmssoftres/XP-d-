@@ -355,6 +355,8 @@ struct RemoteView: View {
      */
     private func standardKeyButton(_ control: RemoteControl, height: CGFloat) -> some View {
         let title = store.standardButtonTitle(for: control)
+        let routes = store.standardApplicationRoutes(for: control)
+        let routeSelection = standardApplicationRouteDisplaySelection(routes)
         return Button {
             store.selectedControl = control
         } label: {
@@ -381,13 +383,12 @@ struct RemoteView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 }
 
-                if let appIcon = loadedApplicationIcon(for: control) {
-                    Image(nsImage: appIcon)
-                        .resizable()
-                        .interpolation(.high)
-                        .scaledToFit()
-                        .frame(width: 16, height: 16)
-                        .padding(.bottom, 5)
+                if !routes.isEmpty {
+                    applicationRouteStrip(
+                        routeSelection.visible,
+                        hiddenCount: routeSelection.hiddenCount,
+                        height: height
+                    )
                 }
             }
             .frame(maxWidth: .infinity, minHeight: height, maxHeight: height)
@@ -401,7 +402,7 @@ struct RemoteView: View {
             if store.isRemoteModifier(control) {
                 Text("MOD")
                     .font(.system(size: 6.5, weight: .bold, design: .rounded))
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(store.modifierColor(for: control).swiftUIColor)
                     .padding(.horizontal, 4)
                     .frame(height: 12)
                     .background(.black.opacity(0.52), in: Capsule())
@@ -410,9 +411,160 @@ struct RemoteView: View {
             }
         }
         .accessibilityLabel(
-            (title.isEmpty ? control.rawValue : control.rawValue + ", " + title)
-                + (store.isRemoteModifier(control) ? ", K modifier" : "")
+            standardButtonAccessibilityLabel(
+                control: control,
+                title: title,
+                routes: routes,
+                hiddenCount: routeSelection.hiddenCount
+            )
         )
+        .help(
+            standardButtonAccessibilityLabel(
+                control: control,
+                title: title,
+                routes: routes,
+                hiddenCount: routeSelection.hiddenCount
+            )
+        )
+    }
+
+    private func applicationRouteStrip(
+        _ routes: [StandardApplicationRoute],
+        hiddenCount: Int,
+        height: CGFloat
+    ) -> some View {
+        HStack(spacing: 1) {
+            ForEach(routes) { route in
+                applicationRouteIndicator(route)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 2)
+        .padding(.bottom, 4)
+        .overlay(alignment: .bottomTrailing) {
+            if hiddenCount > 0 {
+                Text("+\(hiddenCount)")
+                    .font(.system(size: 6, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.92))
+                    .padding(.horizontal, 2)
+                    .frame(height: 10)
+                    .background(.black.opacity(0.68), in: Capsule())
+                    .offset(x: 1, y: 2)
+                    .allowsHitTesting(false)
+            }
+        }
+        .frame(maxWidth: .infinity, minHeight: height - 14, maxHeight: height - 14, alignment: .bottom)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    @ViewBuilder
+    private func applicationRouteIndicator(_ route: StandardApplicationRoute) -> some View {
+        if route.isBase {
+            applicationRouteIcon(for: route.target, size: 14)
+                .frame(maxWidth: .infinity)
+        } else {
+            HStack(spacing: 1) {
+                applicationRouteIcon(for: route.target, size: 9)
+                modifierRouteLabel(route.modifierControls)
+            }
+            .foregroundStyle(.white.opacity(0.95))
+            .padding(.horizontal, 2)
+            .frame(maxWidth: .infinity, minHeight: 15, maxHeight: 15)
+            .background {
+                modifierRouteFill(route.modifierControls)
+                    .clipShape(Capsule())
+            }
+            .overlay {
+                Capsule()
+                    .strokeBorder(
+                        modifierRouteStroke(route.modifierControls),
+                        lineWidth: 0.75
+                    )
+            }
+        }
+    }
+
+    private func modifierRouteFill(_ modifiers: Set<RemoteControl>) -> some View {
+        let colors = modifierRouteColors(modifiers)
+        if colors.count <= 1 {
+            return AnyView((colors.first ?? ModifierColor.orange.swiftUIColor).opacity(0.30))
+        }
+        return AnyView(
+            LinearGradient(
+                colors: colors.map { $0.opacity(0.30) },
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+        )
+    }
+
+    private func modifierRouteStroke(_ modifiers: Set<RemoteControl>) -> LinearGradient {
+        let colors = modifierRouteColors(modifiers)
+        return LinearGradient(
+            colors: (colors.isEmpty ? [ModifierColor.orange.swiftUIColor] : colors)
+                .map { $0.opacity(0.96) },
+            startPoint: .leading,
+            endPoint: .trailing
+        )
+    }
+
+    private func modifierRouteColors(_ modifiers: Set<RemoteControl>) -> [Color] {
+        RemoteControl.allCases
+            .filter { modifiers.contains($0) }
+            .map { store.modifierColor(for: $0).swiftUIColor }
+    }
+
+    @ViewBuilder
+    private func modifierRouteLabel(_ modifiers: Set<RemoteControl>) -> some View {
+        let labels = RemoteControl.allCases
+            .filter { modifiers.contains($0) }
+            .map(\.rawValue)
+        if labels.count <= 1 {
+            Text(labels.first ?? "MOD")
+                .font(.system(size: 5.5, weight: .bold, design: .rounded))
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+        } else {
+            VStack(spacing: -2) {
+                ForEach(labels, id: \.self) { label in
+                    Text(label)
+                        .font(.system(size: 4.5, weight: .bold, design: .rounded))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.55)
+                }
+            }
+        }
+    }
+
+    private func standardButtonAccessibilityLabel(
+        control: RemoteControl,
+        title: String,
+        routes: [StandardApplicationRoute],
+        hiddenCount: Int
+    ) -> String {
+        var parts = [control.rawValue]
+        if !title.isEmpty { parts.append(title) }
+
+        let routeSummary = routes.map { route in
+            let target = "\(route.gesture.rawValue) \(route.target)"
+            guard !route.isBase else { return "Base \(target)" }
+            let modifiers = RemoteControl.allCases
+                .filter { route.modifierControls.contains($0) }
+                .map(\.rawValue)
+                .joined(separator: " + ")
+            return "\(modifiers) \(target)"
+        }
+        if !routeSummary.isEmpty {
+            parts.append(routeSummary.joined(separator: "; "))
+        }
+        if hiddenCount > 0 {
+            parts.append("\(hiddenCount) additional application route\(hiddenCount == 1 ? "" : "s") hidden")
+        }
+        if store.isRemoteModifier(control) {
+            parts.append("K modifier")
+        }
+        return parts.joined(separator: ", ")
     }
 
     private func keyLabelColor(_ control: RemoteControl) -> Color {
@@ -421,18 +573,25 @@ struct RemoteView: View {
         return .white.opacity(0.30)
     }
 
-    private func loadedApplicationIcon(for control: RemoteControl) -> NSImage? {
-        let gestures: [GestureKind] = [.tap, .hold, .doubleTap]
-        guard let mapping = gestures
-            .map({ store.mapping(for: control, gesture: $0) })
-            .first(where: {
-                ($0.action == .openApplication || $0.action == .toggleApplication)
-                    && !$0.command.isEmpty
-            })
-        else { return nil }
+    @ViewBuilder
+    private func applicationRouteIcon(for target: String, size: CGFloat) -> some View {
+        if let icon = applicationIcon(for: target) {
+            Image(nsImage: icon)
+                .renderingMode(.original)
+                .resizable()
+                .interpolation(.high)
+                .scaledToFit()
+                .frame(width: size, height: size)
+        } else {
+            Image(systemName: "app.fill")
+                .font(.system(size: size, weight: .medium))
+                .foregroundStyle(.white.opacity(0.72))
+                .frame(width: size, height: size)
+        }
+    }
 
-        let command = mapping.command.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !command.isEmpty else { return nil }
+    private func applicationIcon(for target: String) -> NSImage? {
+        let command = target.trimmingCharacters(in: .whitespacesAndNewlines)
 
         let expandedCommand = NSString(string: command).expandingTildeInPath
         let appName = command.lowercased().hasSuffix(".app") ? command : "\(command).app"
@@ -455,6 +614,34 @@ struct RemoteView: View {
 
         return nil
     }
+}
+
+func standardApplicationRouteDisplaySelection(
+    _ routes: [StandardApplicationRoute]
+) -> (visible: [StandardApplicationRoute], hiddenCount: Int) {
+    let capacity = 3
+    guard routes.count > capacity else {
+        return (routes, 0)
+    }
+
+    let primary = routes.first(where: { $0.isBase })
+    let secondary = routes.filter(\.isBase).dropFirst()
+    let modifiers = routes.filter { !$0.isBase }
+    var visible: [StandardApplicationRoute] = []
+
+    if let primary {
+        visible.append(primary)
+    }
+
+    // Reserve one slot for a modifier route whenever one is available.
+    // Base routes therefore remain contiguous immediately after the primary,
+    // while the layer representation is never entirely hidden.
+    let reservedModifierSlots = modifiers.isEmpty ? 0 : 1
+    let secondaryCapacity = max(0, capacity - visible.count - reservedModifierSlots)
+    visible.append(contentsOf: secondary.prefix(secondaryCapacity))
+    visible.append(contentsOf: modifiers.prefix(max(0, capacity - visible.count)))
+
+    return (visible, max(0, routes.count - visible.count))
 }
 
 private struct HardwareKeyStyle: ButtonStyle {

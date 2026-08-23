@@ -2,6 +2,13 @@ import XCTest
 @testable import XPd
 
 final class InputOverlayModelTests: XCTestCase {
+    func testEmptyMappingIsNotConfigured() {
+        let presentation = InputOverlayPresentation(mapping: Mapping())
+
+        XCTAssertEqual(presentation.title, "Not set")
+        XCTAssertFalse(presentation.isConfigured)
+    }
+
     func testScriptAndStructuredActionsUseConciseHUDTitles() {
         XCTAssertEqual(
             InputOverlayPresentation(

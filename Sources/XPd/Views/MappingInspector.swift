@@ -91,6 +91,16 @@ struct MappingInspector: View {
                         Text("Press the matching control on the physical remote.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                    } else if let result = store.lastHIDLearningResult {
+                        Label(
+                            result.message,
+                            systemImage: result.succeeded
+                                ? "checkmark.circle.fill"
+                                : "exclamationmark.triangle.fill"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(result.succeeded ? Color.green : Color.orange)
+                        .fixedSize(horizontal: false, vertical: true)
                     } else if !store.hid.hasInputAccess {
                         Text("Allow XP[d] in System Settings › Privacy & Security › Input Monitoring, then relaunch.")
                             .font(.caption)
@@ -669,7 +679,21 @@ struct MappingInspector: View {
                     }
                     Button("Input Monitoring") { store.hid.openInputMonitoringSettings() }
                 }
-                if !store.hid.hasExclusiveControl, store.hid.hasInputAccess {
+                if store.learningControl != nil {
+                    Text("Press the matching control on the physical remote.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else if let result = store.lastHIDLearningResult {
+                    Label(
+                        result.message,
+                        systemImage: result.succeeded
+                            ? "checkmark.circle.fill"
+                            : "exclamationmark.triangle.fill"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(result.succeeded ? Color.green : Color.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                } else if !store.hid.hasExclusiveControl, store.hid.hasInputAccess {
                     Text("Exclusive control unavailable · factory input not blocked")
                         .font(.caption)
                         .foregroundStyle(.orange)
@@ -737,6 +761,8 @@ struct MappingInspector: View {
                 }
 
                 if isStandardLayerEligible {
+                    standardLayerCollisionWarning
+
                     HStack(alignment: .top, spacing: 16) {
                         StandardMappingActionEditor(
                             store: store,
@@ -771,6 +797,33 @@ struct MappingInspector: View {
                 persistenceResult
             }
             .padding(4)
+        }
+    }
+
+    @ViewBuilder
+    private var standardLayerCollisionWarning: some View {
+        let collisions = store.standardModifierHIDCollisions(
+            for: store.selectedControl,
+            modifierControls: store.selectedMappingModifiers
+        )
+
+        if !collisions.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(collisions, id: \.self) { collision in
+                    Label {
+                        Text(
+                            "This remote sends \(collision.firstControl.rawValue) then \(collision.hiddenControl.rawValue) as \(collision.firstControl.rawValue) only, so XP[d] cannot detect the second button. Assign either button a different shortcut in the remote's settings, then use Learn selected control in Status & Input."
+                        )
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                    }
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.orange)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(10)
+            .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
         }
     }
 
@@ -875,13 +928,43 @@ struct MappingInspector: View {
     @ViewBuilder
     private var standardModifierEditor: some View {
         HStack(spacing: 10) {
+            Text("K modifier")
+
+            HStack(spacing: 5) {
+                ForEach(ModifierColor.allCases) { color in
+                    Button {
+                        _ = store.setModifierColor(color, for: store.selectedControl)
+                    } label: {
+                        Circle()
+                            .fill(color.swiftUIColor)
+                            .frame(width: 17, height: 17)
+                            .overlay {
+                                Circle()
+                                    .stroke(.white, lineWidth: store.modifierColor(for: store.selectedControl) == color ? 2 : 0)
+                                if store.modifierColor(for: store.selectedControl) == color {
+                                    Image(systemName: "checkmark")
+                                        .font(.system(size: 8, weight: .bold))
+                                        .foregroundStyle(.black.opacity(0.72))
+                                }
+                            }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("\(color.displayName) modifier colour")
+                    .accessibilityValue(
+                        store.modifierColor(for: store.selectedControl) == color ? "Selected" : "Not selected"
+                    )
+                    .help("Use \(color.displayName) for this modifier")
+                }
+            }
+
             Toggle(
-                "K modifier",
+                "Enable K modifier",
                 isOn: Binding(
                     get: { store.isRemoteModifier(store.selectedControl) },
                     set: { _ = store.setRemoteModifier(store.selectedControl, enabled: $0) }
                 )
             )
+            .labelsHidden()
             .toggleStyle(.switch)
             .controlSize(.small)
 
@@ -924,13 +1007,49 @@ struct MappingInspector: View {
             } else {
                 Picker("Gesture", selection: Bindable(store).selectedGesture) {
                     ForEach(GestureKind.allCases) { gesture in
-                        Text(gesture.rawValue).tag(gesture)
+                        Text(gesture.rawValue)
+                        .tag(gesture)
+                        .accessibilityLabel(gesture.rawValue)
+                        .accessibilityValue(
+                            isGestureConfigured(gesture) ? "Configured" : "Not configured"
+                        )
                     }
                 }
                 .labelsHidden()
                 .pickerStyle(.segmented)
+                .overlay {
+                    HStack(spacing: 0) {
+                        ForEach(GestureKind.allCases) { gesture in
+                            Color.clear
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                .overlay(alignment: .trailing) {
+                                    if isGestureConfigured(gesture) {
+                                        Circle()
+                                            .fill(Color.green)
+                                            .frame(width: 6, height: 6)
+                                            .padding(.trailing, 8)
+                                    }
+                                }
+                        }
+                    }
+                    .accessibilityHidden(true)
+                    .allowsHitTesting(false)
+                }
             }
         }
+    }
+
+    private func isGestureConfigured(_ gesture: GestureKind) -> Bool {
+        let baseIsConfigured = store.isMappingConfigured(
+            for: store.selectedControl,
+            gesture: gesture
+        )
+        guard isStandardLayerEligible else { return baseIsConfigured }
+        return baseIsConfigured || store.isMappingConfigured(
+            for: store.selectedControl,
+            gesture: gesture,
+            modifierControls: store.selectedMappingModifiers
+        )
     }
 
     private func statusCard(title: String, value: String, detail: String) -> some View {
@@ -992,6 +1111,8 @@ private struct StandardMappingActionEditor: View {
     @State private var isEditingCommand = false
     @State private var shortcutCaptureCancellation = 0
     @State private var remoteTriggerCaptureCancellation = 0
+    @State private var pendingPasteConfirmation: MappingDestinationSnapshot?
+    @State private var pendingDeleteConfirmation: MappingDestinationSnapshot?
     @FocusState private var isCommandFieldFocused: Bool
 
     private var binding: Binding<Mapping> {
@@ -1022,18 +1143,30 @@ private struct StandardMappingActionEditor: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if let title {
-                HStack(spacing: 8) {
+            HStack(spacing: 8) {
+                if let title {
                     Text(title)
                         .font(.headline)
                         .lineLimit(1)
                     Spacer(minLength: 8)
+                } else {
+                    Spacer(minLength: 0)
                 }
+
+                if isPendingCutSource {
+                    Image(systemName: "scissors")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.orange)
+                        .help("This action is marked to move")
+                        .accessibilityLabel("Marked to move")
+                }
+
+                mappingClipboardControls
             }
 
             Picker("Action", selection: actionBinding) {
                 ForEach(ActionKind.allCases) { action in
-                    Text(action.rawValue).tag(action)
+                    Text(action.editorLabel).tag(action)
                 }
             }
 
@@ -1069,6 +1202,157 @@ private struct StandardMappingActionEditor: View {
         .onChange(of: isCommandFieldFocused) { _, isFocused in
             if !isFocused { isEditingCommand = false }
         }
+        .confirmationDialog(
+            "Replace the existing action?",
+            isPresented: pasteConfirmationIsPresented,
+            titleVisibility: .visible
+        ) {
+            Button("Replace", role: .destructive) {
+                cancelEditing()
+                if let pendingPasteConfirmation {
+                    _ = store.pasteMapping(to: pendingPasteConfirmation, replacingExisting: true)
+                }
+                self.pendingPasteConfirmation = nil
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Pasting here will replace the current action and its trigger settings.")
+        }
+        .confirmationDialog(
+            "Delete this action?",
+            isPresented: deleteConfirmationIsPresented,
+            titleVisibility: .visible
+        ) {
+            Button("Delete Action", role: .destructive) {
+                cancelEditing()
+                if let pendingDeleteConfirmation {
+                    _ = store.deleteMapping(for: pendingDeleteConfirmation)
+                }
+                self.pendingDeleteConfirmation = nil
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The action and its trigger settings will be reset to Empty.")
+        }
+    }
+
+    private var pasteConfirmationIsPresented: Binding<Bool> {
+        Binding(
+            get: { pendingPasteConfirmation != nil },
+            set: { isPresented in
+                if !isPresented { pendingPasteConfirmation = nil }
+            }
+        )
+    }
+
+    private var deleteConfirmationIsPresented: Binding<Bool> {
+        Binding(
+            get: { pendingDeleteConfirmation != nil },
+            set: { isPresented in
+                if !isPresented { pendingDeleteConfirmation = nil }
+            }
+        )
+    }
+
+    private var isPendingCutSource: Bool {
+        store.mappingClipboardOperation(
+            for: store.selectedControl,
+            gesture: store.selectedGesture,
+            modifierControls: modifierControls
+        ) == .cut
+    }
+
+    private var mappingClipboardControls: some View {
+        HStack(spacing: 1) {
+            Button {
+                cancelEditing()
+                _ = store.copyMapping(
+                    from: store.selectedControl,
+                    gesture: store.selectedGesture,
+                    modifierControls: modifierControls
+                )
+            } label: {
+                Image(systemName: "doc.on.doc")
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .help("Copy action")
+            .accessibilityLabel("Copy action")
+            .disabled(!store.canCopyMapping(
+                for: store.selectedControl,
+                gesture: store.selectedGesture,
+                modifierControls: modifierControls
+            ))
+
+            Button {
+                cancelEditing()
+                _ = store.cutMapping(
+                    from: store.selectedControl,
+                    gesture: store.selectedGesture,
+                    modifierControls: modifierControls
+                )
+            } label: {
+                Image(systemName: "scissors")
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .help("Cut action for moving")
+            .accessibilityLabel("Cut action")
+            .disabled(!store.canCutMapping(
+                for: store.selectedControl,
+                gesture: store.selectedGesture,
+                modifierControls: modifierControls
+            ))
+
+            Button {
+                cancelEditing()
+                let destination = store.mappingDestinationSnapshot(
+                    for: store.selectedControl,
+                    gesture: store.selectedGesture,
+                    modifierControls: modifierControls
+                )
+                switch store.pasteMapping(to: destination) {
+                case .destinationOccupied:
+                    pendingPasteConfirmation = destination
+                default:
+                    break
+                }
+            } label: {
+                Image(systemName: "clipboard")
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .help("Paste action")
+            .accessibilityLabel("Paste action")
+            .disabled(!store.canPasteMapping(
+                to: store.selectedControl,
+                gesture: store.selectedGesture,
+                modifierControls: modifierControls
+            ))
+
+            Button(role: .destructive) {
+                let destination = store.mappingDestinationSnapshot(
+                    for: store.selectedControl,
+                    gesture: store.selectedGesture,
+                    modifierControls: modifierControls
+                )
+                if destination.expectedMapping != Mapping() {
+                    pendingDeleteConfirmation = destination
+                }
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .help("Delete action")
+            .accessibilityLabel("Delete action")
+            .disabled(!store.destinationHasMapping(
+                for: store.selectedControl,
+                gesture: store.selectedGesture,
+                modifierControls: modifierControls
+            ))
+        }
+        .font(.caption)
     }
 
     @ViewBuilder
@@ -1124,9 +1408,7 @@ private struct StandardMappingActionEditor: View {
                 }
             }
         case .noAction:
-            Text("This mapping will not perform an action.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            EmptyView()
         }
 
         if selectedAction.isProcessBackedAutomation {

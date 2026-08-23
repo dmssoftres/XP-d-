@@ -46,6 +46,10 @@ final class HIDService {
     @ObservationIgnored private var bluetoothBatteryPercentage: Int?
     @ObservationIgnored private var lastBatteryRefresh = Date.distantPast
     private let logger = Logger(subsystem: "com.dmssoftres.xpd", category: "HID")
+    private let modifierArbitrationLogger = Logger(
+        subsystem: "com.dmssoftres.xpd",
+        category: "ModifierArbitration"
+    )
 
     private static let batteryPropertyKeys = [
         "BatteryPercent",
@@ -192,6 +196,7 @@ final class HIDService {
                 // that detent's release. While center is held, it must not
                 // confirm the profile selector; the next standalone empty
                 // report is the center release.
+                modifierArbitrationLogger.info("report-6 empty release")
                 report6ControlIsActive = false
                 if wheelCenterIsHeld {
                     return

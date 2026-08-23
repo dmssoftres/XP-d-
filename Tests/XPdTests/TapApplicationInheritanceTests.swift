@@ -98,6 +98,22 @@ final class TapApplicationInheritanceTests: XCTestCase {
         XCTAssertFalse(presentation.isConfigured)
     }
 
+    func testMappingConfiguredStatusUsesResolvedHUDReadiness() {
+        let store = makeStore()
+        store.update(Mapping(action: .openApplication, command: "Finder"), for: .k1, gesture: .tap)
+        store.update(
+            Mapping(action: .toggleApplication, command: "Ignored", usesTapApplication: true),
+            for: .k1,
+            gesture: .hold
+        )
+        store.update(Mapping(action: .openApplication, command: ""), for: .k1, gesture: .doubleTap)
+
+        XCTAssertTrue(store.isMappingConfigured(for: .k1, gesture: .tap))
+        XCTAssertTrue(store.isMappingConfigured(for: .k1, gesture: .hold))
+        XCTAssertFalse(store.isMappingConfigured(for: .k1, gesture: .doubleTap))
+        XCTAssertFalse(store.isMappingConfigured(for: .k2, gesture: .tap))
+    }
+
     func testMissingNonApplicationAndBlankTapTargetsFailSafely() {
         let store = makeStore()
         let hold = Mapping(action: .toggleApplication, command: "Ignored", usesTapApplication: true)
