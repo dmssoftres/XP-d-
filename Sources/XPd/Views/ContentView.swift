@@ -64,23 +64,28 @@ struct ContentView: View {
             if store.hid.isConnected {
                 batteryIndicator
             }
+            Spacer(minLength: 24)
             HStack(spacing: 12) {
                 workspaceControls
                 configurationControls
-                Picker("Profile", selection: profileSelectionBinding) {
-                    ForEach(store.availableProfiles, id: \.self) { profile in
-                        HStack(spacing: 6) {
-                            Text(profile)
-                            Text(store.profileRealm(for: profile) == .midi ? "MIDI" : "Standard")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    Text("Profile")
+                    Picker("Profile", selection: profileSelectionBinding) {
+                        ForEach(store.availableProfiles, id: \.self) { profile in
+                            HStack(spacing: 6) {
+                                Text(profile)
+                                Text(store.profileRealm(for: profile) == .midi ? "MIDI" : "Standard")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .tag(profile)
                         }
-                        .tag(profile)
                     }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .controlSize(.regular)
+                    .frame(width: 150, height: 24)
                 }
-                .pickerStyle(.menu)
-                .controlSize(.regular)
-                .frame(width: 300, height: 24)
                 Button {
                     isManagingProfiles = true
                 } label: {
@@ -91,7 +96,7 @@ struct ContentView: View {
                 .help("Add, rename, or remove profiles")
                 .accessibilityLabel("Manage profiles")
             }
-            .frame(maxWidth: .infinity, alignment: .trailing)
+            .fixedSize(horizontal: true, vertical: false)
         }
         .frame(maxWidth: .infinity)
         .padding(.horizontal, 22)
@@ -271,6 +276,7 @@ private struct ProfileManagementView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var newProfileName = ""
     @State private var newProfileRealm: ProfileRealm = .standard
+    @State private var midiProfileTemplate: MIDIProfileTemplate = .performancePads
     @State private var profileBeingRenamed: String?
     @State private var renamedProfileName = ""
     @State private var profileToDelete: String?
@@ -370,6 +376,15 @@ private struct ProfileManagementView: View {
                     .disabled(newProfileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
 
+            if newProfileRealm == .midi {
+                Picker("MIDI template", selection: $midiProfileTemplate) {
+                    ForEach(MIDIProfileTemplate.allCases) { template in
+                        Text(template.displayName).tag(template)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
+
             if let errorMessage {
                 Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
@@ -378,7 +393,7 @@ private struct ProfileManagementView: View {
             }
         }
         .padding(20)
-        .frame(width: 420, height: 390)
+        .frame(width: 420, height: 430)
         .confirmationDialog(
             "Delete \(profileToDelete ?? "profile")?",
             isPresented: Binding(
@@ -403,7 +418,7 @@ private struct ProfileManagementView: View {
     private func addProfile() {
         do {
             if newProfileRealm == .midi {
-                _ = try store.addMIDIProfile(named: newProfileName)
+                _ = try store.addMIDIProfile(named: newProfileName, template: midiProfileTemplate)
             } else {
                 _ = try store.addProfile(named: newProfileName)
             }

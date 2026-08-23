@@ -4,6 +4,28 @@ import XCTest
 
 @MainActor
 final class MappingStoreMIDITests: XCTestCase {
+
+    @MainActor
+    func testAbletonControllerTemplateUsesDedicatedControlMessages() throws {
+        let store = makeStore()
+
+        _ = try store.addMIDIProfile(named: "Ableton Controller", template: .abletonController)
+
+        let primary = store.midiButtonMapping(for: .k1)
+        XCTAssertEqual(primary.kind, .cc)
+        XCTAssertEqual(primary.outputPort, .control)
+        XCTAssertEqual(primary.channel, 16)
+        XCTAssertEqual(primary.controller, 20)
+        XCTAssertEqual(primary.pressValue, 127)
+        XCTAssertEqual(primary.releaseValue, 0)
+
+        store.selectedMIDILayer = .function
+        let function = store.midiButtonMapping(for: .k1, layer: .function)
+        XCTAssertEqual(function.kind, .note)
+        XCTAssertEqual(function.outputPort, .control)
+        XCTAssertEqual(function.channel, 16)
+        XCTAssertEqual(function.note, 118)
+    }
     nonisolated(unsafe) private var defaults: UserDefaults!
     nonisolated(unsafe) private var suiteName = ""
 

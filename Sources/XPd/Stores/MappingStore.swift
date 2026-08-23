@@ -961,6 +961,15 @@ final class MappingStore {
         try addProfile(named: name, realm: .midi, midiSettings: settings)
     }
 
+    @discardableResult
+    func addMIDIProfile(named name: String, template: MIDIProfileTemplate) throws -> String {
+        try addProfile(
+            named: name,
+            realm: .midi,
+            midiSettings: Self.midiProfileSettings(for: template)
+        )
+    }
+
     /// Renames a profile in place without changing its order, realm, mappings,
     /// HID bindings, or active MIDI session state. Global remains the stable
     /// migration and fallback identity.
@@ -2440,6 +2449,69 @@ final class MappingStore {
             primaryWheel: MIDIWheelMapping(kind: .pitchBendNudgeReturn, outputPort: .performance),
             functionWheel: MIDIWheelMapping(kind: .absoluteCC, outputPort: .control, controller: 1)
         )
+    }
+
+    private static func midiProfileSettings(for template: MIDIProfileTemplate) -> MIDIProfileSettings {
+        switch template {
+        case .performancePads:
+            return defaultMIDIProfileSettings()
+        case .abletonController:
+            let primary = (1...10).map { index in
+                MIDIButtonMappingEntry(
+                    control: RemoteControl.allCases[index - 1],
+                    mapping: MIDIButtonMapping(
+                        kind: .cc,
+                        outputPort: .control,
+                        channel: 16,
+                        controller: 19 + index,
+                        pressValue: 127,
+                        releaseValue: 0,
+                        interaction: .momentary,
+                        label: "Ableton K\(index)"
+                    )
+                )
+            }
+            let function = (1...10).map { index in
+                MIDIButtonMappingEntry(
+                    control: RemoteControl.allCases[index - 1],
+                    mapping: MIDIButtonMapping(
+                        kind: .note,
+                        outputPort: .control,
+                        channel: 16,
+                        note: 117 + index,
+                        velocity: 127,
+                        releaseVelocity: 0,
+                        interaction: .momentary,
+                        label: "Ableton Fn K\(index)"
+                    )
+                )
+            }
+            return MIDIProfileSettings(
+                fnControl: .k10,
+                primaryButtons: primary,
+                functionButtons: function,
+                primaryWheel: MIDIWheelMapping(
+                    kind: .relativeCC,
+                    outputPort: .control,
+                    channel: 16,
+                    controller: 16,
+                    relativeEncoding: .twosComplement,
+                    clockwiseValue: 1,
+                    counterClockwiseValue: 127,
+                    label: "Ableton Encoder"
+                ),
+                functionWheel: MIDIWheelMapping(
+                    kind: .relativeCC,
+                    outputPort: .control,
+                    channel: 16,
+                    controller: 17,
+                    relativeEncoding: .twosComplement,
+                    clockwiseValue: 1,
+                    counterClockwiseValue: 127,
+                    label: "Ableton Fn Encoder"
+                )
+            )
+        }
     }
 
     private static func mappingEntries(from mappings: [MappingKey: Mapping]) -> [XPdConfiguration.MappingEntry] {

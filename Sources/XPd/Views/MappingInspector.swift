@@ -4,6 +4,7 @@ import SwiftUI
 struct MappingInspector: View {
     let store: MappingStore
     @State private var activeStandardEditorLayer: Set<RemoteControl>?
+    @State private var showsStatusAndInput = false
 
     var body: some View {
         Group {
@@ -33,11 +34,6 @@ struct MappingInspector: View {
                 mappingEditor
             }
 
-            HStack(spacing: 12) {
-                statusCard(title: "Current profile", value: store.profileName, detail: "local mappings")
-                statusCard(title: "Device", value: store.hid.isConnected ? "Connected" : "Offline", detail: "VID 10429 · PID 514")
-            }
-
             if let message = store.lastConfigurationResult.message {
                 Label(
                     message,
@@ -49,6 +45,13 @@ struct MappingInspector: View {
                 .foregroundStyle(store.lastConfigurationResult.isSuccess ? Color.green : Color.orange)
                 .lineLimit(2)
             }
+
+            DisclosureGroup(isExpanded: $showsStatusAndInput) {
+                VStack(alignment: .leading, spacing: 18) {
+                    HStack(spacing: 12) {
+                        statusCard(title: "Current profile", value: store.profileName, detail: "local mappings")
+                        statusCard(title: "Device", value: store.hid.isConnected ? "Connected" : "Offline", detail: "VID 10429 · PID 514")
+                    }
 
             GroupBox("Live HID") {
                 VStack(alignment: .leading, spacing: 10) {
@@ -135,6 +138,12 @@ struct MappingInspector: View {
                     .disabled(!store.showsInputOverlay)
                 }
                 .padding(4)
+            }
+                }
+                .padding(.top, 8)
+            } label: {
+                Text("Status & Input")
+                    .font(.headline)
             }
 
             Spacer(minLength: 0)

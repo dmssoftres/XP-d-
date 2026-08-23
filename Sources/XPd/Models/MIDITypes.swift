@@ -26,6 +26,23 @@ enum MIDIOutputPort: String, Codable, CaseIterable, Identifiable, Hashable {
     var displayName: String { midiSourceName }
 }
 
+/// Starting layouts offered when creating a MIDI profile. The template is a
+/// creation-time choice, not persisted profile state; users remain free to
+/// edit every mapping afterward.
+enum MIDIProfileTemplate: String, CaseIterable, Identifiable {
+    case performancePads
+    case abletonController
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .performancePads: "Performance Pads"
+        case .abletonController: "Ableton Controller"
+        }
+    }
+}
+
 /// A MIDI profile has one ordinary layer and one momentary Fn layer.
 enum MIDIMappingLayer: String, Codable, CaseIterable, Identifiable, Hashable {
     case primary
