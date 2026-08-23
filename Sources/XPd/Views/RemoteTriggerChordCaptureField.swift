@@ -1,36 +1,47 @@
 import AppKit
 import SwiftUI
 
-/// Captures the modifier portion of a physical remote-button trigger. The
-/// remote button itself arrives through MappingStore's temporary HID capture;
-/// this view only tracks the keyboard modifiers while the mouse capture is
-/// active and commits once the user clicks the field a second time.
+/// Edits one fixed physical remote chord. The destination K is never
+/// replaceable: designated K modifiers can be added from the menu or by
+/// pressing them while recording, alongside zero or one ordinary keyboard
+/// key and any macOS modifier flags.
 struct RemoteTriggerChordCaptureField: View {
     let selectedControl: RemoteControl
+    let modifierControls: Set<RemoteControl>
+    let availableModifierControls: [RemoteControl]
     let currentModifiers: Set<KeyboardShortcut.Modifier>
     let currentFunctionKey: UInt16?
+    let currentKeyCode: UInt16?
+    let currentKeyDisplay: String?
     let cancellationGeneration: Int
-    let beginCapture: (@escaping (RemoteControl) -> Void) -> Void
-    let endCapture: () -> Void
-    let onCommit: (RemoteControl, Set<KeyboardShortcut.Modifier>, UInt16?) -> Void
+    let beginRemoteCapture: (@escaping (RemoteControl) -> Void) -> Void
+    let endRemoteCapture: () -> Void
+    let onModifierControlsChange: (Set<RemoteControl>) -> Void
+    let onKeyboardConditionCommit: (
+        Set<RemoteControl>,
+        Set<KeyboardShortcut.Modifier>,
+        UInt16?,
+        String?
+    ) -> Void
     let onRecordingChange: (Bool) -> Void
 
     @State private var isRecording = false
-    @State private var draftControl: RemoteControl?
+    @State private var draftModifierControls: Set<RemoteControl> = []
     @State private var draftModifiers: Set<KeyboardShortcut.Modifier> = []
-    @State private var draftFunctionKey: UInt16?
+    @State private var draftKeyCode: UInt16?
+    @State private var draftKeyDisplay = ""
     @State private var currentModifierFlags: NSEvent.ModifierFlags = []
-    @State private var didCaptureButton = false
+    @State private var didEditKeyboardCondition = false
     @State private var eventMonitor: Any?
 
     private var hasDraft: Bool {
-        draftControl != nil || !draftModifiers.isEmpty || draftFunctionKey != nil
+        draftKeyCode != nil || !draftModifiers.isEmpty || !draftModifierControls.isEmpty
     }
 
-    private var hasModifiersToClear: Bool {
+    private var hasConditionsToClear: Bool {
         isRecording
-            ? !draftModifiers.isEmpty || draftFunctionKey != nil
-            : !currentModifiers.isEmpty || currentFunctionKey != nil
+            ? didEditKeyboardCondition || !draftModifiers.isEmpty || draftKeyCode != nil
+            : !currentModifiers.isEmpty || currentFunctionKey != nil || currentKeyCode != nil
     }
 
     var body: some View {
@@ -38,10 +49,10 @@ struct RemoteTriggerChordCaptureField: View {
             HStack(spacing: 6) {
                 Button(action: toggleRecording) {
                     HStack(spacing: 8) {
-                        Image(systemName: isRecording ? "record.circle.fill" : "rectangle.connected.to.line.below")
+                        Image(systemName: isRecording ? "record.circle.fill" : "keyboard")
                             .foregroundStyle(isRecording ? Color.red : Color.secondary)
                         Text(displayValue)
-                            .foregroundStyle(displayValueIsPlaceholder ? .secondary : .primary)
+                            .foregroundStyle(.primary)
                             .lineLimit(1)
                             .truncationMode(.middle)
                         Spacer(minLength: 8)
@@ -55,19 +66,41 @@ struct RemoteTriggerChordCaptureField: View {
                 }
                 .buttonStyle(.plain)
                 .frame(maxWidth: .infinity)
-                .accessibilityLabel(isRecording ? "Recording remote trigger" : "Record remote trigger")
+                .accessibilityLabel(isRecording ? "Recording trigger chord" : "Record trigger chord")
                 .help(isRecording
-                    ? "Hold modifiers, press a remote K button, then click to save."
-                    : "Click to record a remote trigger chord")
+                    ? "Press designated K modifiers and optionally hold keyboard modifiers or one key, then click to save."
+                    : "Click to record this remote and keyboard chord")
 
-                if hasModifiersToClear {
+                if !availableModifierControls.isEmpty {
+                    Menu {
+                        ForEach(availableModifierControls) { control in
+                            Toggle(
+                                control.rawValue,
+                                isOn: Binding(
+                                    get: { displayedModifierControls.contains(control) },
+                                    set: { enabled in
+                                        updateModifierControl(control, enabled: enabled)
+                                    }
+                                )
+                            )
+                        }
+                    } label: {
+                        Image(systemName: "square.stack.3d.up")
+                            .foregroundStyle(.secondary)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .accessibilityLabel("Choose K modifier conditions")
+                    .help("Add or remove designated K modifiers; \(selectedControl.rawValue) remains the destination")
+                }
+
+                if hasConditionsToClear {
                     Button(action: clearTriggerKeys) {
                         Image(systemName: "xmark.circle.fill")
                             .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Clear remote trigger keys")
-                    .help("Clear special keys and restore the plain remote button trigger")
+                    .accessibilityLabel("Clear keyboard condition")
+                    .help("Clear the optional keyboard condition")
                 }
             }
             .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 5))
@@ -83,20 +116,28 @@ struct RemoteTriggerChordCaptureField: View {
                         ForEach(KeyboardShortcut.modifierOrder.filter { draftModifiers.contains($0) }, id: \.self) { modifier in
                             removableChip(label: modifier.symbol, accessibilityLabel: "Remove \(modifier.rawValue) modifier") {
                                 draftModifiers.remove(modifier)
+                                didEditKeyboardCondition = true
                             }
                         }
 
-                        if let draftFunctionKey,
-                           let label = KeyboardShortcut.functionKeyLabel(for: draftFunctionKey) {
-                            removableChip(label: label, accessibilityLabel: "Remove \(label) function key") {
-                                self.draftFunctionKey = nil
+                        ForEach(RemoteControl.allCases.filter { draftModifierControls.contains($0) }) { control in
+                            removableChip(
+                                label: control.rawValue,
+                                accessibilityLabel: "Remove \(control.rawValue) K modifier"
+                            ) {
+                                guard draftModifierControls.count > 1 else { return }
+                                draftModifierControls.remove(control)
                             }
                         }
 
-                        if let draftControl {
-                            removableChip(label: draftControl.rawValue, accessibilityLabel: "Remove \(draftControl.rawValue) remote button") {
-                                self.draftControl = nil
-                                didCaptureButton = false
+                        if draftKeyCode != nil {
+                            removableChip(
+                                label: draftKeyDisplay,
+                                accessibilityLabel: "Remove \(draftKeyDisplay) key"
+                            ) {
+                                draftKeyCode = nil
+                                draftKeyDisplay = ""
+                                didEditKeyboardCondition = true
                             }
                         }
                     }
@@ -134,27 +175,44 @@ struct RemoteTriggerChordCaptureField: View {
         .help(accessibilityLabel)
     }
 
-    private var displayValue: String {
-        let control = isRecording ? draftControl : selectedControl
-        let modifiers = isRecording ? draftModifiers : currentModifiers
-        let prefix = KeyboardShortcut.modifierOrder
-            .filter { modifiers.contains($0) }
-            .map(\.symbol)
-            .joined()
-        let functionKey = isRecording ? draftFunctionKey : currentFunctionKey
-        let keyPrefix = functionKey.flatMap(KeyboardShortcut.functionKeyLabel(for:)) ?? ""
-
-        if let control {
-            return prefix + keyPrefix + control.rawValue
-        }
-        if isRecording {
-            return prefix.isEmpty ? "Recording — press a remote K button" : "Recording \(prefix) — press a remote K button"
-        }
-        return "No remote trigger modifier"
+    private var remoteChordLabel: String {
+        let modifiers = RemoteControl.allCases
+            .filter { displayedModifierControls.contains($0) }
+            .map(\.rawValue)
+        return (modifiers + [selectedControl.rawValue]).joined(separator: " + ")
     }
 
-    private var displayValueIsPlaceholder: Bool {
-        !isRecording && currentModifiers.isEmpty
+    private var displayedModifierControls: Set<RemoteControl> {
+        isRecording ? draftModifierControls : modifierControls
+    }
+
+    private var keyboardConditionLabel: String? {
+        let modifiers = KeyboardShortcut.modifierOrder
+            .filter { (isRecording ? draftModifiers : currentModifiers).contains($0) }
+            .map(\.symbol)
+        let keyCode = isRecording ? draftKeyCode : (currentKeyCode ?? currentFunctionKey)
+        let key = isRecording
+            ? (draftKeyCode == nil ? nil : draftKeyDisplay)
+            : keyCode.map {
+                (currentKeyDisplay?.isEmpty == false ? currentKeyDisplay : nil)
+                    ?? KeyboardShortcut.functionKeyLabel(for: $0)
+                    ?? "Key \($0)"
+            }
+        let values = modifiers + (key.map { [$0] } ?? [])
+        return values.isEmpty ? nil : values.joined(separator: " + ")
+    }
+
+    private var displayValue: String {
+        if isRecording {
+            if let keyboardConditionLabel {
+                return "Recording \(keyboardConditionLabel) + \(remoteChordLabel)"
+            }
+            return "Recording \(remoteChordLabel) — optional key"
+        }
+        if let keyboardConditionLabel {
+            return "\(keyboardConditionLabel) + \(remoteChordLabel)"
+        }
+        return remoteChordLabel
     }
 
     private func toggleRecording() {
@@ -162,47 +220,54 @@ struct RemoteTriggerChordCaptureField: View {
     }
 
     private func startRecording() {
-        draftControl = nil
-        draftModifiers = []
-        draftFunctionKey = nil
+        draftModifierControls = modifierControls
+        draftModifiers = currentModifiers
+        draftKeyCode = currentKeyCode ?? currentFunctionKey
+        draftKeyDisplay = currentKeyDisplay
+            ?? currentFunctionKey.flatMap(KeyboardShortcut.functionKeyLabel(for:))
+            ?? draftKeyCode.map { "Key \($0)" }
+            ?? ""
         currentModifierFlags = []
-        didCaptureButton = false
+        didEditKeyboardCondition = false
         isRecording = true
+        beginRemoteCapture { control in
+            guard control != selectedControl,
+                  availableModifierControls.contains(control),
+                  isRecording else { return }
+            draftModifierControls.insert(control)
+        }
         onRecordingChange(true)
 
         eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { event in
             switch event.type {
             case .keyDown:
-                if event.keyCode == 53 {
-                    stopRecording(commit: false)
-                } else if KeyboardShortcut.functionKeyLabel(for: event.keyCode) != nil, !event.isARepeat {
-                    draftFunctionKey = event.keyCode
+                if let captured = KeyboardShortcutCaptureFormatter.shortcut(for: event) {
+                    draftKeyCode = captured.keyCode
+                    draftKeyDisplay = KeyboardShortcutCaptureFormatter.keyLabel(for: event)
+                    draftModifiers = captured.modifiers
+                    didEditKeyboardCondition = true
                 }
             case .flagsChanged:
                 currentModifierFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-                if !didCaptureButton {
+                if draftKeyCode == nil {
                     draftModifiers = KeyboardShortcutCaptureFormatter.modifierSet(for: currentModifierFlags)
+                    didEditKeyboardCondition = true
                 }
             default:
                 break
             }
             return nil
         }
-
-        beginCapture { control in
-            guard isRecording else { return }
-            draftControl = control
-            draftModifiers = KeyboardShortcutCaptureFormatter.modifierSet(for: currentModifierFlags)
-            didCaptureButton = true
-        }
     }
 
     private func clearTriggerKeys() {
         if isRecording {
             draftModifiers.removeAll()
-            draftFunctionKey = nil
+            draftKeyCode = nil
+            draftKeyDisplay = ""
+            didEditKeyboardCondition = true
         } else {
-            onCommit(selectedControl, [], nil)
+            onKeyboardConditionCommit(modifierControls, [], nil, nil)
         }
     }
 
@@ -213,17 +278,45 @@ struct RemoteTriggerChordCaptureField: View {
             self.eventMonitor = nil
         }
         isRecording = false
+        endRemoteCapture()
         onRecordingChange(false)
-        endCapture()
 
-        if commit, didCaptureButton, let draftControl {
-            onCommit(draftControl, draftModifiers, draftFunctionKey)
+        if commit, draftModifierControls != modifierControls {
+            onModifierControlsChange(draftModifierControls)
+        }
+        if commit, didEditKeyboardCondition {
+            onKeyboardConditionCommit(
+                draftModifierControls,
+                draftModifiers,
+                draftKeyCode,
+                draftKeyDisplay.isEmpty ? nil : draftKeyDisplay
+            )
         }
 
-        draftControl = nil
+        draftModifierControls = []
         draftModifiers = []
-        draftFunctionKey = nil
+        draftKeyCode = nil
+        draftKeyDisplay = ""
         currentModifierFlags = []
-        didCaptureButton = false
+        didEditKeyboardCondition = false
+    }
+
+    private func updateModifierControl(_ control: RemoteControl, enabled: Bool) {
+        guard control != selectedControl,
+              availableModifierControls.contains(control) else { return }
+
+        var next = displayedModifierControls
+        if enabled {
+            next.insert(control)
+        } else {
+            next.remove(control)
+        }
+        guard modifierControls.isEmpty || !next.isEmpty else { return }
+
+        if isRecording {
+            draftModifierControls = next
+        } else {
+            onModifierControlsChange(next)
+        }
     }
 }

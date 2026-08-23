@@ -111,6 +111,167 @@ final class XPdConfigurationTests: XCTestCase {
         XCTAssertEqual(encoded, try decoded.encodedData())
     }
 
+    func testArbitraryRemoteTriggerKeyRoundTripsWithLegacyConditions() throws {
+        let configuration = XPdConfiguration(
+            profiles: [
+                .init(
+                    name: "Global",
+                    mappings: [
+                        .init(
+                            control: .k1,
+                            gesture: .tap,
+                            mapping: Mapping(
+                                action: .openApplication,
+                                command: "K condition",
+                                remoteTriggerModifiers: [.command, .shift],
+                                remoteTriggerKeyCode: 40,
+                                remoteTriggerKeyDisplay: "K"
+                            )
+                        ),
+                        .init(
+                            control: .k2,
+                            gesture: .tap,
+                            mapping: Mapping(
+                                action: .openApplication,
+                                command: "F condition",
+                                remoteTriggerModifiers: [.option],
+                                remoteTriggerFunctionKey: 118
+                            )
+                        )
+                    ],
+                    hidBindings: []
+                )
+            ],
+            profileName: "Global",
+            showsInputOverlay: true
+        )
+
+        let encoded = try configuration.encodedData()
+        let decoded = try XPdConfiguration.decode(encoded)
+        let arbitrary = try XCTUnwrap(decoded.profiles[0].mappings.first { $0.control == .k1 })
+        let legacy = try XCTUnwrap(decoded.profiles[0].mappings.first { $0.control == .k2 })
+
+        XCTAssertEqual(decoded.version, XPdConfiguration.currentVersion)
+        XCTAssertEqual(arbitrary.mapping.remoteTriggerKeyCode, 40)
+        XCTAssertEqual(arbitrary.mapping.remoteTriggerKeyDisplay, "K")
+        XCTAssertEqual(arbitrary.mapping.remoteTriggerModifiers, [.command, .shift])
+        XCTAssertEqual(legacy.mapping.remoteTriggerFunctionKey, 118)
+        XCTAssertEqual(legacy.mapping.remoteTriggerModifiers, [.option])
+        XCTAssertEqual(encoded, try decoded.encodedData())
+    }
+
+    func testVersionSixMigratesLegacyRemoteTriggerFieldsWithoutLoss() throws {
+        let legacy = XPdConfiguration(
+            version: XPdConfiguration.preRemoteTriggerKeysVersion,
+            profiles: [
+                .init(
+                    name: "Global",
+                    mappings: [
+                        .init(
+                            control: .k1,
+                            gesture: .tap,
+                            mapping: Mapping(
+                                action: .openApplication,
+                                command: "legacy",
+                                remoteTriggerModifiers: [.control],
+                                remoteTriggerFunctionKey: 118
+                            )
+                        )
+                    ],
+                    hidBindings: [],
+                    remoteModifierControls: [.k3]
+                )
+            ],
+            profileName: "Global",
+            showsInputOverlay: true
+        )
+
+        let upgraded = try XPdConfiguration.decode(JSONEncoder().encode(legacy))
+        let mapping = try XCTUnwrap(upgraded.profiles[0].mappings.first)
+
+        XCTAssertEqual(upgraded.version, XPdConfiguration.currentVersion)
+        XCTAssertEqual(upgraded.profiles[0].remoteModifierControls, [.k3])
+        XCTAssertEqual(mapping.mapping.remoteTriggerModifiers, [.control])
+        XCTAssertEqual(mapping.mapping.remoteTriggerFunctionKey, 118)
+        XCTAssertNil(mapping.mapping.remoteTriggerKeyCode)
+        XCTAssertNil(mapping.mapping.remoteTriggerKeyDisplay)
+
+        let roundTripped = try XPdConfiguration.decode(try upgraded.encodedData())
+        XCTAssertEqual(roundTripped, upgraded)
+    }
+
+    func testRemoteTriggerKeyValidationRejectsModifierAndMultipleKeys() {
+        let modifierKey = XPdConfiguration(
+            profiles: [
+                .init(
+                    name: "Global",
+                    mappings: [.init(
+                        control: .k1,
+                        gesture: .tap,
+                        mapping: Mapping(remoteTriggerKeyCode: 55, remoteTriggerKeyDisplay: "⌘")
+                    )],
+                    hidBindings: []
+                )
+            ],
+            profileName: "Global",
+            showsInputOverlay: true
+        )
+        XCTAssertThrowsError(try modifierKey.validate()) { error in
+            XCTAssertEqual(
+                error as? XPdConfiguration.ValidationError,
+                .invalidRemoteTriggerKey(profile: "Global", primary: .k1, gesture: .tap)
+            )
+        }
+
+        let multipleKeys = XPdConfiguration(
+            profiles: [
+                .init(
+                    name: "Global",
+                    mappings: [.init(
+                        control: .k1,
+                        gesture: .tap,
+                        mapping: Mapping(
+                            remoteTriggerFunctionKey: 118,
+                            remoteTriggerKeyCode: 40,
+                            remoteTriggerKeyDisplay: "K"
+                        )
+                    )],
+                    hidBindings: []
+                )
+            ],
+            profileName: "Global",
+            showsInputOverlay: true
+        )
+        XCTAssertThrowsError(try multipleKeys.validate()) { error in
+            XCTAssertEqual(
+                error as? XPdConfiguration.ValidationError,
+                .multipleRemoteTriggerKeys(profile: "Global", primary: .k1, gesture: .tap)
+            )
+        }
+
+        let outOfRangeKey = XPdConfiguration(
+            profiles: [
+                .init(
+                    name: "Global",
+                    mappings: [.init(
+                        control: .k1,
+                        gesture: .tap,
+                        mapping: Mapping(remoteTriggerKeyCode: 128, remoteTriggerKeyDisplay: "Key 128")
+                    )],
+                    hidBindings: []
+                )
+            ],
+            profileName: "Global",
+            showsInputOverlay: true
+        )
+        XCTAssertThrowsError(try outOfRangeKey.validate()) { error in
+            XCTAssertEqual(
+                error as? XPdConfiguration.ValidationError,
+                .invalidRemoteTriggerKey(profile: "Global", primary: .k1, gesture: .tap)
+            )
+        }
+    }
+
     func testVersionFiveMigratesToEmptyRemoteModifierState() throws {
         let legacy = XPdConfiguration(
             version: XPdConfiguration.preRemoteLayersVersion,

@@ -155,7 +155,7 @@ struct MappingInspector: View {
                         ) { Text("Adjust standalone hold threshold") }
                         .labelsHidden()
                     }
-                    Text("A designated K modifier runs its Base Tap action only after it remains held this long. Press another K before the threshold to use the modifier layer instead.")
+                    Text("Holding a designated K this long makes its Base Tap eligible. Release it alone to run Base, or press another K at any time while it is held to run that exact layer instead.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -702,7 +702,6 @@ struct MappingInspector: View {
                             store: store,
                             modifierControls: store.selectedMappingModifiers,
                             title: "\(mappingLayerLabel) Action",
-                            layerPicker: AnyView(mappingLayerPicker),
                             activeCaptureLayer: $activeStandardEditorLayer
                         )
                     }
@@ -845,33 +844,6 @@ struct MappingInspector: View {
         }
     }
 
-    private var mappingLayerPicker: some View {
-        Menu {
-            ForEach(availableMappingModifiers) { control in
-                Toggle(
-                    control.rawValue,
-                    isOn: Binding(
-                        get: { store.selectedMappingModifiers.contains(control) },
-                        set: { enabled in
-                            var selected = store.selectedMappingModifiers
-                            if enabled {
-                                selected.insert(control)
-                            } else if selected.count > 1 {
-                                selected.remove(control)
-                            }
-                            store.selectedMappingModifiers = selected
-                        }
-                    )
-                )
-            }
-        } label: {
-            Label(mappingLayerLabel, systemImage: "square.stack.3d.up")
-        }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .help("Choose the modifier layer shown in the right column")
-    }
-
     private var availableMappingModifiers: [RemoteControl] {
         RemoteControl.allCases.filter {
             store.isRemoteModifier($0) && $0 != store.selectedControl
@@ -879,7 +851,7 @@ struct MappingInspector: View {
     }
 
     private func ensureModifierLayerSelection() {
-        guard isStandardLayerEligible else { return }
+        guard canChooseStandardLayer else { return }
         let available = Set(availableMappingModifiers)
         let selected = store.selectedMappingModifiers.intersection(available)
         if selected.isEmpty, let first = availableMappingModifiers.first {
@@ -936,6 +908,10 @@ struct MappingInspector: View {
     }
 
     private var isStandardLayerEligible: Bool {
+        canChooseStandardLayer && !store.selectedMappingModifiers.isEmpty
+    }
+
+    private var canChooseStandardLayer: Bool {
         isStandardButtonTitleEligible
             && !store.isRemoteModifier(store.selectedControl)
             && !store.remoteModifierControls.isEmpty
@@ -962,7 +938,6 @@ private struct StandardMappingActionEditor: View {
     let store: MappingStore
     let modifierControls: Set<RemoteControl>
     let title: String?
-    var layerPicker: AnyView? = nil
     @Binding var activeCaptureLayer: Set<RemoteControl>?
 
     @State private var isEditingCommand = false
@@ -990,17 +965,20 @@ private struct StandardMappingActionEditor: View {
         )
     }
 
+    private var availableModifierControls: [RemoteControl] {
+        RemoteControl.allCases.filter {
+            store.isRemoteModifier($0) && $0 != store.selectedControl
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if title != nil || layerPicker != nil {
+            if let title {
                 HStack(spacing: 8) {
-                    if let title {
-                        Text(title)
-                            .font(.headline)
-                            .lineLimit(1)
-                    }
+                    Text(title)
+                        .font(.headline)
+                        .lineLimit(1)
                     Spacer(minLength: 8)
-                    layerPicker
                 }
             }
 
@@ -1172,34 +1150,56 @@ private struct StandardMappingActionEditor: View {
 
     private var remoteTriggerEditor: some View {
         VStack(alignment: .leading, spacing: 7) {
-            Text("Remote trigger")
+            Text("When pressed")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             RemoteTriggerChordCaptureField(
                 selectedControl: store.selectedControl,
+                modifierControls: modifierControls,
+                availableModifierControls: modifierControls.isEmpty ? [] : availableModifierControls,
                 currentModifiers: binding.wrappedValue.remoteTriggerModifiers,
                 currentFunctionKey: binding.wrappedValue.remoteTriggerFunctionKey,
+                currentKeyCode: binding.wrappedValue.remoteTriggerKeyCode,
+                currentKeyDisplay: binding.wrappedValue.remoteTriggerKeyDisplay,
                 cancellationGeneration: remoteTriggerCaptureCancellation,
-                beginCapture: { callback in
-                    store.beginRemoteTriggerCapture(onRemoteButton: callback)
+                beginRemoteCapture: { onRemoteModifier in
+                    store.beginRemoteTriggerCapture(onRemoteModifier: onRemoteModifier)
                 },
-                endCapture: store.endRemoteTriggerCapture,
-                onCommit: { control, modifiers, functionKey in
+                endRemoteCapture: store.endRemoteTriggerCapture,
+                onModifierControlsChange: { remoteModifiers in
+                    guard !remoteModifiers.isEmpty else { return }
+                    store.selectedMappingModifiers = remoteModifiers
+                },
+                onKeyboardConditionCommit: { remoteModifiers, modifiers, keyCode, keyDisplay in
                     let gesture = store.selectedGesture
                     var mapping = store.mapping(
-                        for: control,
+                        for: store.selectedControl,
                         gesture: gesture,
-                        modifierControls: modifierControls
+                        modifierControls: remoteModifiers
                     )
                     mapping.remoteTriggerModifiers = modifiers
-                    mapping.remoteTriggerFunctionKey = functionKey
+                    mapping.remoteTriggerFunctionKey = nil
+                    mapping.remoteTriggerKeyCode = nil
+                    mapping.remoteTriggerKeyDisplay = nil
+                    if let keyCode {
+                        if KeyboardShortcut.functionKeyCodes.contains(keyCode) {
+                            // Keep F1…F12 in the established field so v6
+                            // exports and existing trigger gates stay stable.
+                            mapping.remoteTriggerFunctionKey = keyCode
+                        } else {
+                            mapping.remoteTriggerKeyCode = keyCode
+                            mapping.remoteTriggerKeyDisplay = keyDisplay
+                        }
+                    }
                     store.update(
                         mapping,
-                        for: control,
+                        for: store.selectedControl,
                         gesture: gesture,
-                        modifierControls: modifierControls
+                        modifierControls: remoteModifiers
                     )
-                    store.selectedControl = control
+                    if !remoteModifiers.isEmpty {
+                        store.selectedMappingModifiers = remoteModifiers
+                    }
                 },
                 onRecordingChange: updateCaptureState
             )

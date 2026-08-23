@@ -57,6 +57,22 @@ struct KeyboardShortcut: Codable, Equatable {
         functionKeyLabels[keyCode]
     }
 
+    /// Keyboard modifier key codes are not valid as the single ordinary key
+    /// in a Standard remote-trigger condition.  The condition already stores
+    /// their state in `Modifier`; accepting one here would create an
+    /// ambiguous two-representation chord.
+    static func isModifierKeyCode(_ keyCode: UInt16) -> Bool {
+        modifierKeyCodes.contains(keyCode)
+    }
+
+    private static let modifierKeyCodes: Set<UInt16> = [
+        54, 55, // Command
+        58, 61, // Option
+        59, 62, // Control
+        56, 60, // Shift
+        63 // Function
+    ]
+
     private enum CodingKeys: String, CodingKey {
         case keyCode
         case modifiers

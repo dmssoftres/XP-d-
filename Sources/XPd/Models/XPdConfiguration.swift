@@ -6,7 +6,7 @@ import Foundation
 /// meaningful to the wheel selector, while mapping/HID entries can be sorted
 /// before encoding for stable diffs.
 struct XPdConfiguration: Codable, Equatable {
-    static let currentVersion = 6
+    static let currentVersion = 7
     static let legacyVersion = 2
     static let previousVersion = 3
     /// Version 4 is the immediately previous schema.  It had no
@@ -16,6 +16,9 @@ struct XPdConfiguration: Codable, Equatable {
     /// Version 5 added Standard button titles but predates dual-role K
     /// modifiers and alternate mapping layers.
     static let preRemoteLayersVersion = 5
+    /// Version 6 added dual-role K modifiers and exact remote layers but did
+    /// not yet persist arbitrary ordinary keyboard trigger keys.
+    static let preRemoteTriggerKeysVersion = 6
     static let defaultProfileNames = ["Global", "Finder", "Logic Pro"]
     static let defaultWorkspaceLockControl: RemoteControl = .k3
 
@@ -190,6 +193,9 @@ struct XPdConfiguration: Codable, Equatable {
         case invalidRemoteModifierControl(profile: String, control: RemoteControl)
         case remoteModifiersOnMIDIProfile(String)
         case remoteLayersInLegacyProfile(String)
+        case remoteTriggerKeysInLegacyProfile(String)
+        case invalidRemoteTriggerKey(profile: String, primary: RemoteControl, gesture: GestureKind)
+        case multipleRemoteTriggerKeys(profile: String, primary: RemoteControl, gesture: GestureKind)
         case invalidMappingModifierControl(profile: String, primary: RemoteControl, modifier: RemoteControl)
         case invalidMIDIWorkspaceState
         case midiSettingsInLegacyProfile(String)
@@ -228,6 +234,12 @@ struct XPdConfiguration: Codable, Equatable {
                 return "MIDI profile \(profile) cannot contain Standard remote modifiers."
             case let .remoteLayersInLegacyProfile(profile):
                 return "Legacy profile \(profile) cannot contain remote modifier layers."
+            case let .remoteTriggerKeysInLegacyProfile(profile):
+                return "Legacy profile \(profile) cannot contain arbitrary keyboard trigger keys."
+            case let .invalidRemoteTriggerKey(profile, primary, gesture):
+                return "Remote trigger for \(primary.rawValue) · \(gesture.rawValue) in \(profile) must use an ordinary keyboard key."
+            case let .multipleRemoteTriggerKeys(profile, primary, gesture):
+                return "Remote trigger for \(primary.rawValue) · \(gesture.rawValue) in \(profile) may contain only one keyboard key."
             case let .invalidMappingModifierControl(profile, primary, modifier):
                 return "Mapping layer in \(profile) cannot use \(modifier.rawValue) for \(primary.rawValue)."
             case .invalidMIDIWorkspaceState:
@@ -347,9 +359,10 @@ struct XPdConfiguration: Codable, Equatable {
     }
 
     /// Decodes and validates the entire document before returning it. Versions
-    /// 2 and 3 are decoded through their published shape and upgraded to v6;
-    /// every migrated profile is explicitly marked as standard. Versions 4
-    /// and 5 gain the newer fields through compatibility defaults.
+    /// 2 and 3 are decoded through their published shape and upgraded to v7;
+    /// every migrated profile is explicitly marked as standard. Versions 4–6
+    /// gain the newer fields through compatibility defaults, while v6's
+    /// legacy keyboard/F-key trigger data is retained unchanged.
     static func decode(_ data: Data) throws -> XPdConfiguration {
         let decoder = JSONDecoder()
         let version = try decoder.decode(VersionEnvelope.self, from: data).version
@@ -358,6 +371,20 @@ struct XPdConfiguration: Codable, Equatable {
             let configuration = try decoder.decode(XPdConfiguration.self, from: data)
             try configuration.validate()
             return configuration
+        case preRemoteTriggerKeysVersion:
+            let legacy = try decoder.decode(XPdConfiguration.self, from: data)
+            try legacy.validateV6()
+            return XPdConfiguration(
+                version: currentVersion,
+                profiles: legacy.profiles,
+                profileName: legacy.profileName,
+                showsInputOverlay: legacy.showsInputOverlay,
+                activeRealm: legacy.activeRealm,
+                lastStandardProfileName: legacy.lastStandardProfileName,
+                lastMIDIProfileName: legacy.lastMIDIProfileName,
+                midiLocked: legacy.midiLocked,
+                workspaceLockControl: legacy.workspaceLockControl
+            )
         case preRemoteLayersVersion:
             let legacy = try decoder.decode(XPdConfiguration.self, from: data)
             try legacy.validateV5()
@@ -510,7 +537,8 @@ struct XPdConfiguration: Codable, Equatable {
         try validateEntries(
             allowMIDISettings: false,
             allowStandardButtonTitles: false,
-            allowRemoteLayers: false
+            allowRemoteLayers: false,
+            allowRemoteTriggerKeys: false
         )
     }
 
@@ -544,7 +572,8 @@ struct XPdConfiguration: Codable, Equatable {
         try validateEntries(
             allowMIDISettings: false,
             allowStandardButtonTitles: false,
-            allowRemoteLayers: false
+            allowRemoteLayers: false,
+            allowRemoteTriggerKeys: false
         )
     }
 
@@ -556,7 +585,11 @@ struct XPdConfiguration: Codable, Equatable {
             throw ValidationError.unsupportedVersion(version)
         }
         try validateCurrentProfileShape()
-        try validateEntries(allowStandardButtonTitles: false, allowRemoteLayers: false)
+        try validateEntries(
+            allowStandardButtonTitles: false,
+            allowRemoteLayers: false,
+            allowRemoteTriggerKeys: false
+        )
     }
 
     /// Version 5 is the immediately previous current-realm schema. It has
@@ -566,7 +599,21 @@ struct XPdConfiguration: Codable, Equatable {
             throw ValidationError.unsupportedVersion(version)
         }
         try validateCurrentProfileShape()
-        try validateEntries(allowRemoteLayers: false)
+        try validateEntries(
+            allowRemoteLayers: false,
+            allowRemoteTriggerKeys: false
+        )
+    }
+
+    /// Version 6 is the immediately previous schema. It supports exact K
+    /// layers and the legacy modifier/F-key trigger gates, but not the new
+    /// arbitrary ordinary-key condition.
+    private func validateV6() throws {
+        guard version == Self.preRemoteTriggerKeysVersion else {
+            throw ValidationError.unsupportedVersion(version)
+        }
+        try validateCurrentProfileShape()
+        try validateEntries(allowRemoteTriggerKeys: false)
     }
 
     private func validateCurrentProfileShape() throws {
@@ -614,19 +661,22 @@ struct XPdConfiguration: Codable, Equatable {
 
     private func validateEntries(
         allowMIDISettings: Bool = true,
-        allowRemoteLayers: Bool = true
+        allowRemoteLayers: Bool = true,
+        allowRemoteTriggerKeys: Bool = true
     ) throws {
         try validateEntries(
             allowMIDISettings: allowMIDISettings,
             allowStandardButtonTitles: true,
-            allowRemoteLayers: allowRemoteLayers
+            allowRemoteLayers: allowRemoteLayers,
+            allowRemoteTriggerKeys: allowRemoteTriggerKeys
         )
     }
 
     private func validateEntries(
         allowMIDISettings: Bool = true,
         allowStandardButtonTitles: Bool,
-        allowRemoteLayers: Bool = true
+        allowRemoteLayers: Bool = true,
+        allowRemoteTriggerKeys: Bool = true
     ) throws {
         for profile in profiles {
             if profile.realm == .standard, profile.midiSettings != nil {
@@ -708,6 +758,39 @@ struct XPdConfiguration: Codable, Equatable {
                         gesture: entry.gesture
                     )
                 }
+
+                if !allowRemoteTriggerKeys,
+                   (entry.mapping.remoteTriggerKeyCode != nil
+                    || entry.mapping.remoteTriggerKeyDisplay != nil) {
+                    throw ValidationError.remoteTriggerKeysInLegacyProfile(profile.name)
+                }
+                if entry.mapping.remoteTriggerKeyCode != nil,
+                   entry.mapping.remoteTriggerFunctionKey != nil {
+                    throw ValidationError.multipleRemoteTriggerKeys(
+                        profile: profile.name,
+                        primary: entry.control,
+                        gesture: entry.gesture
+                    )
+                }
+                if let keyCode = entry.mapping.remoteTriggerKeyCode,
+                   keyCode > 127
+                    || KeyboardShortcut.isModifierKeyCode(keyCode)
+                    || KeyboardShortcut.functionKeyCodes.contains(keyCode) {
+                    throw ValidationError.invalidRemoteTriggerKey(
+                        profile: profile.name,
+                        primary: entry.control,
+                        gesture: entry.gesture
+                    )
+                }
+                if let display = entry.mapping.remoteTriggerKeyDisplay,
+                   entry.mapping.remoteTriggerKeyCode == nil,
+                   !display.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    throw ValidationError.invalidRemoteTriggerKey(
+                        profile: profile.name,
+                        primary: entry.control,
+                        gesture: entry.gesture
+                    )
+                }
             }
 
             var hidControls = Set<RemoteControl>()
@@ -748,6 +831,8 @@ struct XPdConfiguration: Codable, Equatable {
             try validateV4()
         case Self.preRemoteLayersVersion:
             try validateV5()
+        case Self.preRemoteTriggerKeysVersion:
+            try validateV6()
         case Self.currentVersion:
             try validate()
         default:

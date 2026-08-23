@@ -47,6 +47,7 @@ final class MappingStore {
     ) -> Void
     typealias RemoteModifierProvider = @MainActor () -> Set<KeyboardShortcut.Modifier>
     typealias RemoteFunctionKeyProvider = @MainActor () -> Set<UInt16>
+    typealias RemoteKeyProvider = @MainActor (_ configuredKeyCodes: Set<UInt16>) -> Set<UInt16>
 
     private(set) var availableProfiles: [String] = XPdConfiguration.defaultProfileNames
 
@@ -351,8 +352,9 @@ final class MappingStore {
     }
 
     private let defaults: UserDefaults
-    private let profilesDefaultsKey = "XPd.profiles.v6"
-    private let previousProfilesDefaultsKey = "XPd.profiles.v5"
+    private let profilesDefaultsKey = "XPd.profiles.v7"
+    private let previousProfilesDefaultsKey = "XPd.profiles.v6"
+    private let preRemoteTriggerKeysProfilesDefaultsKey = "XPd.profiles.v5"
     private let preTitlesProfilesDefaultsKey = "XPd.profiles.v4"
     private let legacyProfilesDefaultsKey = "XPd.profiles.v3"
     private let legacyLegacyProfilesDefaultsKey = "XPd.profiles.v2"
@@ -393,6 +395,7 @@ final class MappingStore {
     private let gestureSchedule: ButtonGestureRecognizer.Schedule
     private let remoteModifierProvider: RemoteModifierProvider
     private let remoteFunctionKeyProvider: RemoteFunctionKeyProvider
+    private let remoteKeyProvider: RemoteKeyProvider
     private let buttonGestureRecognizer: ButtonGestureRecognizer
     /// Standard-mode K-button cycles can contain one non-modifier primary
     /// plus any number of designated K modifiers. The generic HID stream has
@@ -400,21 +403,27 @@ final class MappingStore {
     private var activeStandardControls: Set<RemoteControl> = []
     private var activeStandardKeyboardModifiers: [RemoteControl: Set<KeyboardShortcut.Modifier>] = [:]
     private var activeStandardFunctionKeys: [RemoteControl: Set<UInt16>] = [:]
+    private var activeStandardKeyboardKeys: [RemoteControl: Set<UInt16>] = [:]
     private var activeStandardGestureIdentity: ButtonGestureIdentity?
     private var activeStandardModifierHoldTasks: [RemoteControl: GestureScheduledAction] = [:]
-    private var activeStandardModifierActionFired = false
+    /// Reaching the threshold only marks this state eligible. The standalone
+    /// action is committed at the release/grace boundary so a later K press
+    /// can still become an exact layer.
+    private var activeStandardModifierStandaloneEligible = false
     private var activeStandardModifierGeneration = 0
     private var ambiguousStandardCycles: Set<RemoteControl> = []
     private struct PendingStandardModifierCycle {
         var modifiers: Set<RemoteControl>
         var keyboardModifiers: [RemoteControl: Set<KeyboardShortcut.Modifier>]
         var functionKeys: [RemoteControl: Set<UInt16>]
-        var standaloneActionFired: Bool
+        var keyboardKeys: [RemoteControl: Set<UInt16>]
+        var standaloneActionEligible: Bool
     }
     private var pendingStandardModifierCycle: PendingStandardModifierCycle?
     private var pendingStandardModifierTapTask: GestureScheduledAction?
     private var pendingStandardModifierGeneration = 0
-    private var remoteTriggerCaptureHandler: ((RemoteControl) -> Void)?
+    private var isRemoteTriggerCaptureActive = false
+    private var remoteTriggerModifierCaptureHandler: ((RemoteControl) -> Void)?
     @ObservationIgnored private lazy var inputOverlay = InputOverlayController(displayDuration: inputOverlayDuration)
     @ObservationIgnored private let terminationObserver = MIDIShutdownObserver()
 
@@ -435,6 +444,17 @@ final class MappingStore {
         }
     }
 
+    /// Read only the ordinary key codes that are actually configured as
+    /// remote-trigger conditions. This keeps the input observation scope
+    /// bounded instead of scanning the whole keyboard.
+    private static func currentRemoteKeySet(_ configuredKeyCodes: Set<UInt16>) -> Set<UInt16> {
+        configuredKeyCodes.filter { keyCode in
+            !KeyboardShortcut.functionKeyCodes.contains(keyCode)
+                && !KeyboardShortcut.isModifierKeyCode(keyCode)
+                && CGEventSource.keyState(.combinedSessionState, key: CGKeyCode(keyCode))
+        }
+    }
+
     init(
         userDefaults: UserDefaults = .standard,
         startHardware: Bool = true,
@@ -442,7 +462,8 @@ final class MappingStore {
         actionExecutionOverride: ActionExecutionOverride? = nil,
         midiOutputService: MIDIOutputService? = nil,
         remoteModifierProvider: @escaping RemoteModifierProvider = MappingStore.currentRemoteModifierSet,
-        remoteFunctionKeyProvider: @escaping RemoteFunctionKeyProvider = MappingStore.currentRemoteFunctionKeySet
+        remoteFunctionKeyProvider: @escaping RemoteFunctionKeyProvider = MappingStore.currentRemoteFunctionKeySet,
+        remoteKeyProvider: @escaping RemoteKeyProvider = MappingStore.currentRemoteKeySet
     ) {
         defaults = userDefaults
         hid = HIDService(startHardware: startHardware)
@@ -452,6 +473,7 @@ final class MappingStore {
         self.midiOutputService = midiOutputService ?? MIDIOutputService(defaults: userDefaults)
         self.remoteModifierProvider = remoteModifierProvider
         self.remoteFunctionKeyProvider = remoteFunctionKeyProvider
+        self.remoteKeyProvider = remoteKeyProvider
 
         let savedProfile = defaults.string(forKey: profileNameDefaultsKey)
         showsInputOverlay = defaults.object(forKey: inputOverlayDefaultsKey) as? Bool ?? true
@@ -533,6 +555,13 @@ final class MappingStore {
         mappings[MappingKey(control: control, gesture: gesture, modifierControls: modifierControls)] ?? Mapping()
     }
 
+    /// The ordinary keyboard keys that can affect Standard trigger matching
+    /// in the active profile. The provider samples only this bounded set on a
+    /// remote K press.
+    private var configuredRemoteTriggerKeyCodes: Set<UInt16> {
+        Set(mappings.values.compactMap(\.remoteTriggerKeyCode))
+    }
+
     /// Returns the currently designated Standard-mode K-button modifiers.
     /// MIDI profiles and non-button controls always expose an empty set.
     func isRemoteModifier(_ control: RemoteControl) -> Bool {
@@ -559,19 +588,20 @@ final class MappingStore {
         return true
     }
 
-    /// Starts a temporary Standard-mode capture. Matching K-button input is
-    /// delivered to the callback and never enters normal gesture routing.
-    /// The UI owns modifier tracking because the capture is explicitly tied
-    /// to its mouse-start/mouse-stop lifecycle.
-    func beginRemoteTriggerCapture(onRemoteButton: @escaping (RemoteControl) -> Void) {
+    /// Temporarily consumes remote input while the unified chord editor is
+    /// recording. Only designated K buttons are delivered as optional
+    /// modifier conditions; the selected destination is never replaced.
+    func beginRemoteTriggerCapture(onRemoteModifier: @escaping (RemoteControl) -> Void) {
         cancelLearning()
         cancelPendingButtonGestures()
         closeProfileSelector()
-        remoteTriggerCaptureHandler = onRemoteButton
+        remoteTriggerModifierCaptureHandler = onRemoteModifier
+        isRemoteTriggerCaptureActive = true
     }
 
     func endRemoteTriggerCapture() {
-        remoteTriggerCaptureHandler = nil
+        remoteTriggerModifierCaptureHandler = nil
+        isRemoteTriggerCaptureActive = false
     }
 
     /// Returns the optional title for a Standard-mode K button. Titles are
@@ -1329,10 +1359,21 @@ final class MappingStore {
         liveInputGeneration += 1
         let generation = liveInputGeneration
 
-        guard let signature else {
-            if remoteTriggerCaptureHandler != nil {
-                return
+        if isRemoteTriggerCaptureActive {
+            // The unified Standard chord editor records optional K-button
+            // modifiers without ever changing the fixed destination selected
+            // in the inspector. All other HID input remains consumed while
+            // the keyboard condition is being recorded.
+            if let signature,
+               let matched = hidBindings.first(where: { $0.value == signature })?.key,
+               activeRealm == .standard,
+               matched.isMIDIButton {
+                remoteTriggerModifierCaptureHandler?(matched)
             }
+            return
+        }
+
+        guard let signature else {
             if activeRealm == .midi, let liveControl {
                 if liveControl == .wheelCenter, fnControl == .wheelCenter {
                     finishCenterMIDIInteraction()
@@ -1379,13 +1420,6 @@ final class MappingStore {
         }
 
         guard let matched = hidBindings.first(where: { $0.value == signature })?.key else { return }
-
-        if let remoteTriggerCaptureHandler,
-           activeRealm == .standard,
-           matched.isMIDIButton {
-            remoteTriggerCaptureHandler(matched)
-            return
-        }
 
         let previousLiveControl = liveControl
         selectedControl = matched
@@ -1456,7 +1490,7 @@ final class MappingStore {
         let startsNewCycle = activeStandardControls.isEmpty
         if startsNewCycle {
             activeStandardModifierGeneration &+= 1
-            activeStandardModifierActionFired = false
+            activeStandardModifierStandaloneEligible = false
         }
 
         // A modifier-only cycle is ambiguous until the next K press. If a
@@ -1466,30 +1500,24 @@ final class MappingStore {
             activeStandardControls.formUnion(pending.modifiers)
             activeStandardKeyboardModifiers.merge(pending.keyboardModifiers) { current, _ in current }
             activeStandardFunctionKeys.merge(pending.functionKeys) { current, _ in current }
-            activeStandardModifierActionFired = pending.standaloneActionFired
+            activeStandardKeyboardKeys.merge(pending.keyboardKeys) { current, _ in current }
+            activeStandardModifierStandaloneEligible = pending.standaloneActionEligible
         }
 
         activeStandardKeyboardModifiers[control] = remoteModifierProvider()
         activeStandardFunctionKeys[control] = remoteFunctionKeyProvider()
+        activeStandardKeyboardKeys[control] = remoteKeyProvider(configuredRemoteTriggerKeyCodes)
         activeStandardControls.insert(control)
 
         let modifiers = activeStandardControls.filter(isRemoteModifier)
         let primaries = activeStandardControls.filter { !isRemoteModifier($0) }
         if primaries.isEmpty {
-            if modifiers.count == 1, !activeStandardModifierActionFired,
+            if modifiers.count == 1, !activeStandardModifierStandaloneEligible,
                let modifier = modifiers.first {
                 scheduleStandaloneStandardModifier(for: modifier)
             } else {
                 cancelActiveStandardModifierHoldTasks()
             }
-            return
-        }
-
-        // A standalone modifier that has already fired owns this physical
-        // cycle. Any later primary is intentionally consumed so a second
-        // Base or modifier-layer action cannot be emitted.
-        if activeStandardModifierActionFired {
-            cancelActiveStandardPrimaryGestures()
             return
         }
 
@@ -1505,7 +1533,8 @@ final class MappingStore {
             control: primary,
             modifierControls: Set(modifiers),
             keyboardModifiers: activeStandardKeyboardModifiers[primary] ?? [],
-            functionKeys: activeStandardFunctionKeys[primary] ?? []
+            functionKeys: activeStandardFunctionKeys[primary] ?? [],
+            keyboardKeys: activeStandardKeyboardKeys[primary] ?? []
         )
         if let previousIdentity = activeStandardGestureIdentity,
            previousIdentity != identity {
@@ -1521,29 +1550,31 @@ final class MappingStore {
     private func scheduleStandaloneStandardModifier(for control: RemoteControl) {
         guard activeStandardModifierHoldTasks[control] == nil,
               activeStandardControls.count == 1,
-              activeStandardModifierActionFired == false,
+              activeStandardModifierStandaloneEligible == false,
               activeStandardGestureIdentity == nil else { return }
 
         let keyboardModifiers = activeStandardKeyboardModifiers[control] ?? []
         let functionKeys = activeStandardFunctionKeys[control] ?? []
+        let keyboardKeys = activeStandardKeyboardKeys[control] ?? []
         let identity = ButtonGestureIdentity(
             control: control,
             keyboardModifiers: keyboardModifiers,
-            functionKeys: functionKeys
+            functionKeys: functionKeys,
+            keyboardKeys: keyboardKeys
         )
         let generation = activeStandardModifierGeneration
         // Snapshot the setting at press time. A later UI edit affects only
         // subsequent modifier presses.
         let threshold = standardModifierHoldThreshold
         activeStandardModifierHoldTasks[control] = gestureSchedule(threshold) { [weak self] in
-            self?.recognizeStandaloneStandardModifier(
+            self?.markStandaloneStandardModifierEligible(
                 identity: identity,
                 generation: generation
             )
         }
     }
 
-    private func recognizeStandaloneStandardModifier(
+    private func markStandaloneStandardModifierEligible(
         identity: ButtonGestureIdentity,
         generation: Int
     ) {
@@ -1551,20 +1582,20 @@ final class MappingStore {
               activeStandardControls.count == 1,
               activeStandardControls.contains(identity.control),
               isRemoteModifier(identity.control),
-              activeStandardModifierActionFired == false,
+              activeStandardModifierStandaloneEligible == false,
               activeStandardGestureIdentity == nil else { return }
 
-        activeStandardModifierActionFired = true
+        activeStandardModifierStandaloneEligible = true
         activeStandardModifierHoldTasks.removeValue(forKey: identity.control)
         cancelActiveStandardModifierHoldTasks()
-        recognizedButtonGesture(identity: identity, gesture: .tap)
     }
 
     private func enqueuePendingStandardModifierCycle(
         modifiers: Set<RemoteControl>,
         keyboardModifiers: [RemoteControl: Set<KeyboardShortcut.Modifier>],
         functionKeys: [RemoteControl: Set<UInt16>],
-        standaloneActionFired: Bool
+        keyboardKeys: [RemoteControl: Set<UInt16>],
+        standaloneActionEligible: Bool
     ) {
         guard !modifiers.isEmpty else { return }
 
@@ -1572,14 +1603,16 @@ final class MappingStore {
             pending.modifiers.formUnion(modifiers)
             pending.keyboardModifiers.merge(keyboardModifiers) { current, _ in current }
             pending.functionKeys.merge(functionKeys) { current, _ in current }
-            pending.standaloneActionFired = pending.standaloneActionFired || standaloneActionFired
+            pending.keyboardKeys.merge(keyboardKeys) { current, _ in current }
+            pending.standaloneActionEligible = pending.standaloneActionEligible || standaloneActionEligible
             pendingStandardModifierCycle = pending
         } else {
             pendingStandardModifierCycle = PendingStandardModifierCycle(
                 modifiers: modifiers,
                 keyboardModifiers: keyboardModifiers,
                 functionKeys: functionKeys,
-                standaloneActionFired: standaloneActionFired
+                keyboardKeys: keyboardKeys,
+                standaloneActionEligible: standaloneActionEligible
             )
         }
 
@@ -1607,21 +1640,32 @@ final class MappingStore {
         pendingStandardModifierCycle = nil
         pendingStandardModifierTapTask = nil
 
-        // A quick release is intentionally a no-op. Standalone modifier
-        // actions are recognized only by the press-time hold timer above.
-        _ = pending
+        // A quick release is intentionally a no-op. Once the hold threshold
+        // was reached, commit only now—after the split-report grace window
+        // has closed and no primary converted the chord into a layer.
+        guard pending.standaloneActionEligible,
+              pending.modifiers.count == 1,
+              let modifier = pending.modifiers.first else { return }
+        let identity = ButtonGestureIdentity(
+            control: modifier,
+            keyboardModifiers: pending.keyboardModifiers[modifier] ?? [],
+            functionKeys: pending.functionKeys[modifier] ?? [],
+            keyboardKeys: pending.keyboardKeys[modifier] ?? []
+        )
+        recognizedButtonGesture(identity: identity, gesture: .tap)
     }
 
     private func releaseStandardCycle() {
         let controls = activeStandardControls
-        let standaloneActionFired = activeStandardModifierActionFired
+        let standaloneActionEligible = activeStandardModifierStandaloneEligible
         cancelActiveStandardModifierHoldTasks()
         activeStandardControls.removeAll()
         defer {
             activeStandardKeyboardModifiers.removeAll()
             activeStandardFunctionKeys.removeAll()
+            activeStandardKeyboardKeys.removeAll()
             activeStandardGestureIdentity = nil
-            activeStandardModifierActionFired = false
+            activeStandardModifierStandaloneEligible = false
             activeStandardModifierGeneration &+= 1
             ambiguousStandardCycles.removeAll()
             liveControl = nil
@@ -1638,13 +1682,10 @@ final class MappingStore {
                     modifiers: Set(modifiers),
                     keyboardModifiers: activeStandardKeyboardModifiers,
                     functionKeys: activeStandardFunctionKeys,
-                    standaloneActionFired: standaloneActionFired
+                    keyboardKeys: activeStandardKeyboardKeys,
+                    standaloneActionEligible: standaloneActionEligible
                 )
             }
-            return
-        }
-
-        if standaloneActionFired {
             return
         }
 
@@ -1670,7 +1711,8 @@ final class MappingStore {
         activeStandardControls.removeAll()
         activeStandardKeyboardModifiers.removeAll()
         activeStandardFunctionKeys.removeAll()
-        activeStandardModifierActionFired = false
+        activeStandardKeyboardKeys.removeAll()
+        activeStandardModifierStandaloneEligible = false
         activeStandardModifierGeneration &+= 1
         ambiguousStandardCycles.removeAll()
     }
@@ -1689,8 +1731,10 @@ final class MappingStore {
         }
         let mapping = mapping(for: control, gesture: gesture, modifierControls: layer)
         let expectedFunctionKeys = mapping.remoteTriggerFunctionKey.map { Set([$0]) } ?? []
+        let expectedKeyboardKeys = mapping.remoteTriggerKeyCode.map { Set([$0]) } ?? []
         guard mapping.remoteTriggerModifiers == identity.keyboardModifiers,
-              identity.functionKeys == expectedFunctionKeys else { return }
+              identity.functionKeys == expectedFunctionKeys,
+              identity.keyboardKeys == expectedKeyboardKeys else { return }
         showOverlayPress(
             for: control,
             modifierControls: layer,
@@ -1850,7 +1894,6 @@ final class MappingStore {
     private func cancelPendingButtonGestures() {
         cancelStandardCycle()
         buttonGestureRecognizer.cancelAll()
-        remoteTriggerCaptureHandler = nil
         if let liveControl, showsInputOverlay, !liveControl.isWheelRotation {
             inputOverlay.release(control: liveControl)
         }
@@ -2294,11 +2337,48 @@ final class MappingStore {
             return false
         }
 
+        // v6 already contains exact K layers and legacy keyboard/F-key trigger
+        // gates. Copy the decoded state as-is and write the v7 payload so no
+        // existing trigger condition is lost during migration.
+        if let data = defaults.data(forKey: previousProfilesDefaultsKey),
+           let decoded = try? JSONDecoder().decode(PersistedProfiles.self, from: data),
+           decoded.version == XPdConfiguration.preRemoteTriggerKeysVersion {
+            availableProfiles = decoded.profiles.map(\.name)
+            profileStates = Dictionary(uniqueKeysWithValues: decoded.profiles.map { profile in
+                (profile.name, profile.state)
+            })
+            let upgraded = PersistedProfiles(
+                version: XPdConfiguration.currentVersion,
+                profiles: availableProfiles.compactMap { name in
+                    profileStates[name].map { PersistedProfile(name: name, state: $0) }
+                },
+                activeProfileName: decoded.activeProfileName,
+                activeRealm: decoded.activeRealm,
+                lastStandardProfileName: decoded.lastStandardProfileName,
+                lastMIDIProfileName: decoded.lastMIDIProfileName,
+                midiLocked: decoded.midiLocked,
+                workspaceLockControl: decoded.workspaceLockControl
+            )
+            guard isValidPersistedProfiles(upgraded) else {
+                availableProfiles = XPdConfiguration.defaultProfileNames
+                profileStates = Self.defaultProfileStates()
+                return false
+            }
+            loadedProfileName = decoded.activeProfileName
+            loadedActiveRealm = decoded.activeRealm
+            loadedLastStandardProfileName = decoded.lastStandardProfileName
+            loadedLastMIDIProfileName = decoded.lastMIDIProfileName
+            loadedMIDIIsLocked = decoded.midiLocked
+            loadedWorkspaceLockControl = decoded.workspaceLockControl
+            saveAllProfiles()
+            return false
+        }
+
         // v5 persisted the current dynamic profile/realm/title shape but
         // predates remote modifier designations. ProfileState's compatibility
         // decoder gives every migrated state an empty modifier set, then
-        // saveAllProfiles writes the explicit v6 payload.
-        if let data = defaults.data(forKey: previousProfilesDefaultsKey),
+        // saveAllProfiles writes the explicit v7 payload.
+        if let data = defaults.data(forKey: preRemoteTriggerKeysProfilesDefaultsKey),
            let decoded = try? JSONDecoder().decode(PersistedProfiles.self, from: data),
            decoded.version == XPdConfiguration.preRemoteLayersVersion {
             availableProfiles = decoded.profiles.map(\.name)

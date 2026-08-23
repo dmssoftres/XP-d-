@@ -18,17 +18,23 @@ struct ButtonGestureIdentity: Hashable {
     let modifierControls: Set<RemoteControl>
     let keyboardModifiers: Set<KeyboardShortcut.Modifier>
     let functionKeys: Set<UInt16>
+    /// Ordinary keyboard keys held when the physical remote control was
+    /// pressed.  This is separate from `functionKeys` for compatibility with
+    /// the legacy F1…F12 trigger field.
+    let keyboardKeys: Set<UInt16>
 
     init(
         control: RemoteControl,
         modifierControls: Set<RemoteControl> = [],
         keyboardModifiers: Set<KeyboardShortcut.Modifier> = [],
-        functionKeys: Set<UInt16> = []
+        functionKeys: Set<UInt16> = [],
+        keyboardKeys: Set<UInt16> = []
     ) {
         self.control = control
         self.modifierControls = modifierControls
         self.keyboardModifiers = keyboardModifiers
         self.functionKeys = functionKeys
+        self.keyboardKeys = keyboardKeys
     }
 }
 

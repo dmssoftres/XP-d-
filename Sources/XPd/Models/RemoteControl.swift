@@ -166,6 +166,13 @@ struct Mapping: Codable, Equatable {
     /// An optional held F1…F12 key required by the remote trigger. Function
     /// keys are stored separately because they are ordinary keys, not flags.
     var remoteTriggerFunctionKey: UInt16?
+    /// An optional ordinary macOS key required by the remote trigger.  This
+    /// complements the legacy F-key field above without changing its JSON
+    /// shape, so v6 data migrates losslessly while new keys remain explicit.
+    var remoteTriggerKeyCode: UInt16?
+    /// Keyboard-layout-aware label captured with `remoteTriggerKeyCode`.
+    /// Runtime matching uses the code; this value is display-only.
+    var remoteTriggerKeyDisplay: String?
     /// When set on a Hold or Double application action, resolve the target
     /// from this control's current Tap mapping instead of storing a second
     /// application command.  The explicit decoder keeps older persisted
@@ -183,6 +190,8 @@ struct Mapping: Codable, Equatable {
         case keyboardShortcut
         case remoteTriggerModifiers
         case remoteTriggerFunctionKey
+        case remoteTriggerKeyCode
+        case remoteTriggerKeyDisplay
         case usesTapApplication
     }
 
@@ -196,6 +205,8 @@ struct Mapping: Codable, Equatable {
         keyboardShortcut: KeyboardShortcut? = nil,
         remoteTriggerModifiers: Set<KeyboardShortcut.Modifier> = [],
         remoteTriggerFunctionKey: UInt16? = nil,
+        remoteTriggerKeyCode: UInt16? = nil,
+        remoteTriggerKeyDisplay: String? = nil,
         usesTapApplication: Bool = false
     ) {
         self.action = action
@@ -207,6 +218,8 @@ struct Mapping: Codable, Equatable {
         self.keyboardShortcut = keyboardShortcut
         self.remoteTriggerModifiers = remoteTriggerModifiers
         self.remoteTriggerFunctionKey = remoteTriggerFunctionKey
+        self.remoteTriggerKeyCode = remoteTriggerKeyCode
+        self.remoteTriggerKeyDisplay = remoteTriggerKeyDisplay
         self.usesTapApplication = usesTapApplication
     }
 
@@ -224,6 +237,8 @@ struct Mapping: Codable, Equatable {
             forKey: .remoteTriggerModifiers
         ) ?? []
         remoteTriggerFunctionKey = try container.decodeIfPresent(UInt16.self, forKey: .remoteTriggerFunctionKey)
+        remoteTriggerKeyCode = try container.decodeIfPresent(UInt16.self, forKey: .remoteTriggerKeyCode)
+        remoteTriggerKeyDisplay = try container.decodeIfPresent(String.self, forKey: .remoteTriggerKeyDisplay)
         usesTapApplication = try container.decodeIfPresent(Bool.self, forKey: .usesTapApplication) ?? false
     }
 
@@ -241,6 +256,8 @@ struct Mapping: Codable, Equatable {
             forKey: .remoteTriggerModifiers
         )
         try container.encodeIfPresent(remoteTriggerFunctionKey, forKey: .remoteTriggerFunctionKey)
+        try container.encodeIfPresent(remoteTriggerKeyCode, forKey: .remoteTriggerKeyCode)
+        try container.encodeIfPresent(remoteTriggerKeyDisplay, forKey: .remoteTriggerKeyDisplay)
         try container.encode(usesTapApplication, forKey: .usesTapApplication)
     }
 

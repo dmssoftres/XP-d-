@@ -24,17 +24,19 @@ No backend, database, cloud account, telemetry service, or third-party package d
 
 ## Data flow
 
-Shortcut Remote HID value/report → `HIDService` → `MappingStore` snapshots global modifier flags at K1–K10 button-down → `ButtonGestureRecognizer` → exact persisted remote-trigger modifier match → mapping resolution → optional same-control Tap application resolution → `ActionRunner` side effect and input-overlay presentation. Tap waits through the Double window; Hold and Double suppress Tap. Profile changes, imports, learning, disconnects, and displaced live controls cancel pending gestures. Inherited Hold/Double application targets are read at execution time; invalid Tap mappings stop before side effects.
+Shortcut Remote HID value/report → `HIDService` → `MappingStore` snapshots global modifier flags, F keys, and only configured ordinary keyboard key codes at K1–K10 button-down → `ButtonGestureRecognizer` → exact persisted trigger-chord match → mapping resolution → optional same-control Tap application resolution → `ActionRunner` side effect and input-overlay presentation. Tap waits through the Double window; Hold and Double suppress Tap. Profile changes, imports, learning, disconnects, and displaced live controls cancel pending gestures. Inherited Hold/Double application targets are read at execution time; invalid Tap mappings stop before side effects.
 
-Configuration UI/profile-manager edits → `MappingStore` → one ordered version-6 profile collection in `UserDefaults`. Standard K1–K10 titles and designated K-modifier controls are profile-scoped and excluded from MIDI profiles. Mapping keys include an exact, deterministically encoded set of K-modifier controls; an empty set is the Base layer. Renaming a non-Global profile replaces its name identity atomically while preserving order, realm, mappings, HID bindings, button titles, modifier designations, active selection, and remembered workspace targets. Version-2 fixed and version-3 dynamic persistence migrate to Standard profiles; version 4 gains empty title collections and version 5 gains empty K-modifier state. Export builds a complete ordered JSON document; v2–v5 exports upgrade on decode, and imports validate realms, remembered profiles, typed MIDI values, exact mapping layers, bindings, and Standard metadata before one replacement.
+Configuration UI/profile-manager edits → `MappingStore` → one ordered version-7 profile collection in `UserDefaults`. Standard K1–K10 titles and designated K-modifier controls are profile-scoped and excluded from MIDI profiles. Mapping keys include an exact, deterministically encoded set of K-modifier controls; an empty set is the Base layer. A mapping stores keyboard modifier flags plus at most one ordinary key condition; the legacy F-key field remains losslessly supported. Renaming a non-Global profile replaces its name identity atomically while preserving order, realm, mappings, HID bindings, button titles, modifier designations, active selection, and remembered workspace targets. Versions 2–6 migrate without dropping supported data; v6 local profiles and portable documents are explicitly upgraded to v7. Imports validate realms, remembered profiles, typed MIDI values, exact mapping layers, keyboard trigger keys, bindings, and Standard metadata before one replacement.
 
-Standard K-layer input → accumulate K reports until the generic HID release boundary → classify every designated K as a modifier and require exactly one non-designated primary → route Tap/Hold/Double through the exact modifier-set `MappingKey`. Pending gesture identity includes the primary, exact K layer, keyboard modifiers, and F keys so only equivalent presses may form a Double; a primary-first press is reclassified when a K modifier joins its active cycle. A modifier-only press starts a snapshot of the global local-only standalone threshold (default 0.5 seconds, normalized to 0.2–1.5 in 0.1-second steps). If it remains the sole active K until expiry, its Base Tap runs once and owns the cycle; a later primary is consumed. A primary arriving first cancels the standalone timer and selects the exact modifier layer. Because the physical remote may emit a generic release between modifier and primary, a quick modifier-only release remains available as a cancellable 0.30-second one-shot layer, but expiry runs nothing. Sequential released modifiers merge into an exact stacked layer. Same-cycle modifier-only stacks and multi-primary cycles remain consumed. Press order is irrelevant within a rollover cycle. Profile/import/learning/disconnect/wheel boundaries cancel active and pending state. Physical timing still requires owner acceptance on the target remote.
+Standard K-layer input → accumulate K reports until the generic HID release boundary → classify every designated K as a modifier and require exactly one non-designated primary → route Tap/Hold/Double through the exact modifier-set `MappingKey`. Pending gesture identity includes the primary, exact K layer, keyboard modifiers, F keys, and configured ordinary keys so only equivalent presses may form a Double; a primary-first press is reclassified when a K modifier joins its active cycle. A modifier-only press snapshots the global local-only standalone threshold (default 0.5 seconds, normalized to 0.2–1.5 in 0.1-second steps). Expiry marks Base Tap eligible but performs no action. A primary arriving before physical release, even after expiry, cancels standalone and selects the exact layer. At release the modifier remains pending for the existing 0.30-second split-report window; a primary in that window still wins, otherwise one eligible modifier commits Base Tap and a quick release expires inert. Sequential released modifiers merge into an exact stacked layer. Same-cycle modifier-only stacks and multi-primary cycles remain consumed. Press order is irrelevant within a rollover cycle. Profile/import/learning/disconnect/wheel boundaries cancel active and pending state. Physical timing still requires owner acceptance on the target remote.
 
 Standard mapping inspector → keep Base bound to the left action column → bind
-the chosen exact K-modifier set to the right action column → keep title,
-modifier designation, gesture, and result state shared outside the split.
-Keyboard-shortcut and remote-trigger capture are mutually exclusive across the
-two columns so only one local event monitor/capture handler remains active.
+the chosen exact K-modifier set to the right action column → render one complete
+`When pressed` chord per action → change the right layer without moving,
+overwriting, or deleting other exact-layer mappings. Title, modifier designation,
+gesture, and result state remain shared outside the split. Keyboard-shortcut and
+trigger-chord capture are mutually exclusive across the two columns so only one
+local event monitor/capture handler remains active.
 
 Keyboard-shortcut capture → local AppKit key-down/flags-changed monitor → in-view draft for exactly one simultaneous chord (zero or more modifiers plus one physical key) → second mouse click commits structured chord data and its readable display text. Escape, selection/action changes, and view removal cancel the draft without changing either mapping. Remote K-buttons remain mapping triggers and are never recorded as shortcut inputs. `ActionRunner` silently preflights post-event access and, only for a structured chord, posts one matching key-down/key-up pair; legacy command-text shortcuts remain visible but are rejected with re-record guidance.
 
@@ -53,14 +55,14 @@ use AppKit/Accessibility; display sleep uses `pmset displaysleepnow`. Profile
 switching stays in `MappingStore` because it mutates profile-owned state, and
 profile renames retarget normalized stored switch mappings across every profile.
 
-Remote-trigger capture → local modifier/function-key monitor plus a temporary
-`MappingStore` K1–K10 capture handler → in-view draft combining modifiers,
-one held F1–F12 key, and the captured remote special key → second mouse click
-writes remote trigger data to that button's selected gesture mapping and selects
-the captured button. The handler consumes capture input before normal routing.
-At runtime global modifier and F-key state sampled on K-button down must exactly
-match before overlay or action effects; the snapshot remains associated with the
-later Tap/Hold/Double result.
+Trigger-chord capture → fixed destination K plus the selected exact K layer →
+local modifier/ordinary-key monitor and temporary designated-K capture handler →
+in-view draft with zero or more K modifiers, zero or more keyboard modifiers,
+and at most one ordinary key → second mouse click commits optional keyboard
+conditions and/or navigates to the selected layer. Capture consumes remote input
+before normal routing and never retargets the destination. At runtime keyboard
+state sampled on destination down must exactly match before overlay or action
+effects; the snapshot remains associated with the later Tap/Hold/Double result.
 
 MIDI-realm HID input → `MappingStore` primary/Fn routing and session offsets →
 `MIDIOutputService` → independent `XP[d] Control` or `XP[d] Performance`

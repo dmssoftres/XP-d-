@@ -104,28 +104,30 @@ remains occupied until that original process exits.
 Only import configurations containing automation from a trusted source. These
 actions can perform any operation available to the current user account.
 
-## Remote trigger chords
+## Trigger chords
 
-In a Standard K-button mapping, **Remote trigger** records the physical button
-as a special key together with any combination of Command, Control, Option,
-Shift, Fn, and one held F1–F12 key. Click to start, hold special keys, press a
-remote K button, then click again to save—for example, `⌘F4K4`. The modifier
-and function-key state is sampled when the button goes down, so it remains
-stable through Tap, Hold, or Double recognition. The mapping runs only when
-the held keys exactly match its saved trigger; clear the trigger keys to restore
-the plain K-button behavior. One modifier-gated trigger is stored per K-button
-gesture.
+Each Standard action shows one **When pressed** chord with a fixed destination
+K button. The chord may also contain any number of designated K modifiers,
+Command, Control, Option, Shift, or Fn, and one ordinary keyboard key including
+F1–F12. Examples include `K8`, `K10 + K8`, `K9 + K10 + K8`, and
+`⌘ + A + K10 + K8`. Recording never replaces the destination button. The
+layer menu and captured designated K presses select an exact K layer without
+deleting other saved layers.
+
+Keyboard state is sampled when the destination goes down and remains stable
+through Tap, Hold, or Double recognition. Only ordinary key codes that appear
+in the active profile are queried. The mapping runs only when its keyboard and
+K-layer conditions match exactly; clearing removes the optional keyboard
+condition while retaining the physical K chord.
 
 ## K-button modifier layers
 
 In a Standard profile, any K1–K10 button can be marked **K modifier**. Holding
-the button by itself for the configured threshold runs its Base Tap action,
-while combining it with another K button selects that button's alternate
-mapping layer. The mapping
-layer menu supports exact combinations such as `K3`, `K4`, or `K3 + K4`, and
-the controls may be pressed in either order during the same HID cycle. This
-lets one physical button send a normal shortcut on its Base layer and open a
-different app when one or more designated K modifiers are held.
+one by itself through the configured threshold makes its Base Tap eligible; it
+runs only after release if no destination participated. Pressing another K at
+any time while the modifier remains held—before or after the threshold—cancels
+standalone and selects that destination's exact alternate layer. Exact
+combinations such as `K3`, `K4`, or `K3 + K4` remain independent.
 
 Designated modifiers use their Base Tap mapping as the standalone hold action;
 their Hold and Double mappings remain unavailable because those gestures would
@@ -140,18 +142,16 @@ its K number, optional title, and application icon remain in place.
 
 XP[d] accepts both remote report patterns. If the hardware reports the modifier
 and primary in one cycle, the exact layer is selected immediately. If it emits
-a generic release between them, a released modifier remains available for
-0.30 seconds as a one-shot layer. A primary pressed during that grace window
-consumes the modifier and suppresses its own Base Tap; an unconsumed quick
-release expires without running an action. A modifier that remains physically
-held until the standalone threshold runs only its Base Tap action, and that HID
-cycle cannot also produce a layer or primary Base action. Sequential designated
-modifiers can be stacked before the primary in the same way.
+a generic release between them, the modifier remains pending for 0.30 seconds.
+A primary during that window wins even when the hold threshold was already
+reached. When the window closes, an eligible single modifier runs Base Tap;
+an unconsumed quick release does nothing. Sequential designated modifiers can
+be stacked before the primary in the same way.
 
 For a non-modifier K button, the inspector keeps the Base action visible in a
-left column and shows one chosen exact modifier layer in a right column. The
-right header selects single or stacked layers, so Base and K-layer actions can
-be compared and edited without swapping the entire inspector.
+left column and shows one chosen exact modifier layer in a right column. Each
+column displays its complete **When pressed** chord; the right chord's embedded
+layer control selects single or stacked layers without a second modifier UI.
 
 In Standard profiles, select K1–K10 to set an optional **Button title**. The
 title appears as one compact line at the top of that button and is shared by

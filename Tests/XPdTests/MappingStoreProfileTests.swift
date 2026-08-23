@@ -100,6 +100,35 @@ final class MappingStoreProfileTests: XCTestCase {
         )
     }
 
+    func testVersionSixPersistedProfilesMigrateLegacyRemoteTriggerData() throws {
+        let source = makeStore()
+        let legacyMapping = Mapping(
+            action: .openApplication,
+            command: "legacy F trigger",
+            remoteTriggerModifiers: [.command],
+            remoteTriggerFunctionKey: 118
+        )
+        source.setRemoteModifier(.k3, enabled: true)
+        source.update(legacyMapping, for: .k1, gesture: .tap, modifierControls: [.k3])
+
+        let currentData = try XCTUnwrap(defaults.data(forKey: "XPd.profiles.v7"))
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: currentData) as? [String: Any])
+        object["version"] = XPdConfiguration.preRemoteTriggerKeysVersion
+        let legacyData = try JSONSerialization.data(withJSONObject: object)
+        defaults.set(legacyData, forKey: "XPd.profiles.v6")
+        defaults.removeObject(forKey: "XPd.profiles.v7")
+
+        let restored = makeStore()
+        XCTAssertTrue(restored.isRemoteModifier(.k3))
+        XCTAssertEqual(
+            restored.mapping(for: .k1, gesture: .tap, modifierControls: [.k3]),
+            legacyMapping
+        )
+        let migratedData = try XCTUnwrap(defaults.data(forKey: "XPd.profiles.v7"))
+        let migratedObject = try XCTUnwrap(JSONSerialization.jsonObject(with: migratedData) as? [String: Any])
+        XCTAssertEqual(migratedObject["version"] as? Int, XPdConfiguration.currentVersion)
+    }
+
     func testStandardButtonTitleEmptyRemovesAndWheelOrMIDIUpdatesAreNoOps() throws {
         let store = makeStore()
         store.updateStandardButtonTitle("Chrome", for: .k1)
