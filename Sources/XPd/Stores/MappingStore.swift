@@ -189,6 +189,21 @@ final class MappingStore {
             lastPersistenceResult = .saved
         }
     }
+    /// Delay before a designated Standard-mode K modifier executes its
+    /// standalone Base Tap action. The value is global (not profile-scoped)
+    /// because it describes how the physical remote should arbitrate a
+    /// modifier press, and is intentionally kept outside the profile schema.
+    var standardModifierHoldThreshold: TimeInterval {
+        didSet {
+            let normalized = Self.normalizedStandardModifierHoldThreshold(standardModifierHoldThreshold)
+            if normalized != standardModifierHoldThreshold {
+                standardModifierHoldThreshold = normalized
+                return
+            }
+            defaults.set(standardModifierHoldThreshold, forKey: standardModifierHoldThresholdDefaultsKey)
+            lastPersistenceResult = .saved
+        }
+    }
     let hid: HIDService
 
     /// The active profile's persisted realm.  Standard profiles retain the
@@ -240,6 +255,7 @@ final class MappingStore {
     }
 
     static let inputOverlayDurationOptions: [Double] = [2, 4, 6, 8]
+    static let defaultStandardModifierHoldThreshold: TimeInterval = 0.5
 
     private struct ProfileState: Codable, Equatable {
         var mappings: [MappingKey: Mapping]
@@ -347,6 +363,7 @@ final class MappingStore {
     private let inputOverlayDefaultsKey = "XPd.showsInputOverlay.v1"
     private let inputOverlayDurationDefaultsKey = "XPd.inputOverlayDuration.v1"
     private let wheelSensitivityDefaultsKey = "XPd.wheelSensitivity.v1"
+    private let standardModifierHoldThresholdDefaultsKey = "XPd.standardModifierHoldThreshold.v1"
     private var profileStates: [String: ProfileState] = [:]
     private var liveInputGeneration = 0
     private var isProfileSelectorVisible = false
@@ -384,11 +401,15 @@ final class MappingStore {
     private var activeStandardKeyboardModifiers: [RemoteControl: Set<KeyboardShortcut.Modifier>] = [:]
     private var activeStandardFunctionKeys: [RemoteControl: Set<UInt16>] = [:]
     private var activeStandardGestureIdentity: ButtonGestureIdentity?
+    private var activeStandardModifierHoldTasks: [RemoteControl: GestureScheduledAction] = [:]
+    private var activeStandardModifierActionFired = false
+    private var activeStandardModifierGeneration = 0
     private var ambiguousStandardCycles: Set<RemoteControl> = []
     private struct PendingStandardModifierCycle {
         var modifiers: Set<RemoteControl>
         var keyboardModifiers: [RemoteControl: Set<KeyboardShortcut.Modifier>]
         var functionKeys: [RemoteControl: Set<UInt16>]
+        var standaloneActionFired: Bool
     }
     private var pendingStandardModifierCycle: PendingStandardModifierCycle?
     private var pendingStandardModifierTapTask: GestureScheduledAction?
@@ -439,6 +460,9 @@ final class MappingStore {
         let savedWheelSensitivity = defaults.object(forKey: wheelSensitivityDefaultsKey) as? Double
             ?? WheelScrollSettings.defaultSensitivity
         wheelSensitivity = WheelScrollSettings.clamped(savedWheelSensitivity)
+        let savedModifierHoldThreshold = defaults.object(forKey: standardModifierHoldThresholdDefaultsKey) as? Double
+            ?? Self.defaultStandardModifierHoldThreshold
+        standardModifierHoldThreshold = Self.normalizedStandardModifierHoldThreshold(savedModifierHoldThreshold)
 
         let migratedLegacyState = loadOrMigrateProfiles()
         let restoredProfile = migratedLegacyState
@@ -1429,14 +1453,20 @@ final class MappingStore {
         guard activeRealm == .standard, control.isMIDIButton else { return }
         guard !activeStandardControls.contains(control) else { return }
 
+        let startsNewCycle = activeStandardControls.isEmpty
+        if startsNewCycle {
+            activeStandardModifierGeneration &+= 1
+            activeStandardModifierActionFired = false
+        }
+
         // A modifier-only cycle is ambiguous until the next K press. If a
         // primary arrives before the short grace window expires, carry those
-        // modifiers into this cycle and suppress their standalone Tap.
-        if activeStandardControls.isEmpty,
-           let pending = consumePendingStandardModifierCycle() {
+        // modifiers into this cycle and suppress their standalone action.
+        if startsNewCycle, let pending = consumePendingStandardModifierCycle() {
             activeStandardControls.formUnion(pending.modifiers)
             activeStandardKeyboardModifiers.merge(pending.keyboardModifiers) { current, _ in current }
             activeStandardFunctionKeys.merge(pending.functionKeys) { current, _ in current }
+            activeStandardModifierActionFired = pending.standaloneActionFired
         }
 
         activeStandardKeyboardModifiers[control] = remoteModifierProvider()
@@ -1445,6 +1475,25 @@ final class MappingStore {
 
         let modifiers = activeStandardControls.filter(isRemoteModifier)
         let primaries = activeStandardControls.filter { !isRemoteModifier($0) }
+        if primaries.isEmpty {
+            if modifiers.count == 1, !activeStandardModifierActionFired,
+               let modifier = modifiers.first {
+                scheduleStandaloneStandardModifier(for: modifier)
+            } else {
+                cancelActiveStandardModifierHoldTasks()
+            }
+            return
+        }
+
+        // A standalone modifier that has already fired owns this physical
+        // cycle. Any later primary is intentionally consumed so a second
+        // Base or modifier-layer action cannot be emitted.
+        if activeStandardModifierActionFired {
+            cancelActiveStandardPrimaryGestures()
+            return
+        }
+
+        cancelActiveStandardModifierHoldTasks()
         guard primaries.count <= 1 else {
             ambiguousStandardCycles.formUnion(primaries)
             cancelActiveStandardPrimaryGestures()
@@ -1469,10 +1518,53 @@ final class MappingStore {
         }
     }
 
+    private func scheduleStandaloneStandardModifier(for control: RemoteControl) {
+        guard activeStandardModifierHoldTasks[control] == nil,
+              activeStandardControls.count == 1,
+              activeStandardModifierActionFired == false,
+              activeStandardGestureIdentity == nil else { return }
+
+        let keyboardModifiers = activeStandardKeyboardModifiers[control] ?? []
+        let functionKeys = activeStandardFunctionKeys[control] ?? []
+        let identity = ButtonGestureIdentity(
+            control: control,
+            keyboardModifiers: keyboardModifiers,
+            functionKeys: functionKeys
+        )
+        let generation = activeStandardModifierGeneration
+        // Snapshot the setting at press time. A later UI edit affects only
+        // subsequent modifier presses.
+        let threshold = standardModifierHoldThreshold
+        activeStandardModifierHoldTasks[control] = gestureSchedule(threshold) { [weak self] in
+            self?.recognizeStandaloneStandardModifier(
+                identity: identity,
+                generation: generation
+            )
+        }
+    }
+
+    private func recognizeStandaloneStandardModifier(
+        identity: ButtonGestureIdentity,
+        generation: Int
+    ) {
+        guard generation == activeStandardModifierGeneration,
+              activeStandardControls.count == 1,
+              activeStandardControls.contains(identity.control),
+              isRemoteModifier(identity.control),
+              activeStandardModifierActionFired == false,
+              activeStandardGestureIdentity == nil else { return }
+
+        activeStandardModifierActionFired = true
+        activeStandardModifierHoldTasks.removeValue(forKey: identity.control)
+        cancelActiveStandardModifierHoldTasks()
+        recognizedButtonGesture(identity: identity, gesture: .tap)
+    }
+
     private func enqueuePendingStandardModifierCycle(
         modifiers: Set<RemoteControl>,
         keyboardModifiers: [RemoteControl: Set<KeyboardShortcut.Modifier>],
-        functionKeys: [RemoteControl: Set<UInt16>]
+        functionKeys: [RemoteControl: Set<UInt16>],
+        standaloneActionFired: Bool
     ) {
         guard !modifiers.isEmpty else { return }
 
@@ -1480,12 +1572,14 @@ final class MappingStore {
             pending.modifiers.formUnion(modifiers)
             pending.keyboardModifiers.merge(keyboardModifiers) { current, _ in current }
             pending.functionKeys.merge(functionKeys) { current, _ in current }
+            pending.standaloneActionFired = pending.standaloneActionFired || standaloneActionFired
             pendingStandardModifierCycle = pending
         } else {
             pendingStandardModifierCycle = PendingStandardModifierCycle(
                 modifiers: modifiers,
                 keyboardModifiers: keyboardModifiers,
-                functionKeys: functionKeys
+                functionKeys: functionKeys,
+                standaloneActionFired: standaloneActionFired
             )
         }
 
@@ -1513,28 +1607,22 @@ final class MappingStore {
         pendingStandardModifierCycle = nil
         pendingStandardModifierTapTask = nil
 
-        // Match the existing same-cycle rule: multiple designated modifiers
-        // without a primary are consumed, while a single modifier remains a
-        // normal Tap mapping after the grace window.
-        guard pending.modifiers.count == 1,
-              let modifier = pending.modifiers.first else { return }
-        recognizedButtonGesture(
-            identity: ButtonGestureIdentity(
-                control: modifier,
-                keyboardModifiers: pending.keyboardModifiers[modifier] ?? [],
-                functionKeys: pending.functionKeys[modifier] ?? []
-            ),
-            gesture: .tap
-        )
+        // A quick release is intentionally a no-op. Standalone modifier
+        // actions are recognized only by the press-time hold timer above.
+        _ = pending
     }
 
     private func releaseStandardCycle() {
         let controls = activeStandardControls
+        let standaloneActionFired = activeStandardModifierActionFired
+        cancelActiveStandardModifierHoldTasks()
         activeStandardControls.removeAll()
         defer {
             activeStandardKeyboardModifiers.removeAll()
             activeStandardFunctionKeys.removeAll()
             activeStandardGestureIdentity = nil
+            activeStandardModifierActionFired = false
+            activeStandardModifierGeneration &+= 1
             ambiguousStandardCycles.removeAll()
             liveControl = nil
         }
@@ -1549,9 +1637,14 @@ final class MappingStore {
                 enqueuePendingStandardModifierCycle(
                     modifiers: Set(modifiers),
                     keyboardModifiers: activeStandardKeyboardModifiers,
-                    functionKeys: activeStandardFunctionKeys
+                    functionKeys: activeStandardFunctionKeys,
+                    standaloneActionFired: standaloneActionFired
                 )
             }
+            return
+        }
+
+        if standaloneActionFired {
             return
         }
 
@@ -1569,6 +1662,7 @@ final class MappingStore {
 
     private func cancelStandardCycle() {
         cancelActiveStandardPrimaryGestures()
+        cancelActiveStandardModifierHoldTasks()
         pendingStandardModifierTapTask?.cancel()
         pendingStandardModifierTapTask = nil
         pendingStandardModifierCycle = nil
@@ -1576,7 +1670,15 @@ final class MappingStore {
         activeStandardControls.removeAll()
         activeStandardKeyboardModifiers.removeAll()
         activeStandardFunctionKeys.removeAll()
+        activeStandardModifierActionFired = false
+        activeStandardModifierGeneration &+= 1
         ambiguousStandardCycles.removeAll()
+    }
+
+    private func cancelActiveStandardModifierHoldTasks() {
+        let tasks = Array(activeStandardModifierHoldTasks.values)
+        activeStandardModifierHoldTasks.removeAll()
+        tasks.forEach { $0.cancel() }
     }
 
     private func recognizedButtonGesture(identity: ButtonGestureIdentity, gesture: GestureKind) {
@@ -2601,5 +2703,11 @@ final class MappingStore {
 
     private static func closestInputOverlayDuration(to duration: Double) -> Double {
         inputOverlayDurationOptions.min(by: { abs($0 - duration) < abs($1 - duration) }) ?? 4
+    }
+
+    static func normalizedStandardModifierHoldThreshold(_ threshold: Double) -> Double {
+        guard threshold.isFinite else { return defaultStandardModifierHoldThreshold }
+        let clamped = min(max(threshold, 0.2), 1.5)
+        return (clamped * 10).rounded() / 10
     }
 }

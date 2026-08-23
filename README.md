@@ -118,16 +118,20 @@ gesture.
 
 ## K-button modifier layers
 
-In a Standard profile, any K1–K10 button can be marked **K modifier**. The
-button remains a normal Tap action when pressed by itself, but holding it with
-another K button selects that button's alternate mapping layer. The mapping
+In a Standard profile, any K1–K10 button can be marked **K modifier**. Holding
+the button by itself for the configured threshold runs its Base Tap action,
+while combining it with another K button selects that button's alternate
+mapping layer. The mapping
 layer menu supports exact combinations such as `K3`, `K4`, or `K3 + K4`, and
 the controls may be pressed in either order during the same HID cycle. This
 lets one physical button send a normal shortcut on its Base layer and open a
 different app when one or more designated K modifiers are held.
 
-Designated modifiers are Tap-only when used alone because a standalone Hold
-would conflict with their held-layer role. Layer stacks require exactly one
+Designated modifiers use their Base Tap mapping as the standalone hold action;
+their Hold and Double mappings remain unavailable because those gestures would
+conflict with the held-layer role. The default standalone threshold is 0.5
+seconds and is adjustable from 0.2–1.5 seconds under **Status & Input**. A quick
+modifier press and release alone does nothing. Layer stacks require exactly one
 non-modifier primary K button; ambiguous multi-primary input is consumed.
 Turning a designation off hides its layers without deleting their mappings.
 Every designated modifier is marked with a persistent `MOD` corner badge on
@@ -138,9 +142,11 @@ XP[d] accepts both remote report patterns. If the hardware reports the modifier
 and primary in one cycle, the exact layer is selected immediately. If it emits
 a generic release between them, a released modifier remains available for
 0.30 seconds as a one-shot layer. A primary pressed during that grace window
-consumes the modifier and suppresses its own Base Tap; otherwise the modifier's
-normal Base Tap runs after the window. Sequential designated modifiers can be
-stacked before the primary in the same way.
+consumes the modifier and suppresses its own Base Tap; an unconsumed quick
+release expires without running an action. A modifier that remains physically
+held until the standalone threshold runs only its Base Tap action, and that HID
+cycle cannot also produce a layer or primary Base action. Sequential designated
+modifiers can be stacked before the primary in the same way.
 
 For a non-modifier K button, the inspector keeps the Base action visible in a
 left column and shows one chosen exact modifier layer in a right column. The

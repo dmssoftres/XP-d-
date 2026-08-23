@@ -139,6 +139,29 @@ struct MappingInspector: View {
                 }
                 .padding(4)
             }
+
+            GroupBox("Standard K modifiers") {
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack {
+                        Text("Standalone hold threshold")
+                        Spacer()
+                        Text("\(store.standardModifierHoldThreshold, specifier: "%.1f") s")
+                            .monospacedDigit()
+                            .frame(minWidth: 40, alignment: .trailing)
+                        Stepper(
+                            value: Bindable(store).standardModifierHoldThreshold,
+                            in: 0.2...1.5,
+                            step: 0.1
+                        ) { Text("Adjust standalone hold threshold") }
+                        .labelsHidden()
+                    }
+                    Text("A designated K modifier runs its Base Tap action only after it remains held this long. Press another K before the threshold to use the modifier layer instead.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(4)
+            }
                 }
                 .padding(.top, 8)
             } label: {
@@ -815,7 +838,7 @@ struct MappingInspector: View {
             .controlSize(.small)
 
             if store.isRemoteModifier(store.selectedControl) {
-                Text("Tap only when used by itself")
+                Text("Hold alone for Base Tap; combine with another K for its layer")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -872,7 +895,7 @@ struct MappingInspector: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             if store.isRemoteModifier(store.selectedControl) {
-                Text("Tap · held presses select a modifier layer")
+                Text("Hold alone · combine with K for layer")
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 10)
                     .frame(height: 24)
