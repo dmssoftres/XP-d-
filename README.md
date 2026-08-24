@@ -143,7 +143,15 @@ conflict with the held-layer role. The default standalone threshold is 0.5
 seconds and is adjustable from 0.2–1.5 seconds under **Status & Input**. A quick
 modifier press and release alone does nothing. Layer stacks require exactly one
 non-modifier primary K button; ambiguous multi-primary input is consumed.
-Turning a designation off hides its layers without deleting their mappings.
+Turning a designation off preserves its layers and mappings; the inspector keeps
+them selectable but muted and delete-only until the MOD is re-enabled.
+For a destination K, Base and the selected exact MOD layer have independent
+Tap/Hold/Double selectors and configured-state dots, aligned together in the
+bottom gesture row. These layer gestures do not change the Tap-only standalone
+behavior of the modifier button itself.
+The upper MOD-layer field selects exactly one individual or saved layer to
+inspect. A separate **Combine MOD buttons** control below it is the only place
+that additively builds an exact multi-MOD combination.
 Every designated modifier is marked with a persistent `MOD` corner badge on
 the graphical remote. The badge overlays the existing button presentation, so
 its K number, optional title, and application icon remain in place.

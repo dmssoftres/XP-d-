@@ -853,7 +853,7 @@ struct MappingInspector: View {
 
                         VStack(alignment: .leading, spacing: 10) {
                             standardModifierLayerSelector
-                            modifierGestureEditor
+                            standardModifierCombinationBuilder
 
                             StandardMappingActionEditor(
                                 store: store,
@@ -879,7 +879,7 @@ struct MappingInspector: View {
 
                 actionResult
 
-                gestureEditor
+                mappingGestureEditors
 
                 persistenceResult
             }
@@ -1118,9 +1118,95 @@ struct MappingInspector: View {
     }
 
     private var standardModifierLayerSelector: some View {
-        Menu {
-            if !availableMappingModifiers.isEmpty {
-                Section("Available MOD buttons") {
+        VStack(alignment: .leading, spacing: 7) {
+            Text("MOD layer")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Menu {
+                if !availableMappingModifiers.isEmpty {
+                    Section("Available MOD layers") {
+                        ForEach(availableMappingModifiers) { control in
+                            modifierLayerSelectionButton([control])
+                        }
+                    }
+                }
+
+                if !additionalSavedModifierLayers.isEmpty {
+                    Section("Saved combinations") {
+                        ForEach(additionalSavedModifierLayers, id: \.self) { layer in
+                            modifierLayerSelectionButton(layer)
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 7) {
+                    Image(systemName: "square.stack.3d.up")
+                        .foregroundStyle(.secondary)
+                    modifierLayerChips(store.selectedMappingModifiers)
+                    Spacer(minLength: 8)
+                    if isLayerConfigured(store.selectedMappingModifiers) {
+                        Circle()
+                            .fill(.green)
+                            .frame(width: 7, height: 7)
+                            .accessibilityLabel("Configured")
+                    }
+                    Image(systemName: "chevron.down")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 8)
+                .frame(height: 28)
+                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 7))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 7)
+                        .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                }
+                .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .help("Choose one MOD layer for the action below")
+            .accessibilityLabel("Selected MOD layer \(mappingLayerLabel)")
+        }
+    }
+
+    @ViewBuilder
+    private func modifierLayerSelectionButton(_ layer: Set<RemoteControl>) -> some View {
+        Button {
+            store.selectedMappingModifiers = layer
+        } label: {
+            HStack {
+                Image(systemName: store.selectedMappingModifiers == layer
+                      ? "checkmark.circle.fill"
+                      : "circle")
+                Text(mappingLayerLabel(for: layer))
+                if isLayerConfigured(layer) {
+                    Image(systemName: "circle.fill")
+                        .foregroundStyle(.green)
+                }
+                if !layer.isSubset(of: store.remoteModifierControls) {
+                    Text("Disabled")
+                }
+            }
+        }
+    }
+
+    private var additionalSavedModifierLayers: [Set<RemoteControl>] {
+        savedMappingModifierLayers.filter { layer in
+            layer.count > 1
+                || !layer.isSubset(of: store.remoteModifierControls)
+        }
+    }
+
+    @ViewBuilder
+    private var standardModifierCombinationBuilder: some View {
+        if availableMappingModifiers.count > 1 {
+            VStack(alignment: .leading, spacing: 7) {
+                Text("Combine MOD buttons")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Menu {
                     ForEach(availableMappingModifiers) { control in
                         Button {
                             toggleSelectedModifier(control)
@@ -1130,76 +1216,41 @@ struct MappingInspector: View {
                                       ? "checkmark.circle.fill"
                                       : "circle")
                                 Text(control.rawValue)
-                                if isLayerConfigured([control]) {
-                                    Image(systemName: "circle.fill")
-                                        .foregroundStyle(.green)
-                                }
-                            }
-                        }
-                        .disabled(
-                            store.selectedMappingModifiers == [control]
-                                && availableMappingModifiers.count == 1
-                        )
-                    }
-                }
-            }
-
-            if !savedMappingModifierLayers.isEmpty {
-                Section("Saved layers") {
-                    ForEach(savedMappingModifierLayers, id: \.self) { layer in
-                        Button {
-                            store.selectedMappingModifiers = layer
-                        } label: {
-                            HStack {
-                                Image(systemName: store.selectedMappingModifiers == layer
-                                      ? "checkmark.circle.fill"
-                                      : "circle")
-                                Text(mappingLayerLabel(for: layer))
-                                if isLayerConfigured(layer) {
-                                    Image(systemName: "circle.fill")
-                                        .foregroundStyle(.green)
-                                }
-                                if !layer.isSubset(of: store.remoteModifierControls) {
-                                    Text("Disabled")
-                                }
                             }
                         }
                     }
+                } label: {
+                    HStack(spacing: 7) {
+                        Image(systemName: "plus.square.on.square")
+                            .foregroundStyle(.secondary)
+                        Text("Add or remove MOD buttons")
+                        Spacer(minLength: 8)
+                        modifierLayerChips(store.selectedMappingModifiers)
+                        Image(systemName: "chevron.down")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 8)
+                    .frame(height: 28)
+                    .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 7))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 7)
+                            .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                    }
+                    .contentShape(Rectangle())
                 }
+                .menuStyle(.borderlessButton)
+                .disabled(!selectedModifierLayerIsActive)
+                .opacity(selectedModifierLayerIsActive ? 1 : 0.42)
+                .help("Build an exact layer from the active MOD buttons")
+                .accessibilityLabel("Build MOD combination")
             }
-        } label: {
-            HStack(spacing: 7) {
-                Image(systemName: "square.stack.3d.up")
-                    .foregroundStyle(.secondary)
-                modifierLayerChips(store.selectedMappingModifiers)
-                Spacer(minLength: 8)
-                if isLayerConfigured(store.selectedMappingModifiers) {
-                    Circle()
-                        .fill(.green)
-                        .frame(width: 7, height: 7)
-                        .accessibilityLabel("Configured")
-                }
-                Image(systemName: "chevron.down")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.horizontal, 8)
-            .frame(height: 28)
-            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 7))
-            .overlay {
-                RoundedRectangle(cornerRadius: 7)
-                    .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
-            }
-            .contentShape(Rectangle())
         }
-        .menuStyle(.borderlessButton)
-        .help("Choose one or more MOD buttons for the action below")
-        .accessibilityLabel("MOD layer \(mappingLayerLabel)")
     }
 
     private var modifierGestureEditor: some View {
         VStack(alignment: .leading, spacing: 7) {
-            Text("Gesture")
+            Text("MOD Gesture")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -1234,6 +1285,24 @@ struct MappingInspector: View {
                 .allowsHitTesting(false)
             }
             .accessibilityLabel("MOD gesture")
+        }
+    }
+
+    @ViewBuilder
+    private var mappingGestureEditors: some View {
+        if isStandardLayerEligible {
+            HStack(alignment: .top, spacing: 16) {
+                gestureEditor
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+
+                Divider()
+
+                modifierGestureEditor
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+            .fixedSize(horizontal: false, vertical: true)
+        } else {
+            gestureEditor
         }
     }
 
