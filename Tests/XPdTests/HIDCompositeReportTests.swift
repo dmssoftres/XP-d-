@@ -315,6 +315,161 @@ final class HIDCompositeReportTests: XCTestCase {
         XCTAssertEqual(executed, ["K10 + K8 Layer"])
     }
 
+    func testReport2ModifierFirstLayeredHoldExecutesOnlyLayerHold() {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeReport2Store(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+
+        learnReport2(report2ButtonBit(.k8), for: .k8, in: store)
+        learnReport2(report2ButtonBit(.k10), for: .k10, in: store)
+        XCTAssertTrue(store.setRemoteModifier(.k10, enabled: true))
+        store.standardModifierHoldThreshold = 0.5
+        configureLayeredGestureCommands(in: store)
+
+        let k10 = report2ButtonBit(.k10)
+        let k8 = report2ButtonBit(.k8)
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: k10)
+        )
+        scheduler.advance(by: 0.10)
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: k10 | k8)
+        )
+
+        scheduler.advance(by: 0.71)
+        XCTAssertTrue(executed.isEmpty)
+        scheduler.advance(by: 0.01)
+        XCTAssertEqual(executed, ["K10 + K8 Hold"])
+
+        // Releasing the destination first must not re-arm K10 Base, and the
+        // recognized Hold must suppress this press's layered Tap/Double.
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: k10)
+        )
+        scheduler.advance(by: 1)
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: 0)
+        )
+        scheduler.advance(by: 0.30)
+
+        XCTAssertEqual(executed, ["K10 + K8 Hold"])
+    }
+
+    func testReport2DestinationFirstLayeredHoldKeepsLayerWhenModifierReleasesFirst() {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeReport2Store(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+
+        learnReport2(report2ButtonBit(.k8), for: .k8, in: store)
+        learnReport2(report2ButtonBit(.k10), for: .k10, in: store)
+        XCTAssertTrue(store.setRemoteModifier(.k10, enabled: true))
+        store.standardModifierHoldThreshold = 0.5
+        configureLayeredGestureCommands(in: store)
+
+        let k10 = report2ButtonBit(.k10)
+        let k8 = report2ButtonBit(.k8)
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: k8)
+        )
+        scheduler.advance(by: 0.10)
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: k10 | k8)
+        )
+        scheduler.advance(by: 0.72)
+
+        XCTAssertEqual(executed, ["K10 + K8 Hold"])
+
+        // Once the exact layer has formed, releasing K10 first must not turn
+        // the still-held destination into its Base gesture.
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: k8)
+        )
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: 0)
+        )
+        scheduler.advance(by: 0.30)
+
+        XCTAssertEqual(executed, ["K10 + K8 Hold"])
+    }
+
+    func testReport2SequentialDestinationsWhileK10HeldExecuteIndependentLayeredHolds() {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeReport2Store(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+
+        learnReport2(report2ButtonBit(.k8), for: .k8, in: store)
+        learnReport2(report2ButtonBit(.k9), for: .k9, in: store)
+        learnReport2(report2ButtonBit(.k10), for: .k10, in: store)
+        XCTAssertTrue(store.setRemoteModifier(.k10, enabled: true))
+        store.standardModifierHoldThreshold = 0.5
+        configureLayeredGestureCommands(in: store)
+        store.update(
+            Mapping(action: .openApplication, command: "K9 Base Hold"),
+            for: .k9,
+            gesture: .hold
+        )
+        store.update(
+            Mapping(action: .openApplication, command: "K10 + K9 Hold"),
+            for: .k9,
+            gesture: .hold,
+            modifierControls: [.k10]
+        )
+
+        let k10 = report2ButtonBit(.k10)
+        let k8 = report2ButtonBit(.k8)
+        let k9 = report2ButtonBit(.k9)
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: k10)
+        )
+        scheduler.advance(by: 0.10)
+
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: k10 | k8)
+        )
+        scheduler.advance(by: 0.72)
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: k10)
+        )
+
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: k10 | k9)
+        )
+        scheduler.advance(by: 0.72)
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: k10)
+        )
+        scheduler.advance(by: 1)
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: 0)
+        )
+        scheduler.advance(by: 0.30)
+
+        XCTAssertEqual(executed, ["K10 + K8 Hold", "K10 + K9 Hold"])
+    }
+
     func testReport2ExactCompositeBindingWinsOverBitmaskDecomposition() {
         let scheduler = TestScheduler()
         var executed: [String] = []
@@ -846,6 +1001,47 @@ final class HIDCompositeReportTests: XCTestCase {
                 (scheduler ?? TestScheduler()).schedule(delay: delay, action: action)
             },
             actionExecutionOverride: actionExecutionOverride
+        )
+    }
+
+    private func configureLayeredGestureCommands(in store: MappingStore) {
+        store.update(
+            Mapping(action: .openApplication, command: "K10 Base"),
+            for: .k10,
+            gesture: .tap
+        )
+        store.update(
+            Mapping(action: .openApplication, command: "K8 Base Tap"),
+            for: .k8,
+            gesture: .tap
+        )
+        store.update(
+            Mapping(action: .openApplication, command: "K8 Base Hold"),
+            for: .k8,
+            gesture: .hold
+        )
+        store.update(
+            Mapping(action: .openApplication, command: "K8 Base Double"),
+            for: .k8,
+            gesture: .doubleTap
+        )
+        store.update(
+            Mapping(action: .openApplication, command: "K10 + K8 Tap"),
+            for: .k8,
+            gesture: .tap,
+            modifierControls: [.k10]
+        )
+        store.update(
+            Mapping(action: .openApplication, command: "K10 + K8 Hold"),
+            for: .k8,
+            gesture: .hold,
+            modifierControls: [.k10]
+        )
+        store.update(
+            Mapping(action: .openApplication, command: "K10 + K8 Double"),
+            for: .k8,
+            gesture: .doubleTap,
+            modifierControls: [.k10]
         )
     }
 
