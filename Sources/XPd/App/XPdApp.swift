@@ -13,6 +13,9 @@ struct XPdApp: App {
         self.mainWindowController = mainWindowController
         _store = State(initialValue: MappingStore(mainWindowToggle: { [weak mainWindowController] in
             mainWindowController?.toggle() ?? .failure("XP[d] window is unavailable")
+        }, runModeTransition: { [weak mainWindowController] enabled in
+            mainWindowController?.setRunMode(enabled)
+                ?? .failure("XP[d] window is unavailable")
         }))
     }
 

@@ -192,6 +192,130 @@ final class MappingStoreModifierBindingTests: XCTestCase {
         )
     }
 
+    func testDormantSavedLayersRemainDiscoverableAndSelectedUntilDeleted() {
+        let source = makeStore()
+        XCTAssertTrue(source.setRemoteModifier(.k3, enabled: true))
+        XCTAssertTrue(source.setRemoteModifier(.k4, enabled: true))
+        source.update(
+            Mapping(action: .openApplication, command: "K3 layer"),
+            for: .k8,
+            gesture: .tap,
+            modifierControls: [.k3]
+        )
+        source.update(
+            Mapping(action: .openApplication, command: "K3 + K4 layer"),
+            for: .k8,
+            gesture: .tap,
+            modifierControls: [.k3, .k4]
+        )
+        source.selectedControl = .k8
+        source.selectedMappingModifiers = [.k3, .k4]
+
+        XCTAssertTrue(source.setRemoteModifier(.k4, enabled: false))
+
+        XCTAssertEqual(source.selectedMappingModifiers, [.k3, .k4])
+        XCTAssertEqual(source.standardModifierLayers(for: .k8), [[.k3], [.k3, .k4]])
+
+        XCTAssertTrue(source.deleteMapping(
+            for: .k8,
+            gesture: .tap,
+            modifierControls: [.k3, .k4]
+        ))
+        XCTAssertEqual(source.standardModifierLayers(for: .k8), [[.k3]])
+    }
+
+    func testExactModifierLayerStoresGesturesIndependentlyFromBaseAndOtherLayers() {
+        let source = makeStore()
+        XCTAssertTrue(source.setRemoteModifier(.k3, enabled: true))
+        XCTAssertTrue(source.setRemoteModifier(.k4, enabled: true))
+
+        let baseMappings: [GestureKind: Mapping] = [
+            .tap: Mapping(action: .openApplication, command: "base tap"),
+            .hold: Mapping(action: .openApplication, command: "base hold"),
+            .doubleTap: Mapping(action: .openApplication, command: "base double")
+        ]
+        let k3Mappings: [GestureKind: Mapping] = [
+            .tap: Mapping(action: .openApplication, command: "K3 tap"),
+            .hold: Mapping(action: .openApplication, command: "K3 hold"),
+            .doubleTap: Mapping(action: .openApplication, command: "K3 double")
+        ]
+        let k4Mappings: [GestureKind: Mapping] = [
+            .tap: Mapping(action: .openApplication, command: "K4 tap"),
+            .hold: Mapping(action: .openApplication, command: "K4 hold"),
+            .doubleTap: Mapping(action: .openApplication, command: "K4 double")
+        ]
+
+        for (gesture, mapping) in baseMappings {
+            source.update(mapping, for: .k8, gesture: gesture)
+        }
+        for (gesture, mapping) in k3Mappings {
+            source.update(mapping, for: .k8, gesture: gesture, modifierControls: [.k3])
+        }
+        for (gesture, mapping) in k4Mappings {
+            source.update(mapping, for: .k8, gesture: gesture, modifierControls: [.k4])
+        }
+
+        for (gesture, mapping) in baseMappings {
+            XCTAssertEqual(source.mapping(for: .k8, gesture: gesture), mapping)
+        }
+        for (gesture, mapping) in k3Mappings {
+            XCTAssertEqual(
+                source.mapping(for: .k8, gesture: gesture, modifierControls: [.k3]),
+                mapping
+            )
+        }
+        for (gesture, mapping) in k4Mappings {
+            XCTAssertEqual(
+                source.mapping(for: .k8, gesture: gesture, modifierControls: [.k4]),
+                mapping
+            )
+        }
+
+        XCTAssertTrue(source.deleteMapping(
+            for: .k8,
+            gesture: .hold,
+            modifierControls: [.k3]
+        ))
+        XCTAssertEqual(
+            source.mapping(for: .k8, gesture: .tap, modifierControls: [.k3]),
+            k3Mappings[.tap]
+        )
+        XCTAssertEqual(
+            source.mapping(for: .k8, gesture: .doubleTap, modifierControls: [.k3]),
+            k3Mappings[.doubleTap]
+        )
+        XCTAssertEqual(
+            source.mapping(for: .k8, gesture: .hold, modifierControls: [.k3]),
+            Mapping()
+        )
+        XCTAssertEqual(
+            source.mapping(for: .k8, gesture: .hold),
+            baseMappings[.hold]
+        )
+        XCTAssertEqual(
+            source.mapping(for: .k8, gesture: .hold, modifierControls: [.k4]),
+            k4Mappings[.hold]
+        )
+
+        let restored = makeStore()
+        XCTAssertEqual(
+            restored.mapping(for: .k8, gesture: .tap, modifierControls: [.k3]),
+            k3Mappings[.tap]
+        )
+        XCTAssertEqual(
+            restored.mapping(for: .k8, gesture: .doubleTap, modifierControls: [.k3]),
+            k3Mappings[.doubleTap]
+        )
+        XCTAssertEqual(
+            restored.mapping(for: .k8, gesture: .hold, modifierControls: [.k3]),
+            Mapping()
+        )
+        XCTAssertEqual(
+            restored.mapping(for: .k8, gesture: .hold, modifierControls: [.k4]),
+            k4Mappings[.hold]
+        )
+    }
+
     func testEnablingUnboundK10FailsWithoutRestoringFactorySignature() {
         let source = makeStore()
         source.clearHIDBinding(for: .k10)

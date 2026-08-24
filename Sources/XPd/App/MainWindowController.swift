@@ -1,6 +1,14 @@
 import AppKit
 import SwiftUI
 
+private final class MainWindowObserverToken: @unchecked Sendable {
+    let token: NSObjectProtocol
+
+    init(_ token: NSObjectProtocol) {
+        self.token = token
+    }
+}
+
 /// Owns the narrow AppKit edge needed to show a SwiftUI scene window after it
 /// has been miniaturized or closed. The window remains SwiftUI-owned; retaining
 /// its NSWindow lets a remote action restore the same scene without routing
@@ -13,16 +21,57 @@ final class MainWindowController {
     }
 
     typealias ActivationHandler = @MainActor () -> Void
+    typealias ExternalApplicationProvider = @MainActor () -> ExternalApplicationTarget?
+    typealias ExternalApplicationActivationHandler = @MainActor (
+        _ target: ExternalApplicationTarget
+    ) -> ActionExecutionResult
+
+    struct ExternalApplicationTarget: Equatable {
+        let processIdentifier: pid_t
+        let displayName: String
+
+        init(processIdentifier: pid_t, displayName: String = "external application") {
+            self.processIdentifier = processIdentifier
+            self.displayName = displayName
+        }
+    }
 
     private var window: NSWindow?
     private let activateApplication: ActivationHandler
+    private let externalApplicationActivation: ExternalApplicationActivationHandler
+    private let workspaceNotificationCenter: NotificationCenter
+    private var lastExternalApplication: ExternalApplicationTarget?
+    private var activationObserver: MainWindowObserverToken?
+    private var terminationObserver: MainWindowObserverToken?
 
     init(
         activateApplication: @escaping ActivationHandler = {
             NSApp.activate(ignoringOtherApps: true)
-        }
+        },
+        externalApplicationProvider: @escaping ExternalApplicationProvider = {
+            MainWindowController.currentExternalApplicationTarget()
+        },
+        externalApplicationActivation: @escaping ExternalApplicationActivationHandler = {
+            MainWindowController.activateExternalApplication($0)
+        },
+        workspaceNotificationCenter: NotificationCenter = NSWorkspace.shared.notificationCenter
     ) {
         self.activateApplication = activateApplication
+        self.externalApplicationActivation = externalApplicationActivation
+        self.workspaceNotificationCenter = workspaceNotificationCenter
+        lastExternalApplication = Self.validatedExternalApplicationTarget(
+            externalApplicationProvider()
+        )
+        observeWorkspaceApplications()
+    }
+
+    deinit {
+        if let activationObserver {
+            workspaceNotificationCenter.removeObserver(activationObserver.token)
+        }
+        if let terminationObserver {
+            workspaceNotificationCenter.removeObserver(terminationObserver.token)
+        }
     }
 
     func register(_ window: NSWindow) {
@@ -57,6 +106,31 @@ final class MainWindowController {
         }
     }
 
+    @discardableResult
+    @MainActor
+    func setRunMode(_ enabled: Bool) -> ActionExecutionResult {
+        guard enabled else {
+            return .success("Edit mode")
+        }
+
+        guard let window else {
+            return .failure("XP[d] window is unavailable")
+        }
+        guard let target = lastExternalApplication else {
+            return .failure("No external application is available")
+        }
+
+        if window.isMiniaturized {
+            window.deminiaturize(nil)
+        }
+        if !window.isVisible {
+            // Ordering does not activate XP[d] or make it the key window.
+            window.orderFrontRegardless()
+        }
+
+        return externalApplicationActivation(target)
+    }
+
     static func operation(
         isVisible: Bool,
         isMiniaturized: Bool,
@@ -66,6 +140,92 @@ final class MainWindowController {
         isVisible && !isMiniaturized && isKeyWindow && applicationIsActive
             ? .hide
             : .show
+    }
+
+    static func currentExternalApplicationTarget() -> ExternalApplicationTarget? {
+        externalApplicationTarget(from: NSWorkspace.shared.frontmostApplication)
+    }
+
+    private static func externalApplicationTarget(
+        from application: NSRunningApplication?
+    ) -> ExternalApplicationTarget? {
+        guard let application,
+              application.processIdentifier != ProcessInfo.processInfo.processIdentifier,
+              !application.isTerminated else {
+            return nil
+        }
+        return ExternalApplicationTarget(
+            processIdentifier: application.processIdentifier,
+            displayName: application.localizedName ?? "external application"
+        )
+    }
+
+    private static func validatedExternalApplicationTarget(
+        _ target: ExternalApplicationTarget?
+    ) -> ExternalApplicationTarget? {
+        guard let target,
+              target.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
+            return nil
+        }
+        return target
+    }
+
+    private static func activateExternalApplication(
+        _ target: ExternalApplicationTarget
+    ) -> ActionExecutionResult {
+        guard target.processIdentifier != ProcessInfo.processInfo.processIdentifier,
+              let application = NSRunningApplication(processIdentifier: target.processIdentifier),
+              !application.isTerminated else {
+            return .failure("External application is no longer running")
+        }
+        guard application.activate(options: [.activateAllWindows]) else {
+            return .failure("Could not return focus to \(target.displayName)")
+        }
+        return .success("Returned focus to \(target.displayName)")
+    }
+
+    private func observeWorkspaceApplications() {
+        let activationObserver = workspaceNotificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey]
+                    as? NSRunningApplication else {
+                return
+            }
+            MainActor.assumeIsolated {
+                self?.recordExternalApplication(application)
+            }
+        }
+        self.activationObserver = MainWindowObserverToken(activationObserver)
+
+        let terminationObserver = workspaceNotificationCenter.addObserver(
+            forName: NSWorkspace.didTerminateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey]
+                    as? NSRunningApplication else {
+                return
+            }
+            MainActor.assumeIsolated {
+                self?.clearTerminatedExternalApplication(application)
+            }
+        }
+        self.terminationObserver = MainWindowObserverToken(terminationObserver)
+    }
+
+    private func recordExternalApplication(_ application: NSRunningApplication) {
+        guard let target = Self.externalApplicationTarget(from: application) else { return }
+        lastExternalApplication = target
+    }
+
+    private func clearTerminatedExternalApplication(_ application: NSRunningApplication) {
+        guard application.processIdentifier == lastExternalApplication?.processIdentifier else {
+            return
+        }
+        lastExternalApplication = nil
     }
 }
 

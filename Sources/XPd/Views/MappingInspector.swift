@@ -4,6 +4,7 @@ import SwiftUI
 struct MappingInspector: View {
     let store: MappingStore
     @State private var activeStandardEditorLayer: Set<RemoteControl>?
+    @State private var selectedModifierGesture: GestureKind = .tap
     @State private var showsStatusAndInput = false
 
     var body: some View {
@@ -21,7 +22,7 @@ struct MappingInspector: View {
                         .font(.title2.weight(.semibold))
                 }
                 Spacer()
-                Text(store.selectedControl.isWheelRotation ? "Rotate" : store.selectedGesture.rawValue)
+                Text(headerGestureLabel)
                     .font(.caption.weight(.medium))
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
@@ -223,6 +224,7 @@ struct MappingInspector: View {
             }
         }
         .onChange(of: store.selectedControl) { _, _ in
+            resetModifierGestureSelection()
             ensureModifierLayerSelection()
         }
         .onChange(of: store.selectedGesture) { _, _ in
@@ -231,9 +233,17 @@ struct MappingInspector: View {
             }
         }
         .onChange(of: store.profileName) { _, _ in
+            resetModifierGestureSelection()
             ensureModifierLayerSelection()
         }
+        .onChange(of: store.selectedMappingModifiers) { _, _ in
+            resetModifierGestureSelection()
+        }
         .onChange(of: store.remoteModifierControls) { _, _ in
+            resetModifierGestureSelection()
+            ensureModifierLayerSelection()
+        }
+        .onChange(of: savedMappingModifierLayers) { _, _ in
             ensureModifierLayerSelection()
         }
         .onAppear(perform: ensureModifierLayerSelection)
@@ -835,17 +845,26 @@ struct MappingInspector: View {
                             store: store,
                             modifierControls: [],
                             title: "Base Action",
+                            gesture: store.selectedGesture,
                             activeCaptureLayer: $activeStandardEditorLayer
                         )
 
                         Divider()
 
-                        StandardMappingActionEditor(
-                            store: store,
-                            modifierControls: store.selectedMappingModifiers,
-                            title: "\(mappingLayerLabel) Action",
-                            activeCaptureLayer: $activeStandardEditorLayer
-                        )
+                        VStack(alignment: .leading, spacing: 10) {
+                            standardModifierLayerSelector
+                            modifierGestureEditor
+
+                            StandardMappingActionEditor(
+                                store: store,
+                                modifierControls: store.selectedMappingModifiers,
+                                title: "\(mappingLayerLabel) Action",
+                                gesture: selectedModifierGesture,
+                                isEditable: selectedModifierLayerIsActive,
+                                activeCaptureLayer: $activeStandardEditorLayer
+                            )
+                        }
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
                     }
                     .fixedSize(horizontal: false, vertical: true)
                 } else {
@@ -853,6 +872,7 @@ struct MappingInspector: View {
                         store: store,
                         modifierControls: [],
                         title: nil,
+                        gesture: store.selectedGesture,
                         activeCaptureLayer: $activeStandardEditorLayer
                     )
                 }
@@ -1066,20 +1086,206 @@ struct MappingInspector: View {
         }
     }
 
+    private var savedMappingModifierLayers: [Set<RemoteControl>] {
+        store.standardModifierLayers(for: store.selectedControl)
+    }
+
+    private var selectedModifierLayerIsActive: Bool {
+        !store.selectedMappingModifiers.isEmpty
+            && store.selectedMappingModifiers.isSubset(of: store.remoteModifierControls)
+    }
+
+    private func resetModifierGestureSelection() {
+        selectedModifierGesture = .tap
+        activeStandardEditorLayer = nil
+    }
+
     private func ensureModifierLayerSelection() {
         guard canChooseStandardLayer else { return }
-        let available = Set(availableMappingModifiers)
-        let selected = store.selectedMappingModifiers.intersection(available)
-        if selected.isEmpty, let first = availableMappingModifiers.first {
-            store.selectedMappingModifiers = [first]
-        } else if selected != store.selectedMappingModifiers {
-            store.selectedMappingModifiers = selected
+        let active = Set(availableMappingModifiers)
+        let selected = store.selectedMappingModifiers
+        let selectedIsAvailable = !selected.isEmpty
+            && (selected.isSubset(of: active) || savedMappingModifierLayers.contains(selected))
+
+        if selectedIsAvailable {
+            return
         }
+        if let first = availableMappingModifiers.first {
+            store.selectedMappingModifiers = [first]
+        } else if let first = savedMappingModifierLayers.first {
+            store.selectedMappingModifiers = first
+        }
+    }
+
+    private var standardModifierLayerSelector: some View {
+        Menu {
+            if !availableMappingModifiers.isEmpty {
+                Section("Available MOD buttons") {
+                    ForEach(availableMappingModifiers) { control in
+                        Button {
+                            toggleSelectedModifier(control)
+                        } label: {
+                            HStack {
+                                Image(systemName: store.selectedMappingModifiers.contains(control)
+                                      ? "checkmark.circle.fill"
+                                      : "circle")
+                                Text(control.rawValue)
+                                if isLayerConfigured([control]) {
+                                    Image(systemName: "circle.fill")
+                                        .foregroundStyle(.green)
+                                }
+                            }
+                        }
+                        .disabled(
+                            store.selectedMappingModifiers == [control]
+                                && availableMappingModifiers.count == 1
+                        )
+                    }
+                }
+            }
+
+            if !savedMappingModifierLayers.isEmpty {
+                Section("Saved layers") {
+                    ForEach(savedMappingModifierLayers, id: \.self) { layer in
+                        Button {
+                            store.selectedMappingModifiers = layer
+                        } label: {
+                            HStack {
+                                Image(systemName: store.selectedMappingModifiers == layer
+                                      ? "checkmark.circle.fill"
+                                      : "circle")
+                                Text(mappingLayerLabel(for: layer))
+                                if isLayerConfigured(layer) {
+                                    Image(systemName: "circle.fill")
+                                        .foregroundStyle(.green)
+                                }
+                                if !layer.isSubset(of: store.remoteModifierControls) {
+                                    Text("Disabled")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: "square.stack.3d.up")
+                    .foregroundStyle(.secondary)
+                modifierLayerChips(store.selectedMappingModifiers)
+                Spacer(minLength: 8)
+                if isLayerConfigured(store.selectedMappingModifiers) {
+                    Circle()
+                        .fill(.green)
+                        .frame(width: 7, height: 7)
+                        .accessibilityLabel("Configured")
+                }
+                Image(systemName: "chevron.down")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 28)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 7))
+            .overlay {
+                RoundedRectangle(cornerRadius: 7)
+                    .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+            }
+            .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .help("Choose one or more MOD buttons for the action below")
+        .accessibilityLabel("MOD layer \(mappingLayerLabel)")
+    }
+
+    private var modifierGestureEditor: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text("Gesture")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Picker("MOD gesture", selection: $selectedModifierGesture) {
+                ForEach(GestureKind.allCases) { gesture in
+                    Text(gesture.rawValue)
+                        .tag(gesture)
+                        .accessibilityLabel("MOD \(gesture.rawValue) gesture")
+                        .accessibilityValue(
+                            isModifierGestureConfigured(gesture) ? "Configured" : "Not configured"
+                        )
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
+            .overlay {
+                HStack(spacing: 0) {
+                    ForEach(GestureKind.allCases) { gesture in
+                        Color.clear
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .overlay(alignment: .trailing) {
+                                if isModifierGestureConfigured(gesture) {
+                                    Circle()
+                                        .fill(Color.green)
+                                        .frame(width: 6, height: 6)
+                                        .padding(.trailing, 8)
+                                }
+                            }
+                    }
+                }
+                .accessibilityHidden(true)
+                .allowsHitTesting(false)
+            }
+            .accessibilityLabel("MOD gesture")
+        }
+    }
+
+    private func isModifierGestureConfigured(_ gesture: GestureKind) -> Bool {
+        guard !store.selectedMappingModifiers.isEmpty else { return false }
+        return store.isMappingConfigured(
+            for: store.selectedControl,
+            gesture: gesture,
+            modifierControls: store.selectedMappingModifiers
+        )
+    }
+
+    private func modifierLayerChips(_ layer: Set<RemoteControl>) -> some View {
+        HStack(spacing: 4) {
+            ForEach(RemoteControl.allCases.filter { layer.contains($0) }) { control in
+                Text(control.rawValue)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(
+                        store.isRemoteModifier(control)
+                            ? store.modifierColor(for: control).swiftUIColor
+                            : Color.secondary
+                    )
+                    .padding(.horizontal, 6)
+                    .frame(height: 18)
+                    .background(.black.opacity(0.34), in: Capsule())
+                    .opacity(store.isRemoteModifier(control) ? 1 : 0.48)
+            }
+        }
+    }
+
+    private func toggleSelectedModifier(_ control: RemoteControl) {
+        var layer = store.selectedMappingModifiers
+        if layer.contains(control) {
+            guard layer.count > 1 else { return }
+            layer.remove(control)
+        } else {
+            layer.insert(control)
+        }
+        store.selectedMappingModifiers = layer
+    }
+
+    private func isLayerConfigured(_ layer: Set<RemoteControl>) -> Bool {
+        store.isMappingConfigured(
+            for: store.selectedControl,
+            gesture: selectedModifierGesture,
+            modifierControls: layer
+        )
     }
 
     private var gestureEditor: some View {
         VStack(alignment: .leading, spacing: 7) {
-            Text("Gesture")
+            Text(isStandardLayerEligible ? "Base Gesture" : "Gesture")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             if store.isRemoteModifier(store.selectedControl) {
@@ -1089,7 +1295,10 @@ struct MappingInspector: View {
                     .frame(height: 24)
                     .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
             } else {
-                Picker("Gesture", selection: Bindable(store).selectedGesture) {
+                Picker(
+                    isStandardLayerEligible ? "Base gesture" : "Gesture",
+                    selection: Bindable(store).selectedGesture
+                ) {
                     ForEach(GestureKind.allCases) { gesture in
                         Text(gesture.rawValue)
                         .tag(gesture)
@@ -1124,15 +1333,9 @@ struct MappingInspector: View {
     }
 
     private func isGestureConfigured(_ gesture: GestureKind) -> Bool {
-        let baseIsConfigured = store.isMappingConfigured(
+        store.isMappingConfigured(
             for: store.selectedControl,
             gesture: gesture
-        )
-        guard isStandardLayerEligible else { return baseIsConfigured }
-        return baseIsConfigured || store.isMappingConfigured(
-            for: store.selectedControl,
-            gesture: gesture,
-            modifierControls: store.selectedMappingModifiers
         )
     }
 
@@ -1151,6 +1354,16 @@ struct MappingInspector: View {
         store.selectedControl.isWheelRotation ? "Wheel" : store.selectedControl.rawValue
     }
 
+    private var headerGestureLabel: String {
+        if store.selectedControl.isWheelRotation {
+            return "Rotate"
+        }
+        if isStandardLayerEligible {
+            return "Base \(store.selectedGesture.rawValue)"
+        }
+        return store.selectedGesture.rawValue
+    }
+
     private var isStandardButtonTitleEligible: Bool {
         store.activeRealm == .standard && store.selectedControl.isMIDIButton
     }
@@ -1166,13 +1379,17 @@ struct MappingInspector: View {
     private var canChooseStandardLayer: Bool {
         isStandardButtonTitleEligible
             && !store.isRemoteModifier(store.selectedControl)
-            && !store.remoteModifierControls.isEmpty
+            && (!store.remoteModifierControls.isEmpty || !savedMappingModifierLayers.isEmpty)
     }
 
     private var mappingLayerLabel: String {
-        guard !store.selectedMappingModifiers.isEmpty else { return "Base" }
+        mappingLayerLabel(for: store.selectedMappingModifiers)
+    }
+
+    private func mappingLayerLabel(for layer: Set<RemoteControl>) -> String {
+        guard !layer.isEmpty else { return "Base" }
         return RemoteControl.allCases
-            .filter { store.selectedMappingModifiers.contains($0) }
+            .filter { layer.contains($0) }
             .map(\.rawValue)
             .joined(separator: " + ")
     }
@@ -1190,6 +1407,8 @@ private struct StandardMappingActionEditor: View {
     let store: MappingStore
     let modifierControls: Set<RemoteControl>
     let title: String?
+    let gesture: GestureKind
+    var isEditable = true
     @Binding var activeCaptureLayer: Set<RemoteControl>?
 
     @State private var isEditingCommand = false
@@ -1205,25 +1424,20 @@ private struct StandardMappingActionEditor: View {
             get: {
                 store.mapping(
                     for: store.selectedControl,
-                    gesture: store.selectedGesture,
+                    gesture: gesture,
                     modifierControls: modifierControls
                 )
             },
             set: {
+                guard isEditable else { return }
                 store.update(
                     $0,
                     for: store.selectedControl,
-                    gesture: store.selectedGesture,
+                    gesture: gesture,
                     modifierControls: modifierControls
                 )
             }
         )
-    }
-
-    private var availableModifierControls: [RemoteControl] {
-        RemoteControl.allCases.filter {
-            store.isRemoteModifier($0) && $0 != store.selectedControl
-        }
     }
 
     var body: some View {
@@ -1233,6 +1447,7 @@ private struct StandardMappingActionEditor: View {
                     Text(title)
                         .font(.headline)
                         .lineLimit(1)
+                        .foregroundStyle(isEditable ? Color.primary : Color.secondary)
                     Spacer(minLength: 8)
                 } else {
                     Spacer(minLength: 0)
@@ -1249,31 +1464,41 @@ private struct StandardMappingActionEditor: View {
                 mappingClipboardControls
             }
 
-            Picker("Action", selection: actionBinding) {
-                ForEach(ActionKind.allCases) { action in
-                    Text(action.editorLabel).tag(action)
+            Group {
+                Picker("Action", selection: actionBinding) {
+                    ForEach(ActionKind.allCases) { action in
+                        Text(action.editorLabel).tag(action)
+                    }
+                }
+
+                if isTapInheritanceEligible {
+                    tapApplicationEditor
+                } else {
+                    commandEditor
+                }
+
+                if store.activeRealm == .standard, store.selectedControl.isMIDIButton {
+                    remoteTriggerEditor
+                }
+
+                if isApplicationAction {
+                    Text("Use an app name, bundle ID, or .app path. Toggle application requires Accessibility permission.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
+            .disabled(!isEditable)
+            .opacity(isEditable ? 1 : 0.42)
 
-            if isTapInheritanceEligible {
-                tapApplicationEditor
-            } else {
-                commandEditor
-            }
-
-            if store.activeRealm == .standard, store.selectedControl.isMIDIButton {
-                remoteTriggerEditor
-            }
-
-            if isApplicationAction {
-                Text("Use an app name, bundle ID, or .app path. Toggle application requires Accessibility permission.")
+            if !isEditable {
+                Label("This saved layer is disabled. Re-enable its MOD buttons or delete the action.", systemImage: "pause.circle")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .onChange(of: store.selectedControl) { _, _ in cancelEditing() }
-        .onChange(of: store.selectedGesture) { _, _ in cancelEditing() }
+        .onChange(of: gesture) { _, _ in cancelEditing() }
         .onChange(of: modifierControls) { _, _ in cancelEditing() }
         .onChange(of: store.profileName) { _, _ in cancelEditing() }
         .onChange(of: selectedAction) { _, _ in
@@ -1345,7 +1570,7 @@ private struct StandardMappingActionEditor: View {
     private var isPendingCutSource: Bool {
         store.mappingClipboardOperation(
             for: store.selectedControl,
-            gesture: store.selectedGesture,
+            gesture: gesture,
             modifierControls: modifierControls
         ) == .cut
     }
@@ -1356,7 +1581,7 @@ private struct StandardMappingActionEditor: View {
                 cancelEditing()
                 _ = store.copyMapping(
                     from: store.selectedControl,
-                    gesture: store.selectedGesture,
+                    gesture: gesture,
                     modifierControls: modifierControls
                 )
             } label: {
@@ -1368,15 +1593,15 @@ private struct StandardMappingActionEditor: View {
             .accessibilityLabel("Copy action")
             .disabled(!store.canCopyMapping(
                 for: store.selectedControl,
-                gesture: store.selectedGesture,
+                gesture: gesture,
                 modifierControls: modifierControls
-            ))
+            ) || !isEditable)
 
             Button {
                 cancelEditing()
                 _ = store.cutMapping(
                     from: store.selectedControl,
-                    gesture: store.selectedGesture,
+                    gesture: gesture,
                     modifierControls: modifierControls
                 )
             } label: {
@@ -1388,15 +1613,15 @@ private struct StandardMappingActionEditor: View {
             .accessibilityLabel("Cut action")
             .disabled(!store.canCutMapping(
                 for: store.selectedControl,
-                gesture: store.selectedGesture,
+                gesture: gesture,
                 modifierControls: modifierControls
-            ))
+            ) || !isEditable)
 
             Button {
                 cancelEditing()
                 let destination = store.mappingDestinationSnapshot(
                     for: store.selectedControl,
-                    gesture: store.selectedGesture,
+                    gesture: gesture,
                     modifierControls: modifierControls
                 )
                 switch store.pasteMapping(to: destination) {
@@ -1414,14 +1639,14 @@ private struct StandardMappingActionEditor: View {
             .accessibilityLabel("Paste action")
             .disabled(!store.canPasteMapping(
                 to: store.selectedControl,
-                gesture: store.selectedGesture,
+                gesture: gesture,
                 modifierControls: modifierControls
-            ))
+            ) || !isEditable)
 
             Button(role: .destructive) {
                 let destination = store.mappingDestinationSnapshot(
                     for: store.selectedControl,
-                    gesture: store.selectedGesture,
+                    gesture: gesture,
                     modifierControls: modifierControls
                 )
                 if destination.expectedMapping != Mapping() {
@@ -1436,7 +1661,7 @@ private struct StandardMappingActionEditor: View {
             .accessibilityLabel("Delete action")
             .disabled(!store.destinationHasMapping(
                 for: store.selectedControl,
-                gesture: store.selectedGesture,
+                gesture: gesture,
                 modifierControls: modifierControls
             ))
         }
@@ -1593,7 +1818,7 @@ private struct StandardMappingActionEditor: View {
             RemoteTriggerChordCaptureField(
                 selectedControl: store.selectedControl,
                 modifierControls: modifierControls,
-                availableModifierControls: modifierControls.isEmpty ? [] : availableModifierControls,
+                availableModifierControls: [],
                 currentModifiers: binding.wrappedValue.remoteTriggerModifiers,
                 currentFunctionKey: binding.wrappedValue.remoteTriggerFunctionKey,
                 currentKeyCode: binding.wrappedValue.remoteTriggerKeyCode,
@@ -1603,12 +1828,8 @@ private struct StandardMappingActionEditor: View {
                     store.beginRemoteTriggerCapture(onRemoteModifier: onRemoteModifier)
                 },
                 endRemoteCapture: store.endRemoteTriggerCapture,
-                onModifierControlsChange: { remoteModifiers in
-                    guard !remoteModifiers.isEmpty else { return }
-                    store.selectedMappingModifiers = remoteModifiers
-                },
+                onModifierControlsChange: { _ in },
                 onKeyboardConditionCommit: { remoteModifiers, modifiers, keyCode, keyDisplay in
-                    let gesture = store.selectedGesture
                     var mapping = store.mapping(
                         for: store.selectedControl,
                         gesture: gesture,
@@ -1634,9 +1855,6 @@ private struct StandardMappingActionEditor: View {
                         gesture: gesture,
                         modifierControls: remoteModifiers
                     )
-                    if !remoteModifiers.isEmpty {
-                        store.selectedMappingModifiers = remoteModifiers
-                    }
                 },
                 onRecordingChange: updateCaptureState
             )
@@ -1778,7 +1996,7 @@ private struct StandardMappingActionEditor: View {
     }
 
     private var isTapInheritanceEligible: Bool {
-        (store.selectedGesture == .hold || store.selectedGesture == .doubleTap)
+        (gesture == .hold || gesture == .doubleTap)
             && isApplicationAction
     }
 

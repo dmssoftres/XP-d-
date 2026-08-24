@@ -162,4 +162,154 @@ final class MainWindowActionTests: XCTestCase {
         XCTAssertTrue(store.setRemoteModifier(.k10, enabled: false))
         XCTAssertFalse(store.hasMainWindowToggleMapping(for: .k2))
     }
+
+    func testRunModeRequiresRegisteredWindow() {
+        let target = MainWindowController.ExternalApplicationTarget(
+            processIdentifier: ProcessInfo.processInfo.processIdentifier + 1,
+            displayName: "External editor"
+        )
+        var activationCount = 0
+        let controller = MainWindowController(
+            externalApplicationProvider: { target },
+            externalApplicationActivation: { _ in
+                activationCount += 1
+                return .success("External editor active")
+            },
+            workspaceNotificationCenter: NotificationCenter()
+        )
+
+        XCTAssertEqual(
+            controller.setRunMode(true),
+            .failure("XP[d] window is unavailable")
+        )
+        XCTAssertEqual(activationCount, 0)
+    }
+
+    func testRunModeFailsWhenNoExternalApplicationIsAvailable() {
+        _ = NSApplication.shared
+        let controller = MainWindowController(
+            externalApplicationProvider: { nil },
+            externalApplicationActivation: { _ in
+                XCTFail("An unavailable external application must not be activated")
+                return .failure("unexpected activation")
+            },
+            workspaceNotificationCenter: NotificationCenter()
+        )
+        let window = makeTestWindow()
+        controller.register(window)
+
+        XCTAssertEqual(
+            controller.setRunMode(true),
+            .failure("No external application is available")
+        )
+        window.close()
+    }
+
+    func testRunModeReturnsExternalActivationFailure() {
+        _ = NSApplication.shared
+        let target = MainWindowController.ExternalApplicationTarget(
+            processIdentifier: ProcessInfo.processInfo.processIdentifier + 1,
+            displayName: "External editor"
+        )
+        var activationCount = 0
+        let controller = MainWindowController(
+            externalApplicationProvider: { target },
+            externalApplicationActivation: { _ in
+                activationCount += 1
+                return .failure("Could not return focus to External editor")
+            },
+            workspaceNotificationCenter: NotificationCenter()
+        )
+        let window = makeTestWindow()
+        controller.register(window)
+        window.orderFrontRegardless()
+
+        XCTAssertEqual(
+            controller.setRunMode(true),
+            .failure("Could not return focus to External editor")
+        )
+        XCTAssertEqual(activationCount, 1)
+        XCTAssertTrue(window.isVisible)
+        window.close()
+    }
+
+    func testRunModeKeepsTheRegisteredWindowVisibleWithoutActivatingXPd() {
+        _ = NSApplication.shared
+        let target = MainWindowController.ExternalApplicationTarget(
+            processIdentifier: ProcessInfo.processInfo.processIdentifier + 1,
+            displayName: "External editor"
+        )
+        var xpDActivationCount = 0
+        var externalActivationCount = 0
+        let controller = MainWindowController(
+            activateApplication: { xpDActivationCount += 1 },
+            externalApplicationProvider: { target },
+            externalApplicationActivation: { receivedTarget in
+                XCTAssertEqual(receivedTarget, target)
+                externalActivationCount += 1
+                return .success("Returned focus to External editor")
+            },
+            workspaceNotificationCenter: NotificationCenter()
+        )
+        let window = makeTestWindow()
+        controller.register(window)
+        window.orderOut(nil)
+
+        XCTAssertEqual(
+            controller.setRunMode(true),
+            .success("Returned focus to External editor")
+        )
+        XCTAssertTrue(window.isVisible)
+        XCTAssertFalse(window.isKeyWindow)
+        XCTAssertEqual(xpDActivationCount, 0)
+        XCTAssertEqual(externalActivationCount, 1)
+        window.close()
+    }
+
+    func testLeavingRunModeReportsEditModeWithoutWindowOrApplicationChanges() {
+        var xpDActivationCount = 0
+        var externalActivationCount = 0
+        let controller = MainWindowController(
+            activateApplication: { xpDActivationCount += 1 },
+            externalApplicationProvider: { nil },
+            externalApplicationActivation: { _ in
+                externalActivationCount += 1
+                return .success("unexpected activation")
+            },
+            workspaceNotificationCenter: NotificationCenter()
+        )
+
+        XCTAssertEqual(controller.setRunMode(false), .success("Edit mode"))
+        XCTAssertEqual(xpDActivationCount, 0)
+        XCTAssertEqual(externalActivationCount, 0)
+    }
+
+    func testRunModeRejectsTheCurrentProcessAsAnExternalTarget() {
+        _ = NSApplication.shared
+        let target = MainWindowController.ExternalApplicationTarget(
+            processIdentifier: ProcessInfo.processInfo.processIdentifier,
+            displayName: "XP[d]"
+        )
+        let controller = MainWindowController(
+            externalApplicationProvider: { target },
+            workspaceNotificationCenter: NotificationCenter()
+        )
+        let window = makeTestWindow()
+        controller.register(window)
+
+        XCTAssertEqual(
+            controller.setRunMode(true),
+            .failure("No external application is available")
+        )
+        window.close()
+    }
+
+    private func makeTestWindow() -> NSWindow {
+        NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 240),
+            styleMask: [.titled, .closable, .miniaturizable],
+            backing: .buffered,
+            defer: false
+        )
+    }
 }

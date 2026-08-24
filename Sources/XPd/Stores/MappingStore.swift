@@ -145,6 +145,7 @@ final class MappingStore {
     typealias RemoteFunctionKeyProvider = @MainActor () -> Set<UInt16>
     typealias RemoteKeyProvider = @MainActor (_ configuredKeyCodes: Set<UInt16>) -> Set<UInt16>
     typealias MainWindowToggle = @MainActor () -> ActionExecutionResult
+    typealias RunModeTransition = @MainActor (_ enabled: Bool) -> ActionExecutionResult
 
     private(set) var availableProfiles: [String] = XPdConfiguration.defaultProfileNames
 
@@ -255,6 +256,7 @@ final class MappingStore {
     private(set) var lastHIDLearningResult: ActionExecutionResult?
     private(set) var liveControl: RemoteControl?
     private(set) var lastActionResult: ActionExecutionResult?
+    private(set) var isRunMode = false
     private(set) var lastConfigurationResult: ConfigurationOperationResult = .idle
     private(set) var lastPersistenceResult: PersistenceResult = .idle
     private(set) var lastMIDIMessage: MIDIOutputService.SentMessage?
@@ -512,6 +514,7 @@ final class MappingStore {
     )
     private let actionExecutionOverride: ActionExecutionOverride?
     private let mainWindowToggle: MainWindowToggle?
+    private let runModeTransition: RunModeTransition?
     private let gestureSchedule: ButtonGestureRecognizer.Schedule
     private let remoteModifierProvider: RemoteModifierProvider
     private let remoteFunctionKeyProvider: RemoteFunctionKeyProvider
@@ -577,7 +580,8 @@ final class MappingStore {
         remoteModifierProvider: @escaping RemoteModifierProvider = MappingStore.currentRemoteModifierSet,
         remoteFunctionKeyProvider: @escaping RemoteFunctionKeyProvider = MappingStore.currentRemoteFunctionKeySet,
         remoteKeyProvider: @escaping RemoteKeyProvider = MappingStore.currentRemoteKeySet,
-        mainWindowToggle: MainWindowToggle? = nil
+        mainWindowToggle: MainWindowToggle? = nil,
+        runModeTransition: RunModeTransition? = nil
     ) {
         defaults = userDefaults
         hid = HIDService(startHardware: startHardware)
@@ -585,6 +589,7 @@ final class MappingStore {
         buttonGestureRecognizer = ButtonGestureRecognizer(schedule: gestureSchedule)
         self.actionExecutionOverride = actionExecutionOverride
         self.mainWindowToggle = mainWindowToggle
+        self.runModeTransition = runModeTransition
         self.midiOutputService = midiOutputService ?? MIDIOutputService(defaults: userDefaults)
         self.remoteModifierProvider = remoteModifierProvider
         self.remoteFunctionKeyProvider = remoteFunctionKeyProvider
@@ -676,6 +681,22 @@ final class MappingStore {
         mappings[MappingKey(control: control, gesture: gesture, modifierControls: modifierControls)] ?? Mapping()
     }
 
+    @discardableResult
+    func setRunMode(_ enabled: Bool) -> Bool {
+        guard enabled != isRunMode else { return true }
+
+        guard let runModeTransition else {
+            isRunMode = enabled
+            return true
+        }
+
+        let result = runModeTransition(enabled)
+        lastActionResult = result
+        guard result.succeeded else { return false }
+        isRunMode = enabled
+        return true
+    }
+
     /// Returns the application routes that can currently be presented on a
     /// Standard K button. Base routes are ordered by gesture and deduplicated
     /// by normalized target. Alternate layers are ordered by their exact
@@ -723,6 +744,22 @@ final class MappingStore {
         }
 
         return routes
+    }
+
+    /// Saved non-Base layers for one Standard destination. Dormant layers are
+    /// intentionally included so the inspector can keep them visible after a
+    /// modifier designation is disabled, until their actions are deleted.
+    func standardModifierLayers(for control: RemoteControl) -> [Set<RemoteControl>] {
+        guard activeRealm == .standard, control.isMIDIButton else { return [] }
+        let layers = Set(mappings.compactMap { key, mapping -> Set<RemoteControl>? in
+            guard key.control == control,
+                  !key.modifierControls.isEmpty,
+                  mapping != Mapping() else {
+                return nil
+            }
+            return key.modifierControls
+        })
+        return layers.sorted(by: orderedModifierSets)
     }
 
     /// Whether this Standard K button contains a currently executable mapping
@@ -889,7 +926,6 @@ final class MappingStore {
             }
         } else {
             remoteModifierControls.remove(control)
-            selectedMappingModifiers.remove(control)
         }
         sanitizeSelectedMappingModifier()
         save()
@@ -1650,7 +1686,14 @@ final class MappingStore {
     }
 
     private func sanitizeSelectedMappingModifier() {
-        let sanitized = sanitizedMappingModifiers(selectedMappingModifiers, for: selectedControl)
+        let sanitized: Set<RemoteControl>
+        if activeRealm == .standard, selectedControl.isModifierEligible {
+            sanitized = Set(selectedMappingModifiers.filter {
+                $0 != selectedControl && $0.isModifierEligible
+            })
+        } else {
+            sanitized = []
+        }
         guard sanitized != selectedMappingModifiers else { return }
         selectedMappingModifiers = sanitized
     }
@@ -1841,7 +1884,6 @@ final class MappingStore {
         }
         hidBindings.removeValue(forKey: control)
         if remoteModifierControls.remove(control) != nil {
-            selectedMappingModifiers.remove(control)
             sanitizeSelectedMappingModifier()
             save()
         } else {
@@ -2130,6 +2172,11 @@ final class MappingStore {
         actionRunner.canControlApplicationWindows
     }
 
+    private func selectControlFromMappedInput(_ control: RemoteControl) {
+        guard !isRunMode else { return }
+        selectedControl = control
+    }
+
     private func handleHIDInput(_ signature: String?) {
         liveInputGeneration += 1
         let generation = liveInputGeneration
@@ -2274,7 +2321,7 @@ final class MappingStore {
             // duplicate suppression, and release handling remain unchanged.
             guard activeRealm == .standard else { return }
             for control in resolvedControls {
-                selectedControl = control
+                selectControlFromMappedInput(control)
                 liveControl = control
                 handleStandardKPress(control)
             }
@@ -2284,7 +2331,7 @@ final class MappingStore {
         guard let matched = resolvedControls.first else { return }
 
         let previousLiveControl = liveControl
-        selectedControl = matched
+        selectControlFromMappedInput(matched)
         liveControl = matched
 
         if matched == .wheelCenter {
@@ -2635,7 +2682,7 @@ final class MappingStore {
 
         let orderedControls = RemoteControl.allCases.filter { addedControls.contains($0) }
         for control in orderedControls {
-            selectedControl = control
+            selectControlFromMappedInput(control)
             handleStandardKPress(control)
             if previousLiveControl == nil || liveControlBelongedToReport2 {
                 liveControl = control
@@ -3111,7 +3158,7 @@ final class MappingStore {
     /// arbitrary rollover order.
     func simulateMIDIControlPressForTesting(_ control: RemoteControl) {
         guard activeRealm == .midi else { return }
-        selectedControl = control
+        selectControlFromMappedInput(control)
         handleMIDIControlPress(control)
     }
 

@@ -401,12 +401,14 @@ struct RemoteView: View {
         ))
         .overlay(alignment: .topLeading) {
             if hasMainWindowToggle {
-                Image(systemName: "macwindow")
-                    .font(.system(size: 7, weight: .bold))
-                    .foregroundStyle(.white.opacity(0.92))
-                    .frame(width: 15, height: 12)
-                    .background(.red.opacity(0.72), in: Capsule())
-                    .padding(4)
+                Image(nsImage: NSApplication.shared.applicationIconImage)
+                    .renderingMode(.original)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+                    .frame(width: 15, height: 15)
+                    .shadow(color: .black.opacity(0.45), radius: 1, y: 1)
+                    .padding(3)
                     .allowsHitTesting(false)
                     .accessibilityHidden(true)
             }

@@ -61,6 +61,7 @@ struct ContentView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            runModeButton
             if store.hid.isConnected {
                 batteryIndicator
             }
@@ -171,6 +172,25 @@ struct ContentView: View {
         .foregroundStyle(batteryColor)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(batteryAccessibilityLabel)
+    }
+
+    private var runModeButton: some View {
+        Button {
+            _ = store.setRunMode(!store.isRunMode)
+        } label: {
+            Label(
+                store.isRunMode ? "Run" : "Edit",
+                systemImage: store.isRunMode ? "lock.fill" : "lock.open"
+            )
+            .font(.caption.weight(.medium))
+            .foregroundStyle(.secondary)
+            .frame(minWidth: 54, minHeight: 22)
+        }
+        .buttonStyle(.borderless)
+        .controlSize(.small)
+        .help("Run locks editor selection while mappings execute")
+        .accessibilityLabel(store.isRunMode ? "Run mode" : "Edit mode")
+        .accessibilityHint("Run locks editor selection while mappings execute")
     }
 
     private var batteryLabel: String {

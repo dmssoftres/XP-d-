@@ -14,7 +14,7 @@ No backend, database, cloud account, telemetry service, or third-party package d
 | `HIDService` | Match and exclusively seize `10429:514`, fail closed if ownership is unavailable, receive raw reports and values through that manager, retain a bounded connection-local diagnostic trace before semantic filtering, and combine exact HID/BLE battery sources | IOKit HID callbacks/properties | Unknown |
 | `ShortcutRemoteBatteryMonitor` | Verify the target BLE PnP identity, enable its two notify-only vendor characteristics, and parse exact battery packets | CoreBluetooth | Unknown |
 | `ButtonGestureRecognizer` | Convert K1–K10 down/release reports into mutually exclusive Tap, Hold, and Double events with cancellable timing | Main-actor scheduler seam | Unknown |
-| `MappingStore` | Ordered Standard/MIDI profiles, mapping/HID/MIDI state, migration, persistence, imports, selector/Fn routing, action dispatch | SwiftUI observable state, `UserDefaults` | Unknown |
+| `MappingStore` | Ordered Standard/MIDI profiles, mapping/HID/MIDI state, session Edit/Run state, migration, persistence, imports, selector/Fn routing, action dispatch | SwiftUI observable state, `UserDefaults` | Unknown |
 | `ActionRunner` | Execute scrolling, application/window/display actions, keyboard/media events, and explicit Shortcuts/AppleScript/zsh processes; silently preflight routine event-posting/accessibility access | Core Graphics, AppKit, ApplicationServices, Process, IOKit system key definitions | Unknown |
 | `MIDIOutputService` | Create Control/Performance virtual sources, encode MIDI 1.0 UMP, track active output, pitch return, cleanup, and exact send-result monitor events | CoreMIDI actor and injectable backend | Unknown |
 | Configuration models/document | Codable configuration schema, validation, JSON import/export | Foundation, SwiftUI `FileDocument` | Unknown |
@@ -115,6 +115,14 @@ Only a visible key window in the active application hides; minimized,
 ordered-out/closed, and background states deminiaturize or show, focus, and
 activate the retained window. This app-owned path never enters `ActionRunner`'s
 Accessibility-based external-window mutation.
+
+Header Edit/Run control → session-only `MappingStore.isRunMode` →
+`MainWindowController` focus transition. Run keeps all HID gesture resolution,
+mapped actions, scrolling, MIDI, overlays, and remote profile/workspace gestures
+active, but skips only routine HID-driven `selectedControl` writes. The controller
+keeps the retained editor visible without making it key and activates the most
+recently observed non-XP[d] application. Missing or failed external activation
+leaves Edit active; no Run state enters persistence or exported configuration.
 
 Send frontmost window to screen mapping → hardware identity encoded in the
 existing `Mapping.command` → live `NSScreen` resolution → frontmost focused/main
