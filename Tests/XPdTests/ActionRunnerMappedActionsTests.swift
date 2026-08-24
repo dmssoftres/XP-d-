@@ -285,6 +285,109 @@ final class ActionRunnerMappedActionsTests: XCTestCase {
         XCTAssertEqual(validWindow, .success("Window: Toggle full screen"))
     }
 
+    func testScreenDestinationCommandRoutesExactIdentity() async {
+        let identity = WindowScreenDestination.Identity(vendor: 10, model: 20, serial: 30, unit: 1)
+        var receivedIdentity: WindowScreenDestination.Identity?
+        let runner = ActionRunner(
+            screenMoveOverride: { screenIdentity in
+                receivedIdentity = screenIdentity
+                return .success("Moved")
+            }
+        )
+        let destination = WindowScreenDestination(
+            displayID: 42,
+            name: "Studio Display",
+            identity: identity
+        )
+
+        let result = await execute(
+            runner,
+            Mapping(action: .windowDisplay, command: destination.command)
+        )
+
+        XCTAssertEqual(receivedIdentity, identity)
+        XCTAssertEqual(result, .success("Moved"))
+    }
+
+    func testScreenDestinationCommandParsingAndCenteredPlacement() {
+        let identity = WindowScreenDestination.Identity(vendor: 11, model: 22, serial: 33, unit: 2)
+        let destination = WindowScreenDestination(
+            displayID: 73,
+            name: "Side Display",
+            identity: identity
+        )
+        XCTAssertEqual(WindowScreenDestination.identity(from: destination.command), identity)
+        XCTAssertNil(WindowScreenDestination.identity(from: "Send frontmost window to screen:v1:"))
+        XCTAssertNil(WindowScreenDestination.identity(from: "Send frontmost window to screen:v1:0:0:0:0"))
+        XCTAssertNil(WindowScreenDestination.identity(from: "Send frontmost window to screen:v1:1:2:3:999999999999"))
+        XCTAssertNil(WindowScreenDestination.identity(from: "Unknown:73"))
+        XCTAssertTrue(identity.matches(.init(vendor: 11, model: 22, serial: 33, unit: 9)))
+        XCTAssertFalse(identity.matches(.init(vendor: 11, model: 22, serial: 44, unit: 2)))
+        XCTAssertTrue(
+            WindowScreenDestination.Identity(vendor: 11, model: 22, serial: 0, unit: 2)
+                .matches(.init(vendor: 11, model: 22, serial: 0, unit: 2))
+        )
+        let movedUnit = WindowScreenDestination(
+            displayID: 74,
+            name: "Side Display",
+            identity: .init(vendor: 11, model: 22, serial: 33, unit: 9)
+        )
+        XCTAssertEqual(
+            WindowScreenDestination.resolve(identity, among: [movedUnit]),
+            movedUnit
+        )
+        let duplicateSerial = WindowScreenDestination(
+            displayID: 75,
+            name: "Duplicate",
+            identity: .init(vendor: 11, model: 22, serial: 33, unit: 10)
+        )
+        XCTAssertNil(
+            WindowScreenDestination.resolve(identity, among: [movedUnit, duplicateSerial])
+        )
+        XCTAssertEqual(
+            WindowScreenDestination.resolve(identity, among: [movedUnit, destination]),
+            destination
+        )
+
+        XCTAssertEqual(
+            ActionRunner.centeredWindowOrigin(
+                windowSize: CGSize(width: 800, height: 600),
+                displayBounds: CGRect(x: -1600, y: -1000, width: 1600, height: 1000)
+            ),
+            CGPoint(x: -1200, y: -800)
+        )
+        XCTAssertEqual(
+            ActionRunner.centeredWindowOrigin(
+                windowSize: CGSize(width: 1800, height: 1200),
+                displayBounds: CGRect(x: -1600, y: -1000, width: 1600, height: 1000)
+            ),
+            CGPoint(x: -1600, y: -1000)
+        )
+        XCTAssertEqual(
+            WindowScreenDestination.accessibilityVisibleBounds(
+                screenFrame: CGRect(x: 0, y: 0, width: 1512, height: 982),
+                visibleFrame: CGRect(x: 0, y: 61, width: 1512, height: 888),
+                displayBounds: CGRect(x: 0, y: 0, width: 1512, height: 982)
+            ),
+            CGRect(x: 0, y: 33, width: 1512, height: 888)
+        )
+    }
+
+    func testDisconnectedScreenDestinationFailsBeforeWindowMutation() async {
+        let destination = WindowScreenDestination(
+            displayID: UInt32.max,
+            name: "Missing",
+            identity: .init(vendor: UInt32.max, model: UInt32.max, serial: UInt32.max, unit: UInt32.max)
+        )
+
+        let result = await execute(
+            ActionRunner(),
+            Mapping(action: .windowDisplay, command: destination.command)
+        )
+
+        XCTAssertEqual(result, .failure("Selected screen is disconnected or ambiguous"))
+    }
+
     func testNoActionCompletesBenignly() async {
         let result = await execute(ActionRunner(), Mapping(action: .noAction))
         XCTAssertEqual(result, .success("No action"))

@@ -144,6 +144,7 @@ final class MappingStore {
     typealias RemoteModifierProvider = @MainActor () -> Set<KeyboardShortcut.Modifier>
     typealias RemoteFunctionKeyProvider = @MainActor () -> Set<UInt16>
     typealias RemoteKeyProvider = @MainActor (_ configuredKeyCodes: Set<UInt16>) -> Set<UInt16>
+    typealias MainWindowToggle = @MainActor () -> ActionExecutionResult
 
     private(set) var availableProfiles: [String] = XPdConfiguration.defaultProfileNames
 
@@ -510,6 +511,7 @@ final class MappingStore {
         category: "ModifierArbitration"
     )
     private let actionExecutionOverride: ActionExecutionOverride?
+    private let mainWindowToggle: MainWindowToggle?
     private let gestureSchedule: ButtonGestureRecognizer.Schedule
     private let remoteModifierProvider: RemoteModifierProvider
     private let remoteFunctionKeyProvider: RemoteFunctionKeyProvider
@@ -574,13 +576,15 @@ final class MappingStore {
         midiOutputService: MIDIOutputService? = nil,
         remoteModifierProvider: @escaping RemoteModifierProvider = MappingStore.currentRemoteModifierSet,
         remoteFunctionKeyProvider: @escaping RemoteFunctionKeyProvider = MappingStore.currentRemoteFunctionKeySet,
-        remoteKeyProvider: @escaping RemoteKeyProvider = MappingStore.currentRemoteKeySet
+        remoteKeyProvider: @escaping RemoteKeyProvider = MappingStore.currentRemoteKeySet,
+        mainWindowToggle: MainWindowToggle? = nil
     ) {
         defaults = userDefaults
         hid = HIDService(startHardware: startHardware)
         self.gestureSchedule = gestureSchedule
         buttonGestureRecognizer = ButtonGestureRecognizer(schedule: gestureSchedule)
         self.actionExecutionOverride = actionExecutionOverride
+        self.mainWindowToggle = mainWindowToggle
         self.midiOutputService = midiOutputService ?? MIDIOutputService(defaults: userDefaults)
         self.remoteModifierProvider = remoteModifierProvider
         self.remoteFunctionKeyProvider = remoteFunctionKeyProvider
@@ -719,6 +723,28 @@ final class MappingStore {
         }
 
         return routes
+    }
+
+    /// Whether this Standard K button contains a currently executable mapping
+    /// for XP[d]'s own show/hide action, across Base or an enabled modifier
+    /// layer. This is presentation-only state for the hardware-button badge.
+    func hasMainWindowToggleMapping(for control: RemoteControl) -> Bool {
+        guard activeRealm == .standard, control.isMIDIButton else { return false }
+
+        return mappings.keys.contains { key in
+            guard key.control == control,
+                  key.modifierControls.isEmpty
+                    || isExecutableApplicationLayer(key.modifierControls, for: control),
+                  case let .success(mapping) = resolvedMapping(
+                    for: control,
+                    gesture: key.gesture,
+                    modifierControls: key.modifierControls
+                  ) else {
+                return false
+            }
+            return mapping.action == .windowDisplay
+                && mapping.command == WindowDisplayAction.toggleXPd.rawValue
+        }
     }
 
     private func applicationRoute(
@@ -1589,6 +1615,13 @@ final class MappingStore {
         case let .success(mapping):
             if let actionExecutionOverride {
                 actionExecutionOverride(mapping, completion)
+            } else if mapping.action == .windowDisplay,
+                      mapping.command == WindowDisplayAction.toggleXPd.rawValue {
+                guard let mainWindowToggle else {
+                    completion(.failure("XP[d] window action is unavailable"))
+                    return
+                }
+                completion(mainWindowToggle())
             } else if mapping.action == .switchProfile {
                 let target = Self.normalizedProfileTarget(mapping.command)
                 guard !target.isEmpty else {

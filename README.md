@@ -87,8 +87,15 @@ re-recorded before XP[d] will execute them.
   command with the current macOS user's permissions.
 - **Media control** offers Play/Pause, Next, Previous, Volume Up, Volume Down,
   and Mute.
-- **Window / display action** offers Minimize frontmost window, Toggle full
-  screen, Hide frontmost application, and Sleep displays.
+- **Window / display action** offers Show / hide XP[d], Minimize frontmost
+  window, Toggle full screen, Hide frontmost application, Send frontmost window
+  to a selected connected screen, and Sleep displays.
+  Show / hide XP[d] controls the app's own retained SwiftUI window directly,
+  so minimized, closed, and background states do not depend on Accessibility.
+  Screen destinations use the display's hardware identity, update when the
+  connected-screen set changes, preserve window size, and center the window in
+  the target screen's visible area. A disconnected or ambiguous destination
+  fails visibly instead of selecting another screen.
 - **Switch profile** selects from the current profile list. Renaming a profile
   retargets mappings that point to it; a deleted target fails visibly.
 - **No action** intentionally performs nothing and needs no configuration.

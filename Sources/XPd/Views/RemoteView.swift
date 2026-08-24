@@ -357,6 +357,7 @@ struct RemoteView: View {
         let title = store.standardButtonTitle(for: control)
         let routes = store.standardApplicationRoutes(for: control)
         let routeSelection = standardApplicationRouteDisplaySelection(routes)
+        let hasMainWindowToggle = store.hasMainWindowToggleMapping(for: control)
         return Button {
             store.selectedControl = control
         } label: {
@@ -398,6 +399,18 @@ struct RemoteView: View {
             selected: store.selectedControl == control,
             live: store.liveControl == control
         ))
+        .overlay(alignment: .topLeading) {
+            if hasMainWindowToggle {
+                Image(systemName: "macwindow")
+                    .font(.system(size: 7, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.92))
+                    .frame(width: 15, height: 12)
+                    .background(.red.opacity(0.72), in: Capsule())
+                    .padding(4)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
+        }
         .overlay(alignment: .topTrailing) {
             if store.isRemoteModifier(control) {
                 Text("MOD")
@@ -415,7 +428,8 @@ struct RemoteView: View {
                 control: control,
                 title: title,
                 routes: routes,
-                hiddenCount: routeSelection.hiddenCount
+                hiddenCount: routeSelection.hiddenCount,
+                hasMainWindowToggle: hasMainWindowToggle
             )
         )
         .help(
@@ -423,7 +437,8 @@ struct RemoteView: View {
                 control: control,
                 title: title,
                 routes: routes,
-                hiddenCount: routeSelection.hiddenCount
+                hiddenCount: routeSelection.hiddenCount,
+                hasMainWindowToggle: hasMainWindowToggle
             )
         )
     }
@@ -515,7 +530,8 @@ struct RemoteView: View {
         control: RemoteControl,
         title: String,
         routes: [StandardApplicationRoute],
-        hiddenCount: Int
+        hiddenCount: Int,
+        hasMainWindowToggle: Bool
     ) -> String {
         var parts = [control.rawValue]
         if !title.isEmpty { parts.append(title) }
@@ -537,6 +553,9 @@ struct RemoteView: View {
         }
         if store.isRemoteModifier(control) {
             parts.append("K modifier")
+        }
+        if hasMainWindowToggle {
+            parts.append("Show or hide XP[d]")
         }
         return parts.joined(separator: ", ")
     }

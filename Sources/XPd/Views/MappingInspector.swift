@@ -1197,6 +1197,7 @@ private struct StandardMappingActionEditor: View {
     @State private var remoteTriggerCaptureCancellation = 0
     @State private var pendingPasteConfirmation: MappingDestinationSnapshot?
     @State private var pendingDeleteConfirmation: MappingDestinationSnapshot?
+    @State private var connectedScreens = WindowScreenDestination.connected
     @FocusState private var isCommandFieldFocused: Bool
 
     private var binding: Binding<Mapping> {
@@ -1285,6 +1286,9 @@ private struct StandardMappingActionEditor: View {
         }
         .onChange(of: isCommandFieldFocused) { _, isFocused in
             if !isFocused { isEditingCommand = false }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)) { _ in
+            connectedScreens = WindowScreenDestination.connected
         }
         .confirmationDialog(
             "Replace the existing action?",
@@ -1472,15 +1476,33 @@ private struct StandardMappingActionEditor: View {
                 }
             }
         case .windowDisplay:
-            Picker("Window / display", selection: windowDisplayActionBinding) {
-                Text("Choose window action…").tag(nil as WindowDisplayAction?)
+            Picker("Window / display", selection: windowDisplayCommandBinding) {
+                Text("Choose window action…").tag(nil as String?)
                 ForEach(WindowDisplayAction.allCases) { action in
-                    Text(action.rawValue).tag(action as WindowDisplayAction?)
+                    Text(action.rawValue).tag(action.rawValue as String?)
+                }
+                Section("Send frontmost window to screen") {
+                    ForEach(connectedScreens) { destination in
+                        Text(destination.name).tag(destination.command as String?)
+                    }
+                    if unavailableScreenIdentity != nil {
+                        Text("Unavailable screen")
+                            .tag(binding.wrappedValue.command as String?)
+                    }
                 }
             }
             if let windowAction = WindowDisplayAction(rawValue: binding.wrappedValue.command),
-               windowAction != .sleepDisplays {
+               windowAction == .toggleXPd {
+                Text("Shows or hides XP[d] without requiring Accessibility permission.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if let windowAction = WindowDisplayAction(rawValue: binding.wrappedValue.command),
+                      windowAction != .sleepDisplays {
                 Text("Frontmost-window actions may require Accessibility permission.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if let screenIdentity = WindowScreenDestination.identity(from: binding.wrappedValue.command) {
+                Text(screenMoveHelp(screenIdentity: screenIdentity))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -1694,14 +1716,48 @@ private struct StandardMappingActionEditor: View {
         )
     }
 
-    private var windowDisplayActionBinding: Binding<WindowDisplayAction?> {
+    private var windowDisplayCommandBinding: Binding<String?> {
         Binding(
-            get: { WindowDisplayAction(rawValue: binding.wrappedValue.command) },
-            set: { action in
-                guard let action else { return }
-                binding.wrappedValue = binding.wrappedValue.editingCommand(action.rawValue)
+            get: {
+                let command = binding.wrappedValue.command
+                if WindowDisplayAction(rawValue: command) != nil {
+                    return command
+                }
+                if let screenIdentity = WindowScreenDestination.identity(from: command),
+                   let connectedDestination = WindowScreenDestination.resolve(
+                       screenIdentity,
+                       among: connectedScreens
+                   ) {
+                    return connectedDestination.command
+                }
+                if WindowScreenDestination.identity(from: command) != nil {
+                    return command
+                }
+                return nil
+            },
+            set: { command in
+                guard let command else { return }
+                binding.wrappedValue = binding.wrappedValue.editingCommand(command)
             }
         )
+    }
+
+    private var unavailableScreenIdentity: WindowScreenDestination.Identity? {
+        guard let screenIdentity = WindowScreenDestination.identity(from: binding.wrappedValue.command),
+              WindowScreenDestination.resolve(screenIdentity, among: connectedScreens) == nil else {
+            return nil
+        }
+        return screenIdentity
+    }
+
+    private func screenMoveHelp(screenIdentity: WindowScreenDestination.Identity) -> String {
+        if let destination = WindowScreenDestination.resolve(
+            screenIdentity,
+            among: connectedScreens
+        ) {
+            return "Moves the frontmost window to \(destination.name). Requires Accessibility permission."
+        }
+        return "The selected screen is disconnected or ambiguous. Choose a connected screen before using this action."
     }
 
     private var profileActionBinding: Binding<String?> {

@@ -109,6 +109,7 @@ enum MediaControlAction: String, CaseIterable, Identifiable {
 
 /// Fixed choices stored in `Mapping.command` for Window / display mappings.
 enum WindowDisplayAction: String, CaseIterable, Identifiable {
+    case toggleXPd = "Show / hide XP[d]"
     case minimize = "Minimize frontmost window"
     case toggleFullScreen = "Toggle full screen"
     case hideApplication = "Hide frontmost application"

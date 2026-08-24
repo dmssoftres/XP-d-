@@ -108,6 +108,22 @@ use AppKit/Accessibility; display sleep uses `pmset displaysleepnow`. Profile
 switching stays in `MappingStore` because it mutates profile-owned state, and
 profile renames retarget normalized stored switch mappings across every profile.
 
+Show / hide XP[d] mapping → `MappingStore` internal-action dispatch →
+`MainWindowController` → retained SwiftUI scene `NSWindow`. A zero-sized
+`NSViewRepresentable` registers the scene window without duplicating view state.
+Only a visible key window in the active application hides; minimized,
+ordered-out/closed, and background states deminiaturize or show, focus, and
+activate the retained window. This app-owned path never enters `ActionRunner`'s
+Accessibility-based external-window mutation.
+
+Send frontmost window to screen mapping → hardware identity encoded in the
+existing `Mapping.command` → live `NSScreen` resolution → frontmost focused/main
+AX window → read current size → center an AX position inside the destination's
+visible frame expressed in Core Graphics coordinates. Exact identity wins;
+serial-backed matching tolerates a changed transient unit number only when it
+resolves uniquely. Disconnected or ambiguous destinations fail closed, the
+window is never resized, and screen-list changes refresh the editor picker.
+
 Trigger-chord capture → fixed destination K plus the selected exact K layer →
 local modifier/ordinary-key monitor and temporary designated-K capture handler →
 in-view draft with zero or more K modifiers, zero or more keyboard modifiers,

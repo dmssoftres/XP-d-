@@ -26,6 +26,7 @@ final class ActionRunner {
     typealias PostEventAccessProvider = () -> Bool
     typealias ProcessExecutor = @Sendable (URL, [String]) async -> ProcessExecutionOutcome
     typealias WindowActionOverride = (WindowDisplayAction) -> ActionExecutionResult
+    typealias ScreenMoveOverride = (WindowScreenDestination.Identity) -> ActionExecutionResult
 
     enum ProcessExecutionOutcome: Sendable, Equatable {
         case exited(Int32)
@@ -78,6 +79,7 @@ final class ActionRunner {
     private let postEventAccessProvider: PostEventAccessProvider
     private let processExecutor: ProcessExecutor
     private let windowActionOverride: WindowActionOverride?
+    private let screenMoveOverride: ScreenMoveOverride?
 
     /// Bound process-backed actions because a hardware control can be
     /// triggered repeatedly and must not create unbounded child processes.
@@ -99,12 +101,14 @@ final class ActionRunner {
             event.post(tap: .cghidEventTap)
         },
         processExecutor: @escaping ProcessExecutor = ActionRunner.runProcess,
-        windowActionOverride: WindowActionOverride? = nil
+        windowActionOverride: WindowActionOverride? = nil,
+        screenMoveOverride: ScreenMoveOverride? = nil
     ) {
         self.postEventAccessProvider = postEventAccessProvider
         self.eventPoster = eventPoster
         self.processExecutor = processExecutor
         self.windowActionOverride = windowActionOverride
+        self.screenMoveOverride = screenMoveOverride
     }
 
     /// Pure seams shared by the AX implementation and focused tests.
@@ -610,12 +614,24 @@ final class ActionRunner {
         _ mapping: Mapping,
         completion: @escaping @MainActor (ActionExecutionResult) -> Void
     ) {
+        if let screenIdentity = WindowScreenDestination.identity(from: mapping.command) {
+            if let screenMoveOverride {
+                completion(screenMoveOverride(screenIdentity))
+            } else {
+                completion(moveFrontmostWindow(to: screenIdentity))
+            }
+            return
+        }
         guard let action = WindowDisplayAction(rawValue: mapping.command) else {
             completion(.failure("Choose a window or display action first"))
             return
         }
         if let windowActionOverride {
             completion(windowActionOverride(action))
+            return
+        }
+        if action == .toggleXPd {
+            completion(.failure("XP[d] window action is unavailable outside the mapping store"))
             return
         }
         if action == .sleepDisplays {
@@ -647,6 +663,8 @@ final class ActionRunner {
         }
 
         switch action {
+        case .toggleXPd:
+            break
         case .minimize:
             switch setMinimized(true, for: application) {
             case .success(let count) where count > 0:
@@ -661,6 +679,83 @@ final class ActionRunner {
         case .hideApplication, .sleepDisplays:
             break
         }
+    }
+
+    private func moveFrontmostWindow(
+        to screenIdentity: WindowScreenDestination.Identity
+    ) -> ActionExecutionResult {
+        guard let destination = WindowScreenDestination.resolve(screenIdentity) else {
+            return .failure("Selected screen is disconnected or ambiguous")
+        }
+        let displayID = destination.displayID
+        guard let application = workspace.frontmostApplication else {
+            return .failure("No frontmost application found")
+        }
+        guard hasAccessibilityAccess(prompt: false) else {
+            return .failure("Allow XP[d] in Accessibility, then press again")
+        }
+
+        let applicationElement = AXUIElementCreateApplication(application.processIdentifier)
+        guard let window = targetWindows(for: applicationElement).first else {
+            return .failure("No frontmost window found")
+        }
+
+        var sizeValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            window,
+            kAXSizeAttribute as CFString,
+            &sizeValue
+        ) == .success,
+              let sizeValue,
+              CFGetTypeID(sizeValue) == AXValueGetTypeID() else {
+            return .failure("Could not read frontmost window size")
+        }
+
+        var windowSize = CGSize.zero
+        guard AXValueGetType(sizeValue as! AXValue) == .cgSize,
+              AXValueGetValue(sizeValue as! AXValue, .cgSize, &windowSize) else {
+            return .failure("Could not read frontmost window size")
+        }
+
+        var isPositionSettable = DarwinBoolean(false)
+        guard AXUIElementIsAttributeSettable(
+            window,
+            kAXPositionAttribute as CFString,
+            &isPositionSettable
+        ) == .success,
+              isPositionSettable.boolValue else {
+            return .failure("Frontmost window cannot be moved")
+        }
+
+        var origin = Self.centeredWindowOrigin(
+            windowSize: windowSize,
+            displayBounds: WindowScreenDestination.visibleBounds(for: displayID)
+                ?? CGDisplayBounds(displayID)
+        )
+        guard let positionValue = AXValueCreate(.cgPoint, &origin),
+              AXUIElementSetAttributeValue(
+                  window,
+                  kAXPositionAttribute as CFString,
+                  positionValue
+              ) == .success else {
+            return .failure("Could not move frontmost window")
+        }
+
+        return .success("Moved frontmost window to \(destination.name)")
+    }
+
+    static func centeredWindowOrigin(
+        windowSize: CGSize,
+        displayBounds: CGRect
+    ) -> CGPoint {
+        CGPoint(
+            x: windowSize.width >= displayBounds.width
+                ? displayBounds.minX
+                : displayBounds.minX + ((displayBounds.width - windowSize.width) / 2),
+            y: windowSize.height >= displayBounds.height
+                ? displayBounds.minY
+                : displayBounds.minY + ((displayBounds.height - windowSize.height) / 2)
+        )
     }
 
     private func toggleFullScreen(for application: NSRunningApplication) -> ActionExecutionResult {

@@ -5,12 +5,22 @@ import SwiftUI
 @main
 struct XPdApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @State private var store = MappingStore()
+    @State private var store: MappingStore
+    private let mainWindowController: MainWindowController
+
+    init() {
+        let mainWindowController = MainWindowController()
+        self.mainWindowController = mainWindowController
+        _store = State(initialValue: MappingStore(mainWindowToggle: { [weak mainWindowController] in
+            mainWindowController?.toggle() ?? .failure("XP[d] window is unavailable")
+        }))
+    }
 
     var body: some Scene {
         WindowGroup("XP[d]", id: "main") {
             ContentView(store: store)
                 .frame(minWidth: 860, minHeight: 640)
+                .background(MainWindowRegistrationView(controller: mainWindowController))
         }
         .defaultSize(width: 980, height: 650)
 
