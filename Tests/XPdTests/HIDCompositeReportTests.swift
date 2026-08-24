@@ -176,6 +176,717 @@ final class HIDCompositeReportTests: XCTestCase {
         XCTAssertEqual(executed, ["K10 base"])
     }
 
+    func testReport2OneHotBindingsAreLearnedIndividuallyForEveryKButton() {
+        let store = makeReport2Store()
+
+        for (index, control) in RemoteControl.allCases
+            .filter(\.isMIDIButton)
+            .enumerated() {
+            learnReport2(UInt16(1) << UInt16(index), for: control, in: store)
+        }
+
+        for (index, control) in RemoteControl.allCases
+            .filter(\.isMIDIButton)
+            .enumerated() {
+            XCTAssertEqual(
+                store.hidBinding(for: control),
+                report2Signature(UInt16(1) << UInt16(index)),
+                "Expected " + control.rawValue + " to retain its exact report-2 one-hot binding"
+            )
+        }
+    }
+
+    func testReport2K10AloneExecutesBaseOnlyAtModifierThreshold() {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeReport2Store(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+
+        learnReport2(report2ButtonBit(.k10), for: .k10, in: store)
+        XCTAssertTrue(store.setRemoteModifier(.k10, enabled: true))
+        store.standardModifierHoldThreshold = 0.5
+        store.update(
+            Mapping(action: .openApplication, command: "K10 Base"),
+            for: .k10,
+            gesture: .tap
+        )
+
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: report2ButtonBit(.k10))
+        )
+        scheduler.advance(by: 0.49)
+        XCTAssertTrue(executed.isEmpty)
+
+        scheduler.advance(by: 0.01)
+        XCTAssertEqual(executed, ["K10 Base"])
+
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: 0)
+        )
+        XCTAssertEqual(executed, ["K10 Base"])
+    }
+
+    func testReport2K10ThenK8BeforeThresholdExecutesOnlyExactLayerOnNeutralRelease() {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeReport2Store(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+
+        learnReport2(report2ButtonBit(.k8), for: .k8, in: store)
+        learnReport2(report2ButtonBit(.k10), for: .k10, in: store)
+        XCTAssertTrue(store.setRemoteModifier(.k10, enabled: true))
+        store.standardModifierHoldThreshold = 0.5
+        store.update(
+            Mapping(action: .openApplication, command: "K10 Base"),
+            for: .k10,
+            gesture: .tap
+        )
+        store.update(
+            Mapping(action: .openApplication, command: "K10 + K8 Layer"),
+            for: .k8,
+            gesture: .tap,
+            modifierControls: [.k10]
+        )
+
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: report2ButtonBit(.k10))
+        )
+        scheduler.advance(by: 0.49)
+        XCTAssertTrue(executed.isEmpty)
+
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: report2ButtonBit(.k8) | report2ButtonBit(.k10))
+        )
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: 0)
+        )
+        scheduler.advance(by: 0.30)
+
+        XCTAssertEqual(executed, ["K10 + K8 Layer"])
+    }
+
+    func testReport2DestinationFirstThenK10BeforeThresholdRoutesExactLayer() {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeReport2Store(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+
+        learnReport2(report2ButtonBit(.k8), for: .k8, in: store)
+        learnReport2(report2ButtonBit(.k10), for: .k10, in: store)
+        XCTAssertTrue(store.setRemoteModifier(.k10, enabled: true))
+        store.standardModifierHoldThreshold = 0.5
+        store.update(
+            Mapping(action: .openApplication, command: "K8 Base"),
+            for: .k8,
+            gesture: .tap
+        )
+        store.update(
+            Mapping(action: .openApplication, command: "K10 + K8 Layer"),
+            for: .k8,
+            gesture: .tap,
+            modifierControls: [.k10]
+        )
+
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: report2ButtonBit(.k8))
+        )
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: report2ButtonBit(.k8) | report2ButtonBit(.k10))
+        )
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: 0)
+        )
+        scheduler.advance(by: 0.30)
+
+        XCTAssertEqual(executed, ["K10 + K8 Layer"])
+    }
+
+    func testReport2ExactCompositeBindingWinsOverBitmaskDecomposition() {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeReport2Store(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+        let compositeMask = report2ButtonBit(.k8) | report2ButtonBit(.k10)
+
+        learnReport2(report2ButtonBit(.k8), for: .k8, in: store)
+        learnReport2(report2ButtonBit(.k10), for: .k10, in: store)
+        learnReport2(compositeMask, for: .k1, in: store)
+        XCTAssertTrue(store.setRemoteModifier(.k10, enabled: true))
+        store.update(
+            Mapping(action: .openApplication, command: "Exact composite"),
+            for: .k1,
+            gesture: .tap
+        )
+        store.update(
+            Mapping(action: .openApplication, command: "K10 + K8 Layer"),
+            for: .k8,
+            gesture: .tap,
+            modifierControls: [.k10]
+        )
+
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: compositeMask)
+        )
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: 0)
+        )
+        scheduler.advance(by: 0.30)
+
+        XCTAssertEqual(executed, ["Exact composite"])
+    }
+
+    func testReport2AmbiguousDuplicateMaskCoverFailsClosed() {
+        let firstBit = report2ButtonBit(.k1)
+        let secondBit = report2ButtonBit(.k2)
+        let bindings: [RemoteControl: String] = [
+            .k1: report2Signature(firstBit),
+            .k2: report2Signature(firstBit),
+            .k3: report2Signature(secondBit)
+        ]
+
+        XCTAssertNil(
+            MappingStore.decomposedStandardBitmaskControls(
+                for: report2Signature(firstBit | secondBit),
+                bindings: bindings
+            )
+        )
+    }
+
+    func testReport2PartialReleaseSnapshotsReplaceHeldStandardControls() {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeReport2Store(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+
+        learnReport2(report2ButtonBit(.k8), for: .k8, in: store)
+        learnReport2(report2ButtonBit(.k9), for: .k9, in: store)
+        learnReport2(report2ButtonBit(.k10), for: .k10, in: store)
+        XCTAssertTrue(store.setRemoteModifier(.k10, enabled: true))
+        store.standardModifierHoldThreshold = 0.5
+        store.update(
+            Mapping(action: .openApplication, command: "K10 + K9 Layer"),
+            for: .k9,
+            gesture: .tap,
+            modifierControls: [.k10]
+        )
+
+        // K8 is released while K10 remains held; the next snapshot adds K9.
+        // The released K8 must not remain as a stale second primary.
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: report2ButtonBit(.k8) | report2ButtonBit(.k10))
+        )
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: report2ButtonBit(.k10))
+        )
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: report2ButtonBit(.k9) | report2ButtonBit(.k10))
+        )
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: 0)
+        )
+        scheduler.advance(by: 0.30)
+
+        XCTAssertEqual(executed, ["K10 + K9 Layer"])
+    }
+
+    func testReport2DestinationReleaseBeforeNeutralDoesNotRearmK10Base() {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeReport2Store(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+
+        learnReport2(report2ButtonBit(.k8), for: .k8, in: store)
+        learnReport2(report2ButtonBit(.k10), for: .k10, in: store)
+        XCTAssertTrue(store.setRemoteModifier(.k10, enabled: true))
+        store.standardModifierHoldThreshold = 0.5
+        store.update(
+            Mapping(action: .openApplication, command: "K10 Base"),
+            for: .k10,
+            gesture: .tap
+        )
+        store.update(
+            Mapping(action: .openApplication, command: "K10 + K8 Layer"),
+            for: .k8,
+            gesture: .tap,
+            modifierControls: [.k10]
+        )
+
+        let k10 = report2ButtonBit(.k10)
+        let k8 = report2ButtonBit(.k8)
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: k10)
+        )
+        scheduler.advance(by: 0.10)
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: k10 | k8)
+        )
+        // K8 is released first, leaving K10 physically held.
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: k10)
+        )
+
+        // Passing K10's standalone threshold must not re-arm its Base action
+        // after the same cycle has already formed the K10+K8 layer.
+        scheduler.advance(by: 0.60)
+        XCTAssertFalse(executed.contains("K10 Base"))
+
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: 0)
+        )
+        scheduler.advance(by: 0.30)
+
+        XCTAssertEqual(executed, ["K10 + K8 Layer"])
+    }
+
+    func testReport2ModifierReleaseFirstKeepsLayerUntilDestinationRelease() {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeReport2Store(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+
+        learnReport2(report2ButtonBit(.k8), for: .k8, in: store)
+        learnReport2(report2ButtonBit(.k10), for: .k10, in: store)
+        XCTAssertTrue(store.setRemoteModifier(.k10, enabled: true))
+        store.standardModifierHoldThreshold = 0.5
+        store.update(
+            Mapping(action: .openApplication, command: "K10 Base"),
+            for: .k10,
+            gesture: .tap
+        )
+        store.update(
+            Mapping(action: .openApplication, command: "K8 Base"),
+            for: .k8,
+            gesture: .tap
+        )
+        store.update(
+            Mapping(action: .openApplication, command: "K10 + K8 Layer"),
+            for: .k8,
+            gesture: .tap,
+            modifierControls: [.k10]
+        )
+
+        let k10 = report2ButtonBit(.k10)
+        let k8 = report2ButtonBit(.k8)
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: k10)
+        )
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: k10 | k8)
+        )
+        // Release the modifier first. The destination's already-formed layer
+        // identity must survive until the destination itself is released.
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: k8)
+        )
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: 0)
+        )
+        scheduler.advance(by: 0.30)
+
+        XCTAssertEqual(executed, ["K10 + K8 Layer"])
+    }
+
+    func testReport2SequentialDestinationsWhileK10HeldUseLayeredTaps() {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeReport2Store(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+
+        learnReport2(report2ButtonBit(.k8), for: .k8, in: store)
+        learnReport2(report2ButtonBit(.k9), for: .k9, in: store)
+        learnReport2(report2ButtonBit(.k10), for: .k10, in: store)
+        XCTAssertTrue(store.setRemoteModifier(.k10, enabled: true))
+        store.standardModifierHoldThreshold = 0.5
+        store.update(
+            Mapping(action: .openApplication, command: "K10 Base"),
+            for: .k10,
+            gesture: .tap
+        )
+        store.update(
+            Mapping(action: .openApplication, command: "K8 Base"),
+            for: .k8,
+            gesture: .tap
+        )
+        store.update(
+            Mapping(action: .openApplication, command: "K9 Base"),
+            for: .k9,
+            gesture: .tap
+        )
+        store.update(
+            Mapping(action: .openApplication, command: "K10 + K8 Layer"),
+            for: .k8,
+            gesture: .tap,
+            modifierControls: [.k10]
+        )
+        store.update(
+            Mapping(action: .openApplication, command: "K10 + K9 Layer"),
+            for: .k9,
+            gesture: .tap,
+            modifierControls: [.k10]
+        )
+
+        let k10 = report2ButtonBit(.k10)
+        let k8 = report2ButtonBit(.k8)
+        let k9 = report2ButtonBit(.k9)
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: k10)
+        )
+        scheduler.advance(by: 0.10)
+
+        // K10 remains held while K8 is pressed and released.
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: k10 | k8)
+        )
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: k10)
+        )
+        scheduler.advance(by: 0.30)
+        XCTAssertEqual(executed, ["K10 + K8 Layer"])
+
+        // The same held modifier must then route the next destination to its
+        // own layer, without leaking either destination into the other.
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: k10 | k9)
+        )
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: k10)
+        )
+        scheduler.advance(by: 0.30)
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: 0)
+        )
+        scheduler.advance(by: 0.30)
+
+        XCTAssertEqual(
+            executed,
+            ["K10 + K8 Layer", "K10 + K9 Layer"]
+        )
+        XCTAssertFalse(executed.contains("K10 Base"))
+        XCTAssertFalse(executed.contains("K8 Base"))
+        XCTAssertFalse(executed.contains("K9 Base"))
+    }
+
+    func testRelearnedMIDIReport2FnHeldDestinationAndReleaseUseFunctionLayer() async throws {
+        let store = makeReport2Store()
+        _ = try store.addMIDIProfile(named: "Report 2 MIDI")
+
+        learnReport2(report2ButtonBit(.k10), for: .k10, in: store)
+        learnReport2(report2ButtonBit(.k8), for: .k8, in: store)
+        XCTAssertTrue(store.updateMIDIPracticeFnControl(.k10))
+        store.updatePrimaryButtonMapping(
+            MIDIButtonMapping(kind: .note, note: 36, velocity: 100),
+            for: .k8
+        )
+        store.updateFunctionButtonMapping(
+            MIDIButtonMapping(kind: .note, note: 72, velocity: 110),
+            for: .k8
+        )
+        store.clearMIDIMonitor()
+
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: report2ButtonBit(.k10))
+        )
+        XCTAssertTrue(store.isFnLayerActive)
+
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: report2ButtonBit(.k8) | report2ButtonBit(.k10))
+        )
+        XCTAssertTrue(store.isFnLayerActive)
+
+        // Releasing only the destination keeps Fn held and releases the
+        // function-layer note before the final neutral snapshot releases Fn.
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: report2ButtonBit(.k10))
+        )
+        XCTAssertTrue(store.isFnLayerActive)
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: 0)
+        )
+        XCTAssertFalse(store.isFnLayerActive)
+
+        await store.waitForMIDICommandsForTesting()
+        for _ in 0..<3 { await Task.yield() }
+        let summaries = store.midiMonitorEvents.map(\.summary)
+        XCTAssertTrue(summaries.contains("Note On 72 · Ch 1 · V110"))
+        XCTAssertTrue(summaries.contains("Note Off 72 · Ch 1"))
+        XCTAssertFalse(summaries.contains { $0.hasPrefix("Note On 36") })
+    }
+
+    func testReport6WheelReleaseDoesNotClearHeldReport2MIDIControls() async throws {
+        let store = makeReport2Store()
+        _ = try store.addMIDIProfile(named: "Report 2 Wheel Isolation")
+
+        learnReport2(report2ButtonBit(.k10), for: .k10, in: store)
+        learnReport2(report2ButtonBit(.k8), for: .k8, in: store)
+        XCTAssertTrue(store.updateMIDIPracticeFnControl(.k10))
+        store.updateFunctionButtonMapping(
+            MIDIButtonMapping(kind: .note, note: 72, velocity: 110),
+            for: .k8
+        )
+        store.clearMIDIMonitor()
+
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: report2ButtonBit(.k10))
+        )
+        XCTAssertTrue(store.isFnLayerActive)
+
+        let emptyReport = [UInt8](repeating: 0, count: 7)
+        let clockwiseReport: [UInt8] = [0x01, 0x57, 0, 0, 0, 0, 0]
+        store.hid.simulateInputReportForTesting(reportID: 6, bytes: clockwiseReport)
+        store.hid.simulateInputReportForTesting(reportID: 6, bytes: emptyReport)
+
+        // The nil emitted by report 6 belongs to that collection only; Fn's
+        // report-2 held set must survive the wheel detent release.
+        XCTAssertTrue(store.isFnLayerActive)
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: report2ButtonBit(.k8) | report2ButtonBit(.k10))
+        )
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: 0)
+        )
+
+        await store.waitForMIDICommandsForTesting()
+        for _ in 0..<3 { await Task.yield() }
+        let summaries = store.midiMonitorEvents.map(\.summary)
+        XCTAssertTrue(summaries.contains("Note On 72 · Ch 1 · V110"))
+        XCTAssertFalse(summaries.contains { $0.hasPrefix("Note On 36") })
+    }
+
+    func testReport2RepeatsDoNotRestartModifierTimerOrDuplicateControls() {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeReport2Store(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+
+        learnReport2(report2ButtonBit(.k10), for: .k10, in: store)
+        XCTAssertTrue(store.setRemoteModifier(.k10, enabled: true))
+        store.standardModifierHoldThreshold = 0.5
+        store.update(
+            Mapping(action: .openApplication, command: "K10 Base"),
+            for: .k10,
+            gesture: .tap
+        )
+
+        let k10 = report2Bytes(buttons: report2ButtonBit(.k10))
+        store.hid.simulateInputReportForTesting(reportID: 2, bytes: k10)
+        store.hid.simulateInputReportForTesting(reportID: 2, bytes: k10)
+        scheduler.advance(by: 0.49)
+        XCTAssertTrue(executed.isEmpty)
+
+        // A repeat at the threshold boundary must not schedule a second timer
+        // or move the existing timer's deadline.
+        store.hid.simulateInputReportForTesting(reportID: 2, bytes: k10)
+        scheduler.advance(by: 0.01)
+        XCTAssertEqual(executed, ["K10 Base"])
+
+        store.hid.simulateInputReportForTesting(reportID: 2, bytes: k10)
+        scheduler.advance(by: 1)
+        XCTAssertEqual(executed, ["K10 Base"])
+    }
+
+    func testNeutralReport2F0ReleasesAndUnrelatedEmptyReportsRemainIgnored() {
+        let service = HIDService(startHardware: false)
+        var events: [String?] = []
+        service.onInput = { events.append($0) }
+
+        service.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: report2ButtonBit(.k10))
+        )
+        service.simulateInputReportForTesting(
+            reportID: 1,
+            bytes: [UInt8](repeating: 0, count: 7)
+        )
+        service.simulateInputReportForTesting(
+            reportID: 7,
+            bytes: [UInt8](repeating: 0, count: 7)
+        )
+        service.simulateInputReportForTesting(
+            reportID: 9,
+            bytes: [UInt8](repeating: 0, count: 7)
+        )
+        // A zero-filled vendor packet has no report-2 F0 event marker and is
+        // unrelated input; it must not become a release boundary.
+        service.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: [UInt8](repeating: 0, count: 7)
+        )
+        XCTAssertEqual(events, [report2Signature(report2ButtonBit(.k10))])
+
+        service.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: 0)
+        )
+        XCTAssertEqual(
+            events,
+            [report2Signature(report2ButtonBit(.k10)), report2Signature(0)]
+        )
+    }
+
+    func testMalformedOrUnknownReport2EventsFailClosed() {
+        let service = HIDService(startHardware: false)
+        var events: [String?] = []
+        service.onInput = { events.append($0) }
+
+        let malformedReports: [[UInt8]] = [
+            [],
+            [0xF0],
+            [0xF0, 0x01],
+            [0xF1, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00],
+            // Bits above the ten physical buttons are not a valid one-hot or
+            // composite state and must not be guessed as a K control.
+            [0xF0, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00]
+        ]
+
+        for bytes in malformedReports {
+            service.simulateInputReportForTesting(reportID: 2, bytes: bytes)
+        }
+
+        XCTAssertTrue(events.isEmpty)
+    }
+
+    func testReport6KeyboardBehaviorRemainsAvailableAlongsideReport2() {
+        let service = HIDService(startHardware: false)
+        var events: [String?] = []
+        service.onInput = { events.append($0) }
+
+        service.simulateInputReportForTesting(
+            reportID: 6,
+            bytes: [0x03, 0x1D, 0, 0, 0, 0, 0]
+        )
+        service.simulateInputReportForTesting(
+            reportID: 6,
+            bytes: [UInt8](repeating: 0, count: 7)
+        )
+
+        service.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: report2ButtonBit(.k8))
+        )
+        service.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: 0)
+        )
+
+        XCTAssertEqual(
+            events,
+            [
+                "r6:03 1D 00 00 00 00 00",
+                nil,
+                report2Signature(report2ButtonBit(.k8)),
+                report2Signature(0)
+            ]
+        )
+    }
+
+    private func makeReport2Store(
+        scheduler: TestScheduler? = nil,
+        actionExecutionOverride: MappingStore.ActionExecutionOverride? = nil
+    ) -> MappingStore {
+        let suiteName = "XPdTests.HIDCompositeReportTests.Report2.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        return MappingStore(
+            userDefaults: defaults,
+            startHardware: false,
+            gestureSchedule: { delay, action in
+                (scheduler ?? TestScheduler()).schedule(delay: delay, action: action)
+            },
+            actionExecutionOverride: actionExecutionOverride
+        )
+    }
+
+    private func learnReport2(
+        _ buttons: UInt16,
+        for control: RemoteControl,
+        in store: MappingStore
+    ) {
+        store.selectedControl = control
+        store.learnSelectedControl()
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: buttons)
+        )
+        XCTAssertEqual(
+            store.hidBinding(for: control),
+            report2Signature(buttons),
+            "Expected " + control.rawValue + " to learn its report-2 binding"
+        )
+    }
+
+    private func report2ButtonBit(_ control: RemoteControl) -> UInt16 {
+        guard let index = RemoteControl.allCases
+            .filter(\.isMIDIButton)
+            .firstIndex(of: control) else {
+            return 0
+        }
+        return UInt16(1) << UInt16(index)
+    }
+
+    private func report2Bytes(buttons: UInt16) -> [UInt8] {
+        [0xF0, UInt8(truncatingIfNeeded: buttons), UInt8(truncatingIfNeeded: buttons >> 8)]
+            + Array(repeating: 0, count: 28)
+    }
+
+    private func report2Signature(_ buttons: UInt16) -> String {
+        "r2:" + report2Bytes(buttons: buttons)
+            .map { String(format: "%02X", $0) }
+            .joined(separator: " ")
+    }
+
     private final class ScheduledItem {
         let deadline: TimeInterval
         let action: @MainActor () -> Void

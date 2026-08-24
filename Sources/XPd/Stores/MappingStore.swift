@@ -493,6 +493,11 @@ final class MappingStore {
     private var lastMIDIProfileName: String?
     private var fnIsActive = false
     private var activeMIDIControls: Set<RemoteControl> = []
+    /// Report-2 is a complete K-button state snapshot rather than the
+    /// report-6 single-control stream. Keep its held set separate so a
+    /// neutral report-2 release cannot release an unrelated report-6 MIDI
+    /// control, and repeated snapshots do not duplicate MIDI presses.
+    private var activeMIDIReport2Controls: Set<RemoteControl> = []
     private var midiControlLayers: [RemoteControl: Int] = [:]
     private var centerFnHoldTask: Task<Void, Never>?
     private var centerFnHoldGeneration = 0
@@ -511,9 +516,11 @@ final class MappingStore {
     private let remoteKeyProvider: RemoteKeyProvider
     private let buttonGestureRecognizer: ButtonGestureRecognizer
     /// Standard-mode K-button cycles can contain one non-modifier primary
-    /// plus any number of designated K modifiers. The generic HID stream has
-    /// one release boundary, so retain the complete active set until nil.
+    /// plus any number of designated K modifiers. Report 6 still has one
+    /// generic release boundary; report 2 is a complete state snapshot and
+    /// keeps its active set until the next snapshot or F0/all-zero boundary.
     private var activeStandardControls: Set<RemoteControl> = []
+    private var activeStandardReport2Controls: Set<RemoteControl> = []
     private var activeStandardKeyboardModifiers: [RemoteControl: Set<KeyboardShortcut.Modifier>] = [:]
     private var activeStandardFunctionKeys: [RemoteControl: Set<UInt16>] = [:]
     private var activeStandardKeyboardKeys: [RemoteControl: Set<UInt16>] = [:]
@@ -523,6 +530,7 @@ final class MappingStore {
     /// fired and the rest of that physical HID cycle is consumed. This keeps
     /// a later destination from retroactively becoming a layer.
     private var activeStandardModifierCycleConsumed = false
+    private var activeStandardModifierBaseSuppressed = false
     private var activeStandardModifierGeneration = 0
     private var ambiguousStandardCycles: Set<RemoteControl> = []
     private var isRemoteTriggerCaptureActive = false
@@ -1074,6 +1082,7 @@ final class MappingStore {
         }
         fnIsActive = false
         activeMIDIControls.removeAll()
+        activeMIDIReport2Controls.removeAll()
         midiControlLayers.removeAll()
         resetSessionOffsets()
         syncMIDIOverlay()
@@ -2107,13 +2116,34 @@ final class MappingStore {
         }
 
         guard let signature else {
-            if activeRealm == .midi, let liveControl {
-                if liveControl == .wheelCenter, fnControl == .wheelCenter {
-                    finishCenterMIDIInteraction()
-                } else {
-                    handleMIDIControlRelease(liveControl)
+            if activeRealm == .midi {
+                let report2Controls = activeMIDIReport2Controls
+                if !report2Controls.isEmpty {
+                    // A nil callback is the report-6 collection's generic
+                    // release boundary. It must not release a separate
+                    // report-2 snapshot; release only a report-6 control
+                    // currently represented by liveControl, if any.
+                    if let liveControl, !report2Controls.contains(liveControl) {
+                        handleMIDIControlRelease(liveControl)
+                        self.liveControl = nil
+                    }
+                    return
                 }
-                self.liveControl = nil
+
+                if let liveControl {
+                    if liveControl == .wheelCenter, fnControl == .wheelCenter {
+                        finishCenterMIDIInteraction()
+                    } else {
+                        handleMIDIControlRelease(liveControl)
+                    }
+                    self.liveControl = nil
+                    return
+                }
+            }
+            if activeRealm == .standard, !activeStandardReport2Controls.isEmpty {
+                // Report 2 has an explicit F0/all-zero signature boundary;
+                // a nil callback belongs to report 6 and must not terminate
+                // the report-2 snapshot cycle.
                 return
             }
             if activeRealm == .standard, !activeStandardControls.isEmpty {
@@ -2156,6 +2186,25 @@ final class MappingStore {
             return
         }
 
+        if activeRealm == .standard,
+           let report = HIDKeyboardReport(signature: signature),
+           report.isReport2OneHot {
+            handleStandardReport2Snapshot(report: report, signature: signature)
+            return
+        }
+
+        if activeRealm == .midi,
+           let report = HIDKeyboardReport(signature: signature),
+           report.isReport2OneHot {
+            let exactControl = hidBindings.first(where: { $0.value == signature })?.key
+            handleMIDIReport2Snapshot(
+                report: report,
+                signature: signature,
+                exactControl: exactControl
+            )
+            return
+        }
+
         let resolvedControls: [RemoteControl]
         if let matched = hidBindings.first(where: { $0.value == signature })?.key {
             // An exact learned binding is authoritative. In particular, a
@@ -2163,6 +2212,15 @@ final class MappingStore {
             // K10 plus a hidden K8 merely because their keyboard states
             // overlap.
             resolvedControls = [matched]
+        } else if activeRealm == .standard,
+                  let compositeControls = Self.decomposedStandardBitmaskControls(
+                      for: signature,
+                      bindings: hidBindings
+                  ) {
+            modifierArbitrationLogger.info(
+                "composite bitmask input controls=\(compositeControls.map(\.rawValue).joined(separator: ","), privacy: .public)"
+            )
+            resolvedControls = compositeControls
         } else if activeRealm == .standard,
                   let compositeControls = Self.decomposedStandardKeyboardControls(
                       for: signature,
@@ -2229,14 +2287,24 @@ final class MappingStore {
 
         if activeRealm == .midi {
             if let displacedControl = previousLiveControl, displacedControl != matched {
-                handleMIDIControlRelease(displacedControl)
+                // A report-6 control may arrive while report-2 still holds
+                // its own K snapshot. Do not release the report-2 control
+                // merely because report 6 displaced the presentation slot.
+                if !activeMIDIReport2Controls.contains(displacedControl) {
+                    handleMIDIControlRelease(displacedControl)
+                }
             }
             handleMIDIControlPress(matched)
             return
         }
 
         if matched.isWheelRotation {
-            cancelStandardCycle()
+            // Wheel reports belong to report 6. Keep a separate report-2
+            // snapshot cycle alive while the wheel detent and its generic
+            // release are processed.
+            if activeStandardReport2Controls.isEmpty {
+                cancelStandardCycle()
+            }
             actionRunner.scroll(
                 direction: matched == .wheelCW ? .down : .up,
                 sensitivity: wheelSensitivity
@@ -2248,6 +2316,88 @@ final class MappingStore {
         }
 
         handleStandardKPress(matched)
+    }
+
+    /// Resolves an unmatched report-2 bitmask into its uniquely identified
+    /// learned K controls. Report 2 is a state snapshot, so each individual
+    /// binding must be a non-zero one-hot mask and the selected masks must
+    /// cover the target exactly. Duplicate masks, unknown bits, and any other
+    /// ambiguous cover fail closed rather than guessing a layer.
+    static func decomposedStandardBitmaskControls(
+        for signature: String,
+        bindings: [RemoteControl: String]
+    ) -> [RemoteControl]? {
+        guard let target = HIDKeyboardReport(signature: signature),
+              target.isReport2OneHot,
+              let targetMask = target.oneHotMask,
+              targetMask != 0 else {
+            return nil
+        }
+
+        struct Candidate {
+            let control: RemoteControl
+            let mask: UInt16
+        }
+
+        let candidates = RemoteControl.allCases.compactMap { control -> Candidate? in
+            guard control.isMIDIButton,
+                  let binding = bindings[control],
+                  let report = HIDKeyboardReport(signature: binding),
+                  report.isReport2OneHot,
+                  report.isCompatibleIndividualBinding,
+                  let mask = report.oneHotMask,
+                  mask & ~targetMask == 0 else {
+                return nil
+            }
+            return Candidate(control: control, mask: mask)
+        }
+
+        guard candidates.count >= 2 else { return nil }
+
+        // Search by increasing cover size. Keeping at most two matches is
+        // enough to distinguish a unique decomposition from an ambiguous
+        // one, while the ten-button remote keeps this bounded and simple.
+        for size in 2...candidates.count {
+            var matchingCovers: [[RemoteControl]] = []
+
+            func visit(
+                nextIndex: Int,
+                selected: [Candidate],
+                mask: UInt16
+            ) {
+                guard matchingCovers.count < 2 else { return }
+
+                if selected.count == size {
+                    guard mask == targetMask else { return }
+                    matchingCovers.append(selected.map(\.control))
+                    return
+                }
+
+                let remaining = size - selected.count
+                guard candidates.count - nextIndex >= remaining else { return }
+
+                for index in nextIndex..<candidates.count {
+                    let candidate = candidates[index]
+                    visit(
+                        nextIndex: index + 1,
+                        selected: selected + [candidate],
+                        mask: mask | candidate.mask
+                    )
+                    guard matchingCovers.count < 2 else { return }
+                }
+            }
+
+            visit(nextIndex: 0, selected: [], mask: 0)
+
+            if matchingCovers.count == 1 {
+                return matchingCovers[0]
+            }
+            if matchingCovers.count > 1 {
+                return nil
+            }
+        }
+
+        return nil
     }
 
     /// Resolves an unmatched report-6 keyboard state into a uniquely useful
@@ -2334,6 +2484,132 @@ final class MappingStore {
         return nil
     }
 
+    /// Routes a valid report-2 snapshot in Standard mode. Exact learned
+    /// bindings remain authoritative; otherwise the snapshot must resolve to
+    /// one unique set of individually learned one-hot controls. A changed
+    /// snapshot rebuilds the in-flight K cycle so controls removed by the
+    /// device cannot remain as stale modifiers or primaries.
+    private func handleStandardReport2Snapshot(
+        report: HIDKeyboardReport,
+        signature: String
+    ) {
+        guard report.isReport2OneHot,
+              let mask = report.oneHotMask else { return }
+
+        if mask == 0 {
+            activeStandardReport2Controls.removeAll()
+            if !activeStandardControls.isEmpty {
+                releaseStandardCycle()
+            } else {
+                cancelActiveStandardModifierHoldTasks(reason: "report-2-release-boundary")
+                liveControl = nil
+            }
+            return
+        }
+
+        let exactControl = hidBindings.first(where: { $0.value == signature })?.key
+        let desiredControls: Set<RemoteControl>
+        if let exactControl {
+            guard exactControl.isMIDIButton else { return }
+            desiredControls = [exactControl]
+        } else if let decomposed = Self.decomposedStandardBitmaskControls(
+            for: signature,
+            bindings: hidBindings
+        ) {
+            desiredControls = Set(decomposed)
+        } else {
+            // Unknown, partially learned, or ambiguous snapshots are
+            // intentionally fail-closed and do not disturb the current set.
+            return
+        }
+
+        if isProfileSelectorVisible {
+            if desiredControls.contains(workspaceLockControl) {
+                _ = toggleWorkspace()
+            } else {
+                closeProfileSelector()
+            }
+            activeStandardReport2Controls.removeAll()
+            return
+        }
+
+        updateStandardReport2Controls(to: desiredControls)
+    }
+
+    private func updateStandardReport2Controls(
+        to desiredControls: Set<RemoteControl>
+    ) {
+        guard activeStandardReport2Controls != desiredControls else { return }
+
+        let previousReport2Controls = activeStandardReport2Controls
+        let previousLiveControl = liveControl
+        let liveControlBelongedToReport2 = previousLiveControl.map {
+            previousReport2Controls.contains($0)
+        } ?? false
+        activeStandardReport2Controls = desiredControls
+
+        let removedControls = previousReport2Controls.subtracting(desiredControls)
+        let addedControls = desiredControls.subtracting(previousReport2Controls)
+        let previousIdentity = activeStandardGestureIdentity
+
+        // A report-2 snapshot can remove a destination while leaving its
+        // modifier held. Release that destination through the gesture
+        // recognizer so its layered Tap remains eligible, but suppress the
+        // modifier's standalone Base action for the rest of this physical
+        // cycle.
+        if let previousIdentity,
+           removedControls.contains(previousIdentity.control) {
+            buttonGestureRecognizer.release(previousIdentity)
+            activeStandardGestureIdentity = nil
+        }
+
+        for control in removedControls {
+            if isRemoteModifier(control) {
+                activeStandardModifierHoldTasks.removeValue(forKey: control)?.cancel()
+            } else if activeStandardControls.contains(control) {
+                activeStandardModifierBaseSuppressed = true
+                cancelActiveStandardModifierHoldTasks(reason: "destination-release")
+            }
+            activeStandardControls.remove(control)
+            activeStandardKeyboardModifiers.removeValue(forKey: control)
+            activeStandardFunctionKeys.removeValue(forKey: control)
+            activeStandardKeyboardKeys.removeValue(forKey: control)
+            ambiguousStandardCycles.remove(control)
+        }
+
+        let removedModifierFromActiveGesture = previousIdentity?.modifierControls
+            .contains(where: { removedControls.contains($0) }) == true
+        if let previousIdentity,
+           !removedControls.contains(previousIdentity.control),
+           !removedModifierFromActiveGesture,
+           activeStandardControls.contains(previousIdentity.control) {
+            let modifiers = activeStandardControls.filter(isRemoteModifier)
+            let updatedIdentity = ButtonGestureIdentity(
+                control: previousIdentity.control,
+                modifierControls: Set(modifiers),
+                keyboardModifiers: activeStandardKeyboardModifiers[previousIdentity.control] ?? [],
+                functionKeys: activeStandardFunctionKeys[previousIdentity.control] ?? [],
+                keyboardKeys: activeStandardKeyboardKeys[previousIdentity.control] ?? []
+            )
+            if previousIdentity != updatedIdentity,
+               buttonGestureRecognizer.reclassifyPress(
+                   from: previousIdentity,
+                   to: updatedIdentity
+               ) {
+                activeStandardGestureIdentity = updatedIdentity
+            }
+        }
+
+        let orderedControls = RemoteControl.allCases.filter { addedControls.contains($0) }
+        for control in orderedControls {
+            selectedControl = control
+            handleStandardKPress(control)
+            if previousLiveControl == nil || liveControlBelongedToReport2 {
+                liveControl = control
+            }
+        }
+    }
+
     /// Routes a Standard K-button press through the dual-role layer state
     /// machine. A designated K is held as a modifier candidate; exactly one
     /// non-designated K is the primary. Either press order may form an exact
@@ -2352,6 +2628,7 @@ final class MappingStore {
         if startsNewCycle {
             activeStandardModifierGeneration &+= 1
             activeStandardModifierCycleConsumed = false
+            activeStandardModifierBaseSuppressed = false
         }
 
         modifierArbitrationLogger.info(
@@ -2413,6 +2690,7 @@ final class MappingStore {
         guard activeStandardModifierHoldTasks[control] == nil,
               activeStandardControls.count == 1,
               activeStandardModifierCycleConsumed == false,
+              activeStandardModifierBaseSuppressed == false,
               activeStandardGestureIdentity == nil else { return }
 
         let keyboardModifiers = activeStandardKeyboardModifiers[control] ?? []
@@ -2448,6 +2726,7 @@ final class MappingStore {
               activeStandardControls.contains(identity.control),
               isRemoteModifier(identity.control),
               activeStandardModifierCycleConsumed == false,
+              activeStandardModifierBaseSuppressed == false,
               activeStandardGestureIdentity == nil else {
             modifierArbitrationLogger.info(
                 "standalone threshold rejected control=\(identity.control.rawValue, privacy: .public) reason=state expected-generation=\(generation, privacy: .public) actual-generation=\(self.activeStandardModifierGeneration, privacy: .public) active-count=\(self.activeStandardControls.count, privacy: .public) consumed=\(self.activeStandardModifierCycleConsumed, privacy: .public) gesture-active=\(self.activeStandardGestureIdentity != nil, privacy: .public)"
@@ -2471,6 +2750,7 @@ final class MappingStore {
 
     private func releaseStandardCycle() {
         let controls = activeStandardControls
+        activeStandardReport2Controls.removeAll()
         modifierArbitrationLogger.info(
             "cycle reset reason=release-boundary controls=\(controls.count, privacy: .public) consumed=\(self.activeStandardModifierCycleConsumed, privacy: .public)"
         )
@@ -2482,6 +2762,7 @@ final class MappingStore {
             activeStandardKeyboardKeys.removeAll()
             activeStandardGestureIdentity = nil
             activeStandardModifierCycleConsumed = false
+            activeStandardModifierBaseSuppressed = false
             activeStandardModifierGeneration &+= 1
             ambiguousStandardCycles.removeAll()
             liveControl = nil
@@ -2513,10 +2794,12 @@ final class MappingStore {
         cancelActiveStandardPrimaryGestures()
         cancelActiveStandardModifierHoldTasks(reason: "cycle-cancelled")
         activeStandardControls.removeAll()
+        activeStandardReport2Controls.removeAll()
         activeStandardKeyboardModifiers.removeAll()
         activeStandardFunctionKeys.removeAll()
         activeStandardKeyboardKeys.removeAll()
         activeStandardModifierCycleConsumed = false
+        activeStandardModifierBaseSuppressed = false
         activeStandardModifierGeneration &+= 1
         ambiguousStandardCycles.removeAll()
     }
@@ -2597,6 +2880,111 @@ final class MappingStore {
         }
         isWheelCenterHeld = false
         confirmProfileSelection()
+    }
+
+    /// Routes one valid report-2 state snapshot in a MIDI profile. Exact
+    /// learned bindings win over decomposition; otherwise every individual
+    /// one-hot report-2 binding must form one unique cover of the snapshot.
+    /// Ambiguous or partially learned masks leave the current MIDI state
+    /// untouched and therefore fail closed.
+    private func handleMIDIReport2Snapshot(
+        report: HIDKeyboardReport,
+        signature: String,
+        exactControl: RemoteControl?
+    ) {
+        guard report.isReport2OneHot,
+              let mask = report.oneHotMask,
+              mask != 0 else {
+            let report2Controls = activeMIDIReport2Controls
+            releaseMIDIReport2Controls(report2Controls)
+            if let liveControl, report2Controls.contains(liveControl) {
+                self.liveControl = nil
+            }
+            return
+        }
+
+        let desiredControls: Set<RemoteControl>
+        if let exactControl {
+            guard exactControl.isMIDIButton else { return }
+            desiredControls = [exactControl]
+        } else if let decomposed = Self.decomposedStandardBitmaskControls(
+            for: signature,
+            bindings: hidBindings
+        ) {
+            desiredControls = Set(decomposed)
+        } else {
+            return
+        }
+
+        if isProfileSelectorVisible {
+            if desiredControls.contains(workspaceLockControl) {
+                _ = toggleWorkspace()
+            } else {
+                closeProfileSelector()
+            }
+            liveControl = nil
+            return
+        }
+
+        updateMIDIReport2Controls(to: desiredControls)
+    }
+
+    private func updateMIDIReport2Controls(to desiredControls: Set<RemoteControl>) {
+        let previousReport2Controls = activeMIDIReport2Controls
+        let previousLiveControl = liveControl
+        let liveControlBelongedToReport2 = previousLiveControl.map {
+            previousReport2Controls.contains($0)
+        } ?? false
+        let removed = activeMIDIReport2Controls.subtracting(desiredControls)
+        let added = desiredControls.subtracting(activeMIDIReport2Controls)
+
+        // Release destinations before Fn so their recorded layer remains
+        // authoritative and the layer-wide MIDI release follows last.
+        for control in orderedMIDIReport2Controls(removed, fnFirst: false) {
+            handleMIDIControlRelease(control)
+            activeMIDIReport2Controls.remove(control)
+        }
+
+        // Fn must be pressed first when it joins an already-held destination;
+        // the newly added destination then selects its function-layer mapping.
+        for control in orderedMIDIReport2Controls(added, fnFirst: true) {
+            handleMIDIControlPress(control)
+            activeMIDIReport2Controls.insert(control)
+        }
+
+        if desiredControls.isEmpty {
+            if liveControlBelongedToReport2 {
+                liveControl = nil
+            }
+        } else if previousLiveControl == nil || liveControlBelongedToReport2 {
+            liveControl = orderedMIDIReport2Controls(desiredControls, fnFirst: false).last
+        }
+    }
+
+    private func releaseMIDIReport2Controls(
+        _ controls: Set<RemoteControl>? = nil
+    ) {
+        let report2Controls = controls ?? activeMIDIReport2Controls
+        guard !report2Controls.isEmpty else { return }
+        for control in orderedMIDIReport2Controls(report2Controls, fnFirst: false) {
+            handleMIDIControlRelease(control)
+        }
+        activeMIDIReport2Controls.subtract(report2Controls)
+    }
+
+    private func orderedMIDIReport2Controls(
+        _ controls: Set<RemoteControl>,
+        fnFirst: Bool
+    ) -> [RemoteControl] {
+        var ordered = RemoteControl.allCases.filter { controls.contains($0) }
+        guard let fnControl, controls.contains(fnControl) else { return ordered }
+        ordered.removeAll { $0 == fnControl }
+        if fnFirst {
+            ordered.insert(fnControl, at: 0)
+        } else {
+            ordered.append(fnControl)
+        }
+        return ordered
     }
 
     private func handleMIDIControlPress(_ control: RemoteControl) {
@@ -3030,6 +3418,7 @@ final class MappingStore {
         let hadMIDIState = fnIsActive || !activeMIDIControls.isEmpty
         fnIsActive = false
         activeMIDIControls.removeAll()
+        activeMIDIReport2Controls.removeAll()
         midiControlLayers.removeAll()
         resetSessionOffsets()
         syncMIDIOverlay()

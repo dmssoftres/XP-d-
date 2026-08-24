@@ -47,26 +47,34 @@ learned K report pairs for order-specific masking; this is inferred compatibilit
 not a live hardware claim. Clearing a designated modifier binding cancels pending
 input and removes the designation in the same save.
 
-Standard K-layer input → accumulate report-6 K reports until an empty report-6
+Standard K-layer input → accumulate either factory report-6 keyboard states or
+the verified programmed report-2 `F0` bitfield until their respective empty/zero
 release boundary → ignore empty reports 1, 7, and 9 from the device's unrelated
 mouse/digitizer collections → classify every designated K as a modifier and
 require exactly one non-designated primary → route Tap/Hold/Double through the
 exact modifier-set `MappingKey`. Pending gesture identity includes the primary,
 exact K layer, keyboard modifiers, F keys, and configured ordinary keys so only
 equivalent presses may form a Double. A destination-first press is reclassified
-when a K modifier joins its active report-6 cycle. A modifier-only press snapshots the
+when a K modifier joins its active K-input cycle. A modifier-only press snapshots the
 global local-only standalone threshold (default 0.5 seconds, normalized to
 0.2–1.5 in 0.1-second steps). Expiry immediately executes Base Tap when exactly
 one modifier remains physically held and no primary participated, then consumes
-the rest of that report-6 cycle. A destination arriving while the modifier is
+the rest of that K-input cycle. A destination arriving while the modifier is
 still physically held and strictly before expiry cancels standalone and selects
-the exact layer. A report-6 release before expiry makes a lone modifier inert;
+the exact layer. The collection's release state before expiry makes a lone modifier inert;
 the next K starts a new Base cycle. Physically overlapped modifier stacks remain
 eligible for an exact stacked layer; sequential released modifiers do not merge.
 Same-cycle modifier-only stacks and multi-primary cycles remain consumed. Press
 order is irrelevant within one active rollover cycle. Profile/import/learning/
 disconnect/wheel boundaries cancel active state. Physical timing still requires
 owner acceptance on the target remote.
+
+Programmed report-2 input is a complete held-button snapshot. Standard routing
+reconciles additions and partial releases so releasing a destination while its
+modifier remains held completes the layer without rearming the modifier Base.
+MIDI routing performs the same state diff, presses Fn before newly added
+destinations, and releases destinations before Fn. Report-6 nil/wheel releases
+never clear a separate report-2 held set. HID bindings remain profile-specific.
 
 Raw report callback → normalize a possible report-ID prefix → append the report
 to a 12-entry chronological in-memory trace before duplicate/empty semantic
@@ -142,8 +150,9 @@ The build script compiles `XPd`, assembles `dist/XP[d].app`, creates its Info.pl
 - Privacy approval stale after rebuild: the app may connect or post events incorrectly until the stable signed bundle is approved/relaunched.
 - Invalid import: reject atomically without replacing any in-memory or persisted profile state.
 - Unknown/changed HID report: learning or mapped control resolution fails; capture evidence before changing decoding.
-- Empty composite report 1, 7, or 9 during a report-6 K hold: ignore it; only an
-  empty report 6 may release the K cycle.
+- Empty composite report 1, 7, or 9 during a K hold: ignore it. Factory K input
+  releases only on empty report 6; programmed report-2 input releases only on
+  its verified `F0` zero mask.
 - Missing release or conflicting live-button reports: cancel the displaced/pending gesture rather than execute an ambiguous action.
 - Missing/mismatched BLE identity or notification: retain an exact HID property if available; otherwise show battery unavailable rather than estimating.
 - Wheel-center report changes or loses its device-specific standalone empty report-6 distinction: selector confirmation may regress and requires controlled real-hardware recapture.

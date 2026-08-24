@@ -1,36 +1,90 @@
 import Foundation
 
-/// The payload of the remote's report-6 boot-keyboard collection.
+/// A normalized keyboard-like state from one of the remote's K-button HID
+/// collections.
 ///
-/// The device has no separate usage for a physical K button. Its learned
-/// signatures are keyboard state snapshots: one modifier byte followed by
-/// six ordinary-key slots. Keeping the parsed state separate from the raw
-/// signature supports both collision guidance and safe decomposition of
-/// unmatched composite reports.
+/// The original collection is report 6, a boot-keyboard state with one
+/// modifier byte followed by six ordinary-key slots. The owner's programmed
+/// F13–F22 layout exposes a distinct report 2 collection instead: `F0` followed by a
+/// one-hot bitmask (K1…K8 in the first byte, K9…K10 in the second). Keeping
+/// both parsed forms separate from their raw signatures lets compatibility
+/// checks handle either collection without treating their fields as
+/// interchangeable.
 struct HIDKeyboardReport: Equatable {
     /// The six ordinary-key slots in a USB boot-keyboard report.
     static let bootKeyboardOrdinaryKeyCapacity = 6
 
+    /// Report-2 uses ten one-hot bits: eight in its first mask byte and two
+    /// in the next. Additional bytes are accepted only when they are zero,
+    /// since the device's report can contain padded payload bytes.
+    static let report2OneHotBitCapacity = 10
+
+    enum Encoding: Equatable {
+        case report6BootKeyboard
+        case report2OneHot
+    }
+
+    let encoding: Encoding
     let modifierByte: UInt8
     let keyUsages: Set<UInt8>
+    /// Report-2's low ten bits, or nil for report-6 states. A composite
+    /// report-2 state may contain more than one bit; learned individual
+    /// bindings are checked with `isCompatibleIndividualBinding` below.
+    let oneHotMask: UInt16?
 
     init(modifierByte: UInt8, keyUsages: Set<UInt8>) {
+        self.encoding = .report6BootKeyboard
         self.modifierByte = modifierByte
         self.keyUsages = keyUsages
+        self.oneHotMask = nil
+    }
+
+    private init(oneHotMask: UInt16) {
+        self.encoding = .report2OneHot
+        self.modifierByte = 0
+        self.keyUsages = []
+        self.oneHotMask = oneHotMask
+    }
+
+    /// True when this state is a report-2 one-hot bitmask rather than the
+    /// legacy report-6 boot-keyboard state.
+    var isReport2OneHot: Bool {
+        encoding == .report2OneHot
+    }
+
+    /// Report-6 states remain compatible with the existing analyzer. Report
+    /// 2 states are individually compatible only when exactly one known bit
+    /// is set; zero and multi-bit states are release/composite states, not
+    /// independent learned K bindings.
+    var isCompatibleIndividualBinding: Bool {
+        switch encoding {
+        case .report6BootKeyboard:
+            return true
+        case .report2OneHot:
+            guard let oneHotMask else { return false }
+            return oneHotMask != 0 && oneHotMask.nonzeroBitCount == 1
+        }
     }
 
     /// Parses a normalized report-6 signature such as
     /// `r6:03 1D 00 00 00 00 00`.
     ///
-    /// A legacy eight-byte form with the report ID repeated in the payload
-    /// is accepted as well; it is normalized here rather than treated as a
-    /// different physical input.
+    /// It also accepts the current one-hot report-2 form, for example
+    /// `r2:F0 01 00 00 00 00 00 00` (K1) or
+    /// `r2:F0 00 02 00 00 00 00 00` (K10). Zero padding is normalized away;
+    /// the report-2 mask itself is retained so the runtime can distinguish a
+    /// composite state from an individual learned binding.
+    ///
+    /// The legacy report-6 eight-byte form with the report ID repeated in the
+    /// payload remains accepted and normalized.
     init?(signature: String) {
         let components = signature.split(whereSeparator: { $0 == " " || $0 == "\t" })
         guard let first = components.first else { return nil }
 
         let prefix = String(first).lowercased()
-        guard prefix.hasPrefix("r6:"), prefix.count > 3 else { return nil }
+        let isReport6 = prefix.hasPrefix("r6:")
+        let isReport2 = prefix.hasPrefix("r2:")
+        guard (isReport6 || isReport2), prefix.count > 3 else { return nil }
 
         var bytes: [UInt8] = []
         let firstByte = String(prefix.dropFirst(3))
@@ -47,6 +101,12 @@ struct HIDKeyboardReport: Equatable {
             bytes.append(parsed)
         }
 
+        if isReport2 {
+            guard let mask = Self.report2OneHotMask(from: bytes) else { return nil }
+            self.init(oneHotMask: mask)
+            return
+        }
+
         if bytes.count == Self.bootKeyboardOrdinaryKeyCapacity + 2, bytes.first == 0x06 {
             bytes.removeFirst()
         }
@@ -61,14 +121,65 @@ struct HIDKeyboardReport: Equatable {
     /// Returns the keyboard state produced when both controls are held.
     /// Boot-keyboard rollover cannot represent more than six distinct key
     /// usages, so an over-capacity union is intentionally not classified as
-    /// an exact collision.
+    /// an exact collision. Report-2 states merge by OR-ing their one-hot
+    /// masks; a distinct pair therefore remains distinguishable, while a
+    /// duplicate learned bit remains an exact collision.
     func merged(with other: HIDKeyboardReport) -> HIDKeyboardReport? {
+        guard encoding == other.encoding else { return nil }
+
+        if encoding == .report2OneHot {
+            guard let oneHotMask, let otherMask = other.oneHotMask else { return nil }
+            return HIDKeyboardReport(oneHotMask: oneHotMask | otherMask)
+        }
+
         let usages = keyUsages.union(other.keyUsages)
         guard usages.count <= Self.bootKeyboardOrdinaryKeyCapacity else { return nil }
         return HIDKeyboardReport(
             modifierByte: modifierByte | other.modifierByte,
             keyUsages: usages
         )
+    }
+
+    /// Returns the report-2 bitmask when the signature is structurally a
+    /// report-2 state. This small seam is used by the input resolver for
+    /// multi-button report-2 snapshots; compatibility auditing additionally
+    /// requires `isCompatibleIndividualBinding`.
+    static func report2OneHotMask(from signature: String) -> UInt16? {
+        let components = signature.split(whereSeparator: { $0 == " " || $0 == "\t" })
+        guard let first = components.first else { return nil }
+        let prefix = String(first).lowercased()
+        guard prefix.hasPrefix("r2:"), prefix.count > 3 else { return nil }
+
+        var bytes: [UInt8] = []
+        let firstByte = String(prefix.dropFirst(3))
+        guard firstByte.count <= 2, let parsedFirstByte = UInt8(firstByte, radix: 16) else {
+            return nil
+        }
+        bytes.append(parsedFirstByte)
+
+        for component in components.dropFirst() {
+            let value = String(component)
+            guard value.count <= 2, let parsed = UInt8(value, radix: 16) else { return nil }
+            bytes.append(parsed)
+        }
+
+        return report2OneHotMask(from: bytes)
+    }
+
+    private static func report2OneHotMask(from rawBytes: [UInt8]) -> UInt16? {
+        guard rawBytes.first == 0xF0 else { return nil }
+        let maskBytes = Array(rawBytes.dropFirst())
+        guard maskBytes.count >= 2,
+              maskBytes.dropFirst(2).allSatisfy({ $0 == 0 }) else {
+            return nil
+        }
+
+        let low = UInt16(maskBytes.indices.contains(0) ? maskBytes[0] : 0)
+        let high = UInt16(maskBytes.indices.contains(1) ? maskBytes[1] : 0) << 8
+        let mask = low | high
+        let knownBits = (UInt16(1) << report2OneHotBitCapacity) - 1
+        guard mask & ~knownBits == 0 else { return nil }
+        return mask
     }
 }
 
@@ -141,7 +252,9 @@ enum HIDKeyboardReportCollisionAnalyzer {
     ) -> HIDKeyboardReportRolloverCollision? {
         guard first != second,
               let firstReport = bindings[first].flatMap(HIDKeyboardReport.init(signature:)),
-              let secondReport = bindings[second].flatMap(HIDKeyboardReport.init(signature:)) else {
+              let secondReport = bindings[second].flatMap(HIDKeyboardReport.init(signature:)),
+              firstReport.encoding == .report6BootKeyboard,
+              secondReport.encoding == .report6BootKeyboard else {
             return nil
         }
 
@@ -185,6 +298,8 @@ enum HIDKeyboardReportCollisionAnalyzer {
         guard first != second,
               let firstReport = bindings[first].flatMap(HIDKeyboardReport.init(signature:)),
               let secondReport = bindings[second].flatMap(HIDKeyboardReport.init(signature:)),
+              firstReport.isCompatibleIndividualBinding,
+              secondReport.isCompatibleIndividualBinding,
               let merged = firstReport.merged(with: secondReport) else {
             return []
         }

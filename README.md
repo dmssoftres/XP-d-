@@ -141,14 +141,21 @@ Every designated modifier is marked with a persistent `MOD` corner badge on
 the graphical remote. The badge overlays the existing button presentation, so
 its K number, optional title, and application icon remain in place.
 
-The modifier and destination must overlap in one physical report-6 cycle. A
-report-6 release before the threshold makes a lone modifier inert; a later K is
-then a new Base cycle. Empty reports 1, 7, and 9 from the remote's unrelated
-composite collections are ignored and cannot fake that release. Multiple
-designated modifiers may be physically overlapped before one destination to
-select an exact stacked layer.
+The modifier and destination must overlap in one physical K-input cycle. The
+factory report-6 layout ends that cycle with an empty report 6; the programmed
+F13–F22 layout uses a verified report-2 `F0` bitfield and ends it with a zero
+mask. A release before the threshold makes a lone modifier inert; a later K is
+then a new Base cycle. Empty reports 1, 7, and 9 from unrelated composite
+collections are ignored and cannot fake that release. Multiple designated
+modifiers may be physically overlapped before one destination to select an
+exact stacked layer.
 
-Within one held report-6 cycle, either press order may select the same exact
+Report-2 bindings are learned per profile. After reprogramming the remote,
+relearn K1–K10 in each existing Standard or MIDI profile that should use the
+new layout. MIDI Fn routing tracks partial report-2 presses and releases without
+letting report-6 wheel traffic clear the held Fn state.
+
+Within one held K-input cycle, either press order may select the same exact
 layer. A destination-first gesture is reclassified when its designated modifier
 arrives before the shared release boundary.
 

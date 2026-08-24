@@ -122,6 +122,89 @@ final class HIDKeyboardReportTests: XCTestCase {
         XCTAssertTrue(HIDKeyboardReportCollisionAnalyzer.rolloverCollisions(among: bindings).isEmpty)
     }
 
+    func testReport2OneHotBindingsParseAcrossBothMaskBytes() throws {
+        let k1 = try XCTUnwrap(HIDKeyboardReport(signature: "r2:F0 01 00 00 00 00 00 00"))
+        let k8 = try XCTUnwrap(HIDKeyboardReport(signature: "r2:F0 80 00 00 00 00 00 00"))
+        let k9 = try XCTUnwrap(HIDKeyboardReport(signature: "r2:F0 00 01 00 00 00 00 00"))
+        let k10 = try XCTUnwrap(HIDKeyboardReport(signature: "r2:F0 00 02 00 00 00 00 00"))
+
+        XCTAssertEqual(k1.encoding, .report2OneHot)
+        XCTAssertEqual(k1.oneHotMask, 0x0001)
+        XCTAssertEqual(k8.oneHotMask, 0x0080)
+        XCTAssertEqual(k9.oneHotMask, 0x0100)
+        XCTAssertEqual(k10.oneHotMask, 0x0200)
+        XCTAssertTrue([k1, k8, k9, k10].allSatisfy(\.isCompatibleIndividualBinding))
+
+    }
+
+    func testReport2CompositeStateIsParseableButNotAnIndividualBinding() throws {
+        let composite = try XCTUnwrap(
+            HIDKeyboardReport(signature: "r2:F0 03 00 00 00 00 00 00")
+        )
+
+        XCTAssertEqual(composite.encoding, .report2OneHot)
+        XCTAssertEqual(composite.oneHotMask, 0x0003)
+        XCTAssertFalse(composite.isCompatibleIndividualBinding)
+        XCTAssertEqual(
+            HIDKeyboardReport.report2OneHotMask(from: "r2:F0 03 00 00 00 00 00 00"),
+            0x0003
+        )
+    }
+
+    func testReport2RejectsUnknownBitsAndNonZeroPadding() {
+        let invalidSignatures = [
+            "r1:F0 01 00 00 00 00 00 00",
+            "r2:F0 01",
+            "r2:01 01 00 00 00 00 00 00",
+            "r2:F0 00 04 00 00 00 00 00",
+            "r2:F0 01 00 01 00 00 00 00",
+            "r2:F0 GG 00 00 00 00 00 00"
+        ]
+
+        for signature in invalidSignatures {
+            XCTAssertNil(
+                HIDKeyboardReport(signature: signature),
+                "Expected malformed/non-one-hot report-2 signature to be rejected: \(signature)"
+            )
+            XCTAssertNil(HIDKeyboardReport.report2OneHotMask(from: signature))
+        }
+    }
+
+    func testUniqueReport2OneHotBindingsHaveNoMaskingOrRolloverCollisions() {
+        let bindings = Dictionary(uniqueKeysWithValues: RemoteControl.allCases
+            .filter(\.isMIDIButton)
+            .enumerated()
+            .map { index, control in
+                let byteOffset = index < 8 ? 0 : 1
+                let bit = UInt8(1 << (index < 8 ? index : index - 8))
+                let firstMask = byteOffset == 0 ? bit : 0
+                let secondMask = byteOffset == 1 ? bit : 0
+                return (
+                    control,
+                    String(format: "r2:F0 %02X %02X 00 00 00 00 00", firstMask, secondMask)
+                )
+            })
+
+        XCTAssertEqual(HIDKeyboardReportCollisionAnalyzer.collisions(among: bindings), [])
+        XCTAssertEqual(HIDKeyboardReportCollisionAnalyzer.rolloverCollisions(among: bindings), [])
+    }
+
+    func testDuplicateReport2OneHotBindingReportsBothIndistinguishableDirections() {
+        let bindings: [RemoteControl: String] = [
+            .k1: "r2:F0 01 00 00 00 00 00 00",
+            .k2: "r2:F0 01 00 00 00 00 00 00"
+        ]
+
+        XCTAssertEqual(
+            Set(HIDKeyboardReportCollisionAnalyzer.collisions(among: bindings)),
+            Set([
+                HIDKeyboardReportCollision(firstControl: .k1, hiddenControl: .k2),
+                HIDKeyboardReportCollision(firstControl: .k2, hiddenControl: .k1)
+            ])
+        )
+        XCTAssertEqual(HIDKeyboardReportCollisionAnalyzer.rolloverCollisions(among: bindings), [])
+    }
+
     func testIndividuallyParseableMultiKeyReportsExposeRolloverCapacityPair() {
         let first = "r6:00 04 05 06 07 00 00"
         let second = "r6:00 08 09 0A 0B 00 00"

@@ -182,13 +182,45 @@ final class HIDService {
 
         let isEmptyReport = payloadBytes.allSatisfy({ $0 == 0 })
 
+        if reportID == 2 {
+            // Report 2 is a vendor bitmask collection, not a generic
+            // keyboard stream. Drop malformed/unknown states at the HID
+            // boundary so neither learning nor runtime routing can turn an
+            // unverified packet into a K control. The parser also enforces
+            // the F0 marker, ten-bit mask, and zero-padding contract.
+            let payload = payloadBytes.map { String(format: "%02X", $0) }.joined(separator: " ")
+            guard payloadBytes.count >= 3,
+                  HIDKeyboardReport(signature: "r2:\(payload)") != nil else {
+                return
+            }
+        }
+
+        if reportID == 2,
+           payloadBytes.count > 1,
+           payloadBytes.first == 0xF0,
+           payloadBytes.dropFirst().allSatisfy({ $0 == 0 }) {
+            // The remapped K-button collection uses report 2 with an F0
+            // marker followed by a padded bitmask. Its all-zero mask is the
+            // physical release boundary, even though the marker itself
+            // means this is not an empty HID packet.
+            let payload = payloadBytes.map { String(format: "%02X", $0) }.joined(separator: " ")
+            let signature = "r2:\(payload)"
+            lastEvent = signature
+            recentReports.insert(signature, at: 0)
+            recentReports = Array(recentReports.prefix(8))
+            logger.info("HID input: \(signature, privacy: .public)")
+            onInput?(signature)
+            return
+        }
+
         if isEmptyReport {
             // The supported remote is a composite HID device. Its mouse and
             // digitizer collections (report IDs 1, 7, and 9) can emit empty
             // packets while a report-6 keyboard key is still held. Those
             // packets are not keyboard releases and must not terminate the
-            // modifier cycle in MappingStore. Report 6 is the only learned
-            // K-button collection and remains the sole release boundary.
+            // K-button cycle in MappingStore. Report 6 empty packets release
+            // the legacy boot-keyboard collection; the report-2 F0/all-zero
+            // boundary is handled above.
             guard reportID == 6 else { return }
 
             if report6ControlIsActive {

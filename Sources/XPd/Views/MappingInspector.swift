@@ -250,21 +250,36 @@ struct MappingInspector: View {
         if store.activeRealm == .standard {
             let kControls = RemoteControl.allCases.filter(\.isMIDIButton)
             let learnedCount = kControls.reduce(into: 0) { count, control in
-                if store.hidBinding(for: control).flatMap(HIDKeyboardReport.init(signature:)) != nil {
+                if store.hidBinding(for: control)
+                    .flatMap(HIDKeyboardReport.init(signature:))?
+                    .isCompatibleIndividualBinding == true {
                     count += 1
                 }
+            }
+            let invalidCount = kControls.reduce(into: 0) { count, control in
+                guard let binding = store.hidBinding(for: control),
+                      let report = HIDKeyboardReport(signature: binding),
+                      !report.isCompatibleIndividualBinding else {
+                    return
+                }
+                count += 1
             }
             let collisions = store.standardHIDCollisions()
             let rolloverCollisions = store.standardHIDRolloverCollisions()
 
             GroupBox("K-input compatibility") {
                 VStack(alignment: .leading, spacing: 6) {
-                    if learnedCount == kControls.count && collisions.isEmpty && rolloverCollisions.isEmpty {
+                    if learnedCount == kControls.count && invalidCount == 0
+                        && collisions.isEmpty && rolloverCollisions.isEmpty {
                         Label("All ten learned K inputs are independent.", systemImage: "checkmark.circle.fill")
                             .foregroundStyle(.green)
                     } else if collisions.isEmpty && rolloverCollisions.isEmpty {
-                        Text("Learned \(learnedCount) of \(kControls.count) parseable K inputs. Learn all ten to verify compatibility.")
+                        Text("Learned \(learnedCount) of \(kControls.count) compatible individual K inputs. Learn all ten to verify compatibility.")
                             .foregroundStyle(.secondary)
+                        if invalidCount > 0 {
+                            Text("\(invalidCount) saved input(s) are composite or empty report-2 states, not individual one-hot K bindings.")
+                                .foregroundStyle(.orange)
+                        }
                     } else {
                         if !collisions.isEmpty {
                             Text("Learned keyboard assignments overlap:")
@@ -280,7 +295,11 @@ struct MappingInspector: View {
                                 Text("• \(collision.firstControl.rawValue) + \(collision.secondControl.rawValue) require \(collision.combinedOrdinaryKeyCount) ordinary keys")
                             }
                         }
-                        Text("This is inferred from the learned report-6 bindings, not a live hardware observation. Relearn affected buttons with distinct shortcuts in the remote settings.")
+                        if invalidCount > 0 {
+                            Text("\(invalidCount) saved input(s) are composite or empty report-2 states, not individual one-hot K bindings.")
+                                .foregroundStyle(.orange)
+                        }
+                        Text("This is inferred from the learned report-2 or report-6 bindings, not a live hardware observation. Relearn affected buttons with distinct shortcuts in the remote settings.")
                             .foregroundStyle(.secondary)
                     }
                 }
