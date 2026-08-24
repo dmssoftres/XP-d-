@@ -43,6 +43,15 @@ final class ActionRunnerForegroundingTests: XCTestCase {
             ),
             .notForegrounded
         )
+        XCTAssertEqual(
+            ActionRunner.foregroundVerification(
+                applicationIsActive: false,
+                applicationIsHidden: false,
+                targetWindowIsMinimized: false
+            ),
+            .notForegrounded,
+            "A visible but background application still needs activation"
+        )
     }
 
     func testDirectActivationPollsThenFallsBackAfterVerificationBudget() {
@@ -146,6 +155,21 @@ final class ActionRunnerForegroundingTests: XCTestCase {
         )
     }
 
+    func testExplicitApplicationFallbackMatchesOnlyTheRequestedBundlePath() {
+        XCTAssertTrue(
+            ActionRunner.applicationPathsMatch(
+                requestedPath: "/Applications/Demo.app",
+                runningURL: URL(fileURLWithPath: "/Applications/Demo.app")
+            )
+        )
+        XCTAssertFalse(
+            ActionRunner.applicationPathsMatch(
+                requestedPath: "/Applications/Demo.app",
+                runningURL: URL(fileURLWithPath: "/Applications/Other.app")
+            )
+        )
+    }
+
     func testActivationCompletionDistinguishesUnknownWindowVisibility() {
         let visible = ActionRunner.activationResult(
             displayName: "Demo",
@@ -164,6 +188,39 @@ final class ActionRunnerForegroundingTests: XCTestCase {
             verification: .foregroundedWindowStateUnknown
         )
         XCTAssertEqual(unknown, .success("Activated Menu Bar Demo; window visibility unavailable"))
+    }
+
+    func testActivationCompletionReportsAccessibilityRequirementForWindowRestore() {
+        XCTAssertEqual(
+            ActionRunner.activationResult(
+                displayName: "Demo",
+                promptForAccess: true,
+                hasAccessibilityAccess: false,
+                restoreFailed: false,
+                verification: .foregroundedWindowVisible
+            ),
+            .failure("Activated Demo; allow XP[d] in Accessibility to restore minimized windows")
+        )
+        XCTAssertEqual(
+            ActionRunner.activationResult(
+                displayName: "Demo",
+                promptForAccess: false,
+                hasAccessibilityAccess: true,
+                restoreFailed: true,
+                verification: .foregroundedWindowVisible
+            ),
+            .failure("Activated Demo, but could not restore its windows")
+        )
+        XCTAssertEqual(
+            ActionRunner.activationResult(
+                displayName: "Demo",
+                promptForAccess: false,
+                hasAccessibilityAccess: true,
+                restoreFailed: false,
+                verification: .notForegrounded
+            ),
+            .failure("Could not activate Demo")
+        )
     }
 
     func testActivationFailureCompletionIsUseful() {

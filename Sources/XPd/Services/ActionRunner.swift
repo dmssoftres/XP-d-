@@ -237,19 +237,24 @@ final class ActionRunner {
         }
 
         if let runningApplication = runningApplication(matching: requestedName) {
-            if mapping.action == .toggleApplication {
+            switch mapping.action {
+            case .openApplication:
+                // Open is one-way: a mapped Open action always restores and
+                // activates the selected app. It must never enter Toggle's
+                // minimize branch, even when the app is already frontmost.
+                openApplication(
+                    runningApplication,
+                    requestedName: requestedName,
+                    completion: completion
+                )
+            case .toggleApplication:
                 toggle(
                     runningApplication,
                     requestedName: requestedName,
                     completion: completion
                 )
-            } else {
-                restore(
-                    runningApplication,
-                    requestedName: requestedName,
-                    promptForAccess: false,
-                    completion: completion
-                )
+            default:
+                completion(.failure("Unsupported application action"))
             }
             return
         }
@@ -294,6 +299,22 @@ final class ActionRunner {
                 )
             }
         }
+    }
+
+    /// Executes the one-way Open application behavior for an already-running
+    /// target. Restoration and activation remain shared with Toggle's restore
+    /// branch, while only Toggle is allowed to minimize.
+    private func openApplication(
+        _ application: NSRunningApplication,
+        requestedName: String,
+        completion: @escaping @MainActor (ActionExecutionResult) -> Void
+    ) {
+        restore(
+            application,
+            requestedName: requestedName,
+            promptForAccess: false,
+            completion: completion
+        )
     }
 
     private func executeMacOSShortcut(
