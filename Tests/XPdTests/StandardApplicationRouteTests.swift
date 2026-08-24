@@ -139,7 +139,7 @@ final class StandardApplicationRouteTests: XCTestCase {
         XCTAssertEqual(routes.first?.modifierControls, [.k10])
     }
 
-    func testOverflowSourceRoutesRemainDeterministicForBoundedPresentation() {
+    func testOverflowSourceRoutesRemainDeterministicForFourPositionPresentation() {
         let store = makeStore()
         store.update(Mapping(action: .openApplication, command: "One"), for: .k1, gesture: .tap)
         store.update(Mapping(action: .openApplication, command: "Two"), for: .k1, gesture: .hold)
@@ -161,11 +161,15 @@ final class StandardApplicationRouteTests: XCTestCase {
 
         let routes = store.standardApplicationRoutes(for: .k1)
         let selection = standardApplicationRouteDisplaySelection(routes)
+        let repeatedSelection = standardApplicationRouteDisplaySelection(routes)
 
         XCTAssertEqual(routes.map(\.target), ["One", "Two", "Three", "Four", "Five"])
-        XCTAssertEqual(selection.visible.map(\.target), ["One", "Two", "Four"])
-        XCTAssertEqual(selection.hiddenCount, 2)
+        XCTAssertEqual(selection.visible.map(\.target), ["One", "Two", "Three", "Four"])
+        XCTAssertEqual(selection.hiddenCount, 1)
         XCTAssertEqual(selection.visible.last?.modifierControls, [.k10])
+        XCTAssertEqual(repeatedSelection.visible.map(\.target), selection.visible.map(\.target))
+        XCTAssertEqual(repeatedSelection.visible.map(\.modifierControls), selection.visible.map(\.modifierControls))
+        XCTAssertEqual(repeatedSelection.hiddenCount, selection.hiddenCount)
     }
 
     private func makeStore() -> MappingStore {

@@ -450,15 +450,27 @@ struct RemoteView: View {
         hiddenCount: Int,
         height: CGFloat
     ) -> some View {
-        HStack(spacing: 1) {
-            ForEach(routes) { route in
-                applicationRouteIndicator(route)
+        ZStack {
+            VStack(spacing: 0) {
+                HStack(spacing: 0) {
+                    applicationRouteSlot(route(at: 0, in: routes))
+                    Spacer(minLength: 0)
+                    applicationRouteSlot(route(at: 1, in: routes))
+                }
+
+                Spacer(minLength: 0)
+
+                HStack(spacing: 0) {
+                    applicationRouteSlot(route(at: 2, in: routes))
+                    Spacer(minLength: 0)
+                    applicationRouteSlot(route(at: 3, in: routes))
+                }
             }
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.horizontal, 2)
-        .padding(.bottom, 4)
-        .overlay(alignment: .bottomTrailing) {
+            .padding(.horizontal, 3)
+            // Keep the two route rows spatially distinct from the centered Kx.
+            // Corner badges remain independent overlays at the key boundary.
+            .padding(.vertical, 3)
+
             if hiddenCount > 0 {
                 Text("+\(hiddenCount)")
                     .font(.system(size: 6, weight: .bold, design: .rounded))
@@ -466,13 +478,29 @@ struct RemoteView: View {
                     .padding(.horizontal, 2)
                     .frame(height: 10)
                     .background(.black.opacity(0.68), in: Capsule())
-                    .offset(x: 1, y: 2)
+                    .offset(y: 13)
                     .allowsHitTesting(false)
             }
         }
-        .frame(maxWidth: .infinity, minHeight: height - 14, maxHeight: height - 14, alignment: .bottom)
+        .frame(maxWidth: .infinity, minHeight: height, maxHeight: height)
         .allowsHitTesting(false)
         .accessibilityHidden(true)
+    }
+
+    private func route(at index: Int, in routes: [StandardApplicationRoute]) -> StandardApplicationRoute? {
+        guard routes.indices.contains(index) else { return nil }
+        return routes[index]
+    }
+
+    @ViewBuilder
+    private func applicationRouteSlot(_ route: StandardApplicationRoute?) -> some View {
+        if let route {
+            applicationRouteIndicator(route)
+                .frame(width: 18, height: 18)
+        } else {
+            Color.clear
+                .frame(width: 18, height: 18)
+        }
     }
 
     @ViewBuilder
@@ -614,7 +642,7 @@ struct RemoteView: View {
 func standardApplicationRouteDisplaySelection(
     _ routes: [StandardApplicationRoute]
 ) -> (visible: [StandardApplicationRoute], hiddenCount: Int) {
-    let capacity = 3
+    let capacity = 4
     guard routes.count > capacity else {
         return (routes, 0)
     }
