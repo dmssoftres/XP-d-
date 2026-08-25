@@ -2046,6 +2046,14 @@ final class MappingStore {
         profileSelectorTimeoutGeneration
     }
 
+    var midiOverlayPresentationForTesting: MIDIOverlayPresentation? {
+        inputOverlay.midiPresentationForTesting
+    }
+
+    func clearMIDIOverlayForTesting() {
+        inputOverlay.clearMIDI()
+    }
+
     func simulateProfileSelectorTimeoutForTesting() {
         guard isProfileSelectorVisible else { return }
         closeProfileSelector()
@@ -3171,7 +3179,6 @@ final class MappingStore {
             self.pendingProfileName = nil
             self.cancelProfileSelectorTimeout()
             self.inputOverlay.hideProfileSelector()
-            self.syncMIDIOverlay(layer: .function)
         }
     }
 
@@ -3183,7 +3190,6 @@ final class MappingStore {
             releaseMIDIControl(.wheelCenter, layer: 2)
             fnIsActive = false
             isWheelCenterHeld = false
-            syncMIDIOverlay()
             return
         }
         isWheelCenterHeld = false
@@ -3308,11 +3314,6 @@ final class MappingStore {
             if updateSessionWheelOffset(direction: direction, mapping: mapping, layer: layer) {
                 return
             }
-            syncMIDIOverlay(
-                layer: layer,
-                control: control,
-                summary: midiWheelOverlaySummary(mapping, control: control)
-            )
             enqueueMIDICommand { service in
                 await service.wheel(direction, mapping: mapping)
             }
@@ -3323,7 +3324,6 @@ final class MappingStore {
             fnIsActive = true
             activeMIDIControls.insert(control)
             midiControlLayers[control] = 2
-            syncMIDIOverlay(layer: .function)
             return
         }
 
@@ -3335,11 +3335,6 @@ final class MappingStore {
         )
         activeMIDIControls.insert(control)
         midiControlLayers[control] = layerNumber
-        syncMIDIOverlay(
-            layer: layer,
-            control: control,
-            summary: midiButtonOverlaySummary(mapping, control: control)
-        )
         let origin = MIDIOutputService.Origin(control.rawValue, layer: layerNumber)
         enqueueMIDICommand { service in
             await service.sendButton(mapping, origin: origin)
@@ -3348,9 +3343,6 @@ final class MappingStore {
 
     private func handleMIDIControlRelease(_ control: RemoteControl) {
         guard activeMIDIControls.contains(control) else {
-            if control.isWheelRotation {
-                syncMIDIOverlay()
-            }
             return
         }
         let layer = midiControlLayers[control] ?? (fnIsActive ? 2 : 1)
@@ -3360,14 +3352,8 @@ final class MappingStore {
             enqueueMIDICommand { service in
                 await service.releaseLayer(2)
             }
-            syncMIDIOverlay()
         } else {
             releaseMIDIControl(control, layer: layer)
-            syncMIDIOverlay(
-                layer: fnIsActive ? .function : .primary,
-                control: nil,
-                summary: nil
-            )
         }
     }
 
@@ -3545,65 +3531,18 @@ final class MappingStore {
         }
     }
 
-    /// Keeps the persistent lock card in sync with the active realm while
-    /// leaving profile-selector presentation in the model's higher-priority
-    /// slot. Trigger details are deliberately ephemeral and are cleared on
-    /// release or any MIDI reset.
-    private func syncMIDIOverlay(
-        layer: MIDIMappingLayer? = nil,
-        control: RemoteControl? = nil,
-        summary: String? = nil
-    ) {
+    /// Keeps explicit realm/profile feedback in sync with the active realm
+    /// while leaving profile-selector presentation in the model's
+    /// higher-priority slot. MIDI performance never calls this method.
+    private func syncMIDIOverlay() {
         guard activeRealm == .midi else {
             inputOverlay.clearMIDI()
             return
         }
         inputOverlay.showMIDI(
             profileName: profileName,
-            layer: layer ?? (fnIsActive ? .function : .primary),
-            control: control,
-            summary: summary
+            layer: fnIsActive ? .function : .primary
         )
-    }
-
-    private func midiButtonOverlaySummary(
-        _ mapping: MIDIButtonMapping,
-        control: RemoteControl
-    ) -> String {
-        let prefix = control.overlayLabel
-        switch mapping.kind {
-        case .note:
-            return prefix + " · Note " + String(mapping.note) + " · Ch " + String(mapping.channel) + " · Vel " + String(mapping.velocity)
-        case .cc:
-            return prefix + " · CC " + String(mapping.controller) + " · Ch " + String(mapping.channel) + " · " + String(mapping.pressValue)
-        case .program:
-            return prefix + " · PC " + String(mapping.program) + " · Ch " + String(mapping.channel)
-        case .chord:
-            return prefix + " · Chord " + mapping.chord.map(String.init).joined(separator: ",") + " · Ch " + String(mapping.channel)
-        case .noAction:
-            return prefix + " · No action"
-        }
-    }
-
-    private func midiWheelOverlaySummary(
-        _ mapping: MIDIWheelMapping,
-        control: RemoteControl
-    ) -> String {
-        let direction = control == .wheelCW ? "↷" : "↶"
-        switch mapping.kind {
-        case .relativeCC:
-            return direction + " · CC " + String(mapping.controller) + " · Ch " + String(mapping.channel)
-        case .absoluteCC:
-            return direction + " · Absolute CC " + String(mapping.controller) + " · Ch " + String(mapping.channel)
-        case .pitchBendNudgeReturn:
-            return direction + " · Pitch Bend · Ch " + String(mapping.channel)
-        case .transpose:
-            return direction + " · Transpose · " + String(mapping.transposeSemitones) + " st"
-        case .drumBank:
-            return direction + " · Drum Bank · " + String(mapping.drumBankStep)
-        case .noAction:
-            return direction + " · No action"
-        }
     }
 
     /// Applies the two stateful performance wheel modes locally. The output
@@ -3638,11 +3577,6 @@ final class MappingStore {
             return false
         }
         lastMIDIStatus = status
-        syncMIDIOverlay(
-            layer: layer,
-            control: direction == .clockwise ? .wheelCW : .wheelCCW,
-            summary: status
-        )
         return true
     }
 

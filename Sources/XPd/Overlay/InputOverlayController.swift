@@ -157,6 +157,10 @@ final class InputOverlayController {
         }
     }
 
+    var midiPresentationForTesting: MIDIOverlayPresentation? {
+        model.midiState
+    }
+
     func showStatusNotice(title: String, message: String, systemImage: String) {
         guard model.isEnabled else { return }
         ensureVisible()

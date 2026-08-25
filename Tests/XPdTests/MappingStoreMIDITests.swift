@@ -128,6 +128,98 @@ final class MappingStoreMIDITests: XCTestCase {
         XCTAssertEqual(store.activeRealm, .standard)
     }
 
+    func testEnteringAndSelectingMIDIProfilePresentsExplicitFeedback() throws {
+        let store = makeStore()
+        _ = try store.addMIDIProfile(named: "Performance")
+
+        XCTAssertEqual(store.midiOverlayPresentationForTesting?.profileName, "Performance")
+
+        store.clearMIDIOverlayForTesting()
+        XCTAssertNil(store.midiOverlayPresentationForTesting)
+
+        XCTAssertTrue(store.selectProfile("Global"))
+        XCTAssertNil(store.midiOverlayPresentationForTesting)
+        XCTAssertTrue(store.selectProfile("Performance"))
+        XCTAssertEqual(store.midiOverlayPresentationForTesting?.profileName, "Performance")
+    }
+
+    func testMIDIButtonChordFnAndWheelPerformanceDoNotRecreateOverlay() throws {
+        let store = try makeMIDIStore(
+            settings: MIDIProfileSettings(
+                fnControl: .k10,
+                primaryButtons: [
+                    .init(
+                        control: .k1,
+                        mapping: MIDIButtonMapping(
+                            kind: .chord,
+                            chord: [48, 52, 55],
+                            interaction: .momentary
+                        )
+                    )
+                ],
+                primaryWheel: MIDIWheelMapping(kind: .relativeCC, controller: 16)
+            )
+        )
+
+        store.simulateMIDIControlPressForTesting(.k1)
+        XCTAssertNil(store.midiOverlayPresentationForTesting)
+        store.simulateMIDIControlReleaseForTesting(.k1)
+        XCTAssertNil(store.midiOverlayPresentationForTesting)
+
+        store.simulateMIDIControlPressForTesting(.k10)
+        XCTAssertNil(store.midiOverlayPresentationForTesting)
+        store.simulateMIDIControlReleaseForTesting(.k10)
+        XCTAssertNil(store.midiOverlayPresentationForTesting)
+
+        store.simulateMIDIControlPressForTesting(.wheelCW)
+        XCTAssertNil(store.midiOverlayPresentationForTesting)
+        store.simulateMIDIControlReleaseForTesting(.wheelCW)
+        XCTAssertNil(store.midiOverlayPresentationForTesting)
+    }
+
+    func testStatefulWheelPerformanceDoesNotRecreateOverlay() throws {
+        for wheelKind in [MIDIWheelKind.transpose, .drumBank] {
+            let store = try makeMIDIStore(
+                name: wheelKind.rawValue,
+                settings: MIDIProfileSettings(
+                    primaryButtons: [
+                        .init(
+                            control: .k1,
+                            mapping: MIDIButtonMapping(kind: .note, note: 60)
+                        )
+                    ],
+                    primaryWheel: MIDIWheelMapping(kind: wheelKind)
+                )
+            )
+
+            store.simulateMIDIControlPressForTesting(.wheelCW)
+            XCTAssertNil(store.midiOverlayPresentationForTesting)
+            store.simulateMIDIControlReleaseForTesting(.wheelCW)
+            XCTAssertNil(store.midiOverlayPresentationForTesting)
+        }
+    }
+
+    func testMIDIProfileSelectorStaysVisibleAndConfirmationRestoresFeedback() throws {
+        let store = makeStore()
+        _ = try store.addMIDIProfile(named: "Performance")
+        _ = try store.addMIDIProfile(named: "Alternate")
+        store.clearMIDIOverlayForTesting()
+
+        store.simulateHIDInputForTesting("wheel:center")
+        XCTAssertTrue(store.isProfileSelectorVisibleForTesting)
+        XCTAssertNil(store.midiOverlayPresentationForTesting)
+
+        store.simulateHIDInputForTesting("wheel:+")
+        XCTAssertTrue(store.isProfileSelectorVisibleForTesting)
+        XCTAssertEqual(store.pendingProfileNameForTesting, "Performance")
+        XCTAssertNil(store.midiOverlayPresentationForTesting)
+
+        store.simulateHIDInputForTesting(nil)
+        XCTAssertFalse(store.isProfileSelectorVisibleForTesting)
+        XCTAssertEqual(store.profileName, "Performance")
+        XCTAssertEqual(store.midiOverlayPresentationForTesting?.profileName, "Performance")
+    }
+
     func testRenamingRememberedMIDIProfilePreservesWorkspaceRestoration() throws {
         let store = makeStore()
         _ = try store.addMIDIProfile(named: "Performance")
@@ -322,5 +414,16 @@ final class MappingStoreMIDITests: XCTestCase {
 
     private func makeStore() -> MappingStore {
         MappingStore(userDefaults: defaults, startHardware: false)
+    }
+
+    private func makeMIDIStore(
+        name: String = "Performance",
+        settings: MIDIProfileSettings
+    ) throws -> MappingStore {
+        let store = makeStore()
+        _ = try store.addMIDIProfile(named: name, settings: settings)
+        store.clearMIDIOverlayForTesting()
+        XCTAssertNil(store.midiOverlayPresentationForTesting)
+        return store
     }
 }
