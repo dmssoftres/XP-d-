@@ -101,7 +101,7 @@ final class MappingStoreGestureTests: XCTestCase {
         scheduler.advance(by: 0.30)
 
         store.simulateHIDInputForTesting(k1Signature)
-        scheduler.advance(by: 0.72)
+        scheduler.advance(by: 0.50)
         store.simulateHIDInputForTesting(nil)
 
         pressAndReleaseK1(store)
@@ -127,7 +127,7 @@ final class MappingStoreGestureTests: XCTestCase {
 
         store.simulateHIDInputForTesting(k1Signature)
         store.update(Mapping(action: .openApplication, command: "Calculator"), for: .k1, gesture: .tap)
-        scheduler.advance(by: 0.72)
+        scheduler.advance(by: 0.50)
 
         XCTAssertEqual(executed.map(\.command), ["Calculator"])
         XCTAssertEqual(executed.first?.action, .toggleApplication)
@@ -170,7 +170,7 @@ final class MappingStoreGestureTests: XCTestCase {
 
         store.simulateHIDInputForTesting(k1Signature)
         store.simulateHIDInputForTesting(k1Signature)
-        scheduler.advance(by: 0.72)
+        scheduler.advance(by: 0.50)
         scheduler.advance(by: 1)
         store.simulateHIDInputForTesting(nil)
 
@@ -930,7 +930,7 @@ final class MappingStoreGestureTests: XCTestCase {
         store.update(Mapping(action: .openApplication, command: "normal hold"), for: .k3, gesture: .hold)
 
         store.simulateHIDInputForTesting(k3Signature)
-        scheduler.advance(by: 0.72)
+        scheduler.advance(by: 0.50)
         store.simulateHIDInputForTesting(nil)
 
         XCTAssertEqual(executed, ["normal hold"])
@@ -984,7 +984,7 @@ final class MappingStoreGestureTests: XCTestCase {
 
         store.simulateHIDInputForTesting(k1Signature)
         store.simulateHIDInputForTesting("r6:01 11 00 00 00 00 00")
-        scheduler.advance(by: 0.72)
+        scheduler.advance(by: 0.50)
         store.simulateHIDInputForTesting(nil)
 
         XCTAssertTrue(executed.isEmpty)

@@ -2,8 +2,8 @@ import Foundation
 
 struct ButtonGestureTiming: Equatable {
     static let standard = ButtonGestureTiming(
-        holdThreshold: 0.72,
-        doubleTapInterval: 0.30
+        holdThreshold: 0.50,
+        doubleTapInterval: 0.20
     )
 
     let holdThreshold: TimeInterval

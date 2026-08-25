@@ -71,7 +71,84 @@ final class ActionRunnerKeyboardShortcutTests: XCTestCase {
             [123, 123]
         )
         XCTAssertEqual(postedEvents.map(\.type), [.keyDown, .keyUp])
-        XCTAssertTrue(postedEvents.allSatisfy { $0.flags.contains(.maskSecondaryFn) })
+        XCTAssertEqual(
+            postedEvents.map(\.flags),
+            [CGEventFlags.maskSecondaryFn, CGEventFlags.maskSecondaryFn]
+        )
+    }
+
+    func testControlLeftPlaybackAddsImplicitSecondaryFunctionFlagToBothEvents() {
+        let shortcut = KeyboardShortcut(
+            keyCode: 123,
+            modifiers: [.control],
+            displayString: "⌃←"
+        )
+        let postedEvents = executeAndCollect(shortcut)
+        let expectedFlags: CGEventFlags = [.maskControl, .maskSecondaryFn]
+
+        XCTAssertEqual(postedEvents.map(\.type), [.keyDown, .keyUp])
+        XCTAssertEqual(
+            postedEvents.map { $0.getIntegerValueField(.keyboardEventKeycode) },
+            [123, 123]
+        )
+        XCTAssertEqual(postedEvents.map(\.flags), [expectedFlags, expectedFlags])
+    }
+
+    func testPlainNavigationPlaybackAddsImplicitSecondaryFunctionFlag() {
+        for keyCode in [UInt16(115), 116, 117, 119, 121, 123, 124, 125, 126] {
+            let shortcut = KeyboardShortcut(
+                keyCode: keyCode,
+                modifiers: [],
+                displayString: "arrow"
+            )
+            let postedEvents = executeAndCollect(shortcut)
+
+            XCTAssertEqual(postedEvents.map(\.type), [.keyDown, .keyUp])
+            XCTAssertEqual(
+                postedEvents.map { $0.getIntegerValueField(.keyboardEventKeycode) },
+                [Int64(keyCode), Int64(keyCode)]
+            )
+            XCTAssertEqual(
+                postedEvents.map(\.flags),
+                [CGEventFlags.maskSecondaryFn, CGEventFlags.maskSecondaryFn],
+                "Navigation key code \(keyCode) should carry macOS's implicit secondary-function flag"
+            )
+        }
+    }
+
+    func testF1PlaybackDoesNotAddImplicitSecondaryFunctionFlagWithoutExplicitFn() {
+        let shortcut = KeyboardShortcut(
+            keyCode: 122,
+            modifiers: [],
+            displayString: "F1"
+        )
+        let postedEvents = executeAndCollect(shortcut)
+
+        XCTAssertEqual(postedEvents.map(\.type), [.keyDown, .keyUp])
+        XCTAssertEqual(
+            postedEvents.map { $0.getIntegerValueField(.keyboardEventKeycode) },
+            [122, 122]
+        )
+        XCTAssertEqual(postedEvents.map(\.flags), [CGEventFlags(), CGEventFlags()])
+    }
+
+    func testControlLetterPlaybackDoesNotAddSecondaryFunctionFlag() {
+        let shortcut = KeyboardShortcut(
+            keyCode: 35,
+            modifiers: [.control],
+            displayString: "⌃P"
+        )
+        let postedEvents = executeAndCollect(shortcut)
+
+        XCTAssertEqual(postedEvents.map(\.type), [.keyDown, .keyUp])
+        XCTAssertEqual(
+            postedEvents.map { $0.getIntegerValueField(.keyboardEventKeycode) },
+            [35, 35]
+        )
+        XCTAssertEqual(
+            postedEvents.map(\.flags),
+            [CGEventFlags.maskControl, CGEventFlags.maskControl]
+        )
     }
 
     func testKeyboardShortcutFailsWithoutPostEventAccessAndDoesNotPost() {
@@ -148,5 +225,24 @@ final class ActionRunnerKeyboardShortcutTests: XCTestCase {
         ) { result = $0 }
 
         XCTAssertEqual(result, .failure("Keyboard shortcut has an invalid key; re-record it"))
+    }
+
+    private func executeAndCollect(_ shortcut: KeyboardShortcut) -> [CGEvent] {
+        var postedEvents: [CGEvent] = []
+        let runner = ActionRunner(
+            postEventAccessProvider: { true },
+            eventPoster: { postedEvents.append($0) }
+        )
+
+        runner.execute(
+            mapping: Mapping(
+                action: .keyboardShortcut,
+                command: shortcut.displayString,
+                keyboardShortcut: shortcut
+            ),
+            completion: { _ in }
+        )
+
+        return postedEvents
     }
 }

@@ -2,7 +2,10 @@ import AppKit
 import SwiftUI
 
 enum KeyboardShortcutCaptureFormatter {
-    static func shortcut(for event: NSEvent) -> KeyboardShortcut? {
+    static func shortcut(
+        for event: NSEvent,
+        isFunctionModifierPressed: Bool? = nil
+    ) -> KeyboardShortcut? {
         guard event.type == .keyDown, !event.isARepeat else { return nil }
         guard KeyboardShortcutCaptureFormatter.modifier(for: event.keyCode) == nil else {
             return nil
@@ -11,7 +14,17 @@ enum KeyboardShortcutCaptureFormatter {
         let key = keyLabel(for: event)
         guard !key.isEmpty else { return nil }
 
-        let modifiers = modifierSet(for: event.modifierFlags)
+        var modifiers = modifierSet(for: event.modifierFlags)
+        if let isFunctionModifierPressed {
+            if isFunctionModifierPressed {
+                modifiers.insert(.function)
+            } else {
+                // AppKit marks navigation keys as function-key events on some
+                // keyboards even when Globe/Fn is not physically held. Only
+                // the key-63 flagsChanged state is authoritative for capture.
+                modifiers.remove(.function)
+            }
+        }
         return KeyboardShortcut(
             keyCode: event.keyCode,
             modifiers: modifiers,
@@ -109,11 +122,11 @@ struct KeyboardShortcutCaptureResponder: NSViewRepresentable {
         nsView.onKeyDown = onKeyDown
         nsView.onFlagsChanged = onFlagsChanged
         nsView.onEscape = onEscape
-        nsView.requestFirstResponder()
+        nsView.beginCapturing()
     }
 
     static func dismantleNSView(_ nsView: KeyboardShortcutCaptureResponderView, coordinator: ()) {
-        nsView.restorePreviousFirstResponder()
+        nsView.endCapturing()
     }
 }
 
@@ -125,13 +138,24 @@ final class KeyboardShortcutCaptureResponderView: NSView {
     private weak var previousFirstResponder: NSResponder?
     private var hasRequestedFirstResponder = false
     private var firstResponderRequestScheduled = false
+    private var eventTap: CFMachPort?
+    private var eventTapSource: CFRunLoopSource?
+    private var isObservingApplicationLifecycle = false
+    private weak var observedCaptureWindow: NSWindow?
 
     override var acceptsFirstResponder: Bool { true }
     override var canBecomeKeyView: Bool { true }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        requestFirstResponder()
+        beginCapturing()
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil {
+            endCapturing()
+        }
+        super.viewWillMove(toWindow: newWindow)
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
@@ -140,7 +164,19 @@ final class KeyboardShortcutCaptureResponderView: NSView {
         nil
     }
 
-    func requestFirstResponder() {
+    func beginCapturing() {
+        installCaptureLifecycleObserversIfNeeded()
+        requestFirstResponder()
+        startEventTapIfNeeded()
+    }
+
+    func endCapturing() {
+        removeCaptureLifecycleObservers()
+        stopEventTap()
+        restorePreviousFirstResponder()
+    }
+
+    private func requestFirstResponder() {
         guard let window else { return }
         guard window.firstResponder !== self else { return }
 
@@ -193,6 +229,143 @@ final class KeyboardShortcutCaptureResponderView: NSView {
 
     override func flagsChanged(with event: NSEvent) {
         onFlagsChanged?(event)
+    }
+
+    /// A session event tap is active only while this view exists in the key
+    /// recording window. It captures Control-arrow before Mission Control can
+    /// consume that system shortcut, while the first-responder path remains a
+    /// permission-free fallback for ordinary input.
+    private func startEventTapIfNeeded() {
+        guard eventTap == nil,
+              NSApp.isActive,
+              window?.isKeyWindow == true else { return }
+
+        let mask = (CGEventMask(1) << CGEventType.keyDown.rawValue)
+            | (CGEventMask(1) << CGEventType.keyUp.rawValue)
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: mask,
+            callback: Self.eventTapCallback,
+            userInfo: Unmanaged.passUnretained(self).toOpaque()
+        ) else { return }
+
+        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        eventTap = tap
+        eventTapSource = source
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+    }
+
+    private func installCaptureLifecycleObserversIfNeeded() {
+        let center = NotificationCenter.default
+        if !isObservingApplicationLifecycle {
+            center.addObserver(
+                self,
+                selector: #selector(applicationDidBecomeActive),
+                name: NSApplication.didBecomeActiveNotification,
+                object: NSApp
+            )
+            center.addObserver(
+                self,
+                selector: #selector(captureLifecycleDidResign),
+                name: NSApplication.didResignActiveNotification,
+                object: NSApp
+            )
+            isObservingApplicationLifecycle = true
+        }
+
+        guard let window else { return }
+        if observedCaptureWindow !== window {
+            if let observedCaptureWindow {
+                center.removeObserver(self, name: NSWindow.didBecomeKeyNotification, object: observedCaptureWindow)
+                center.removeObserver(self, name: NSWindow.didResignKeyNotification, object: observedCaptureWindow)
+            }
+            center.addObserver(
+                self,
+                selector: #selector(recordingWindowDidBecomeKey),
+                name: NSWindow.didBecomeKeyNotification,
+                object: window
+            )
+            center.addObserver(
+                self,
+                selector: #selector(captureLifecycleDidResign),
+                name: NSWindow.didResignKeyNotification,
+                object: window
+            )
+            observedCaptureWindow = window
+        }
+    }
+
+    private func removeCaptureLifecycleObservers() {
+        let center = NotificationCenter.default
+        if isObservingApplicationLifecycle {
+            center.removeObserver(self, name: NSApplication.didBecomeActiveNotification, object: NSApp)
+            center.removeObserver(self, name: NSApplication.didResignActiveNotification, object: NSApp)
+            isObservingApplicationLifecycle = false
+        }
+        if let observedCaptureWindow {
+            center.removeObserver(self, name: NSWindow.didBecomeKeyNotification, object: observedCaptureWindow)
+            center.removeObserver(self, name: NSWindow.didResignKeyNotification, object: observedCaptureWindow)
+            self.observedCaptureWindow = nil
+        }
+    }
+
+    @objc private func applicationDidBecomeActive() {
+        requestFirstResponder()
+        startEventTapIfNeeded()
+    }
+
+    @objc private func recordingWindowDidBecomeKey() {
+        requestFirstResponder()
+        startEventTapIfNeeded()
+    }
+
+    @objc private func captureLifecycleDidResign() {
+        stopEventTap()
+    }
+
+    private func stopEventTap() {
+        if let eventTap {
+            CGEvent.tapEnable(tap: eventTap, enable: false)
+        }
+        if let eventTapSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), eventTapSource, .commonModes)
+        }
+        eventTapSource = nil
+        eventTap = nil
+    }
+
+    private static let eventTapCallback: CGEventTapCallBack = { _, type, event, userInfo in
+        guard let userInfo else { return Unmanaged.passUnretained(event) }
+        let view = Unmanaged<KeyboardShortcutCaptureResponderView>
+            .fromOpaque(userInfo)
+            .takeUnretainedValue()
+
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if let tap = view.eventTap {
+                CGEvent.tapEnable(tap: tap, enable: true)
+            }
+            return Unmanaged.passUnretained(event)
+        }
+
+        guard NSApp.isActive, view.window?.isKeyWindow == true else {
+            return Unmanaged.passUnretained(event)
+        }
+
+        switch type {
+        case .keyDown:
+            if let appKitEvent = NSEvent(cgEvent: event) {
+                view.keyDown(with: appKitEvent)
+            }
+            return nil
+        case .keyUp:
+            // Keep the matching release away from the system shortcut handler.
+            return nil
+        default:
+            return Unmanaged.passUnretained(event)
+        }
     }
 }
 
@@ -304,7 +477,10 @@ struct KeyboardShortcutCaptureField: View {
             if isRecording {
                 KeyboardShortcutCaptureResponder(
                     onKeyDown: { event in
-                        guard let captured = KeyboardShortcutCaptureFormatter.shortcut(for: event) else {
+                        guard let captured = KeyboardShortcutCaptureFormatter.shortcut(
+                            for: event,
+                            isFunctionModifierPressed: currentModifierFlags.contains(.function)
+                        ) else {
                             return
                         }
                         draftKeyCode = captured.keyCode

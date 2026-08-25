@@ -47,7 +47,7 @@ final class ButtonGestureRecognizerTests: XCTestCase {
 
         recognizer.press(.k1)
         recognizer.release(.k1)
-        scheduler.advance(by: 0.299)
+        scheduler.advance(by: 0.199)
         XCTAssertTrue(gestures.value.isEmpty)
 
         scheduler.advance(by: 0.001)
@@ -58,7 +58,7 @@ final class ButtonGestureRecognizerTests: XCTestCase {
         let (recognizer, scheduler, gestures) = makeRecognizer()
 
         recognizer.press(.k2)
-        scheduler.advance(by: 0.72)
+        scheduler.advance(by: 0.50)
         scheduler.advance(by: 1)
         recognizer.release(.k2)
         scheduler.advance(by: 1)
@@ -84,10 +84,10 @@ final class ButtonGestureRecognizerTests: XCTestCase {
 
         recognizer.press(.k4)
         recognizer.release(.k4)
-        scheduler.advance(by: 0.30)
+        scheduler.advance(by: 0.20)
         recognizer.press(.k4)
         recognizer.release(.k4)
-        scheduler.advance(by: 0.30)
+        scheduler.advance(by: 0.20)
 
         XCTAssertEqual(gestures.value, [
             .init(control: .k4, gesture: .tap),
@@ -114,7 +114,7 @@ final class ButtonGestureRecognizerTests: XCTestCase {
         recognizer.release(.k6)
         scheduler.advance(by: 0.10)
         recognizer.press(.k6)
-        scheduler.advance(by: 0.72)
+        scheduler.advance(by: 0.50)
         recognizer.release(.k6)
         scheduler.advance(by: 1)
 

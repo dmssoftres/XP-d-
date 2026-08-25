@@ -155,7 +155,10 @@ struct RemoteTriggerChordCaptureField: View {
             if isRecording {
                 KeyboardShortcutCaptureResponder(
                     onKeyDown: { event in
-                        guard let captured = KeyboardShortcutCaptureFormatter.shortcut(for: event) else {
+                        guard let captured = KeyboardShortcutCaptureFormatter.shortcut(
+                            for: event,
+                            isFunctionModifierPressed: currentModifierFlags.contains(.function)
+                        ) else {
                             return
                         }
                         draftKeyCode = captured.keyCode

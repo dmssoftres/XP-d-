@@ -41,8 +41,8 @@ and clockwise scrolls down.
 ## Button gestures
 
 K1–K10 recognize Tap, Hold, and Double from the verified button-down and
-generic-release HID stream. Tap waits 0.30 seconds so a second press can become
-Double; Hold fires once after 0.72 seconds while the button remains pressed.
+generic-release HID stream. Tap waits 0.20 seconds so a second press can become
+Double; Hold fires once after 0.50 seconds while the button remains pressed.
 Pending gestures are cancelled when the profile/configuration changes, the
 remote disconnects, learning begins, or another live button displaces the
 current one. Wheel rotation and the device-specific wheel-center profile
@@ -72,14 +72,22 @@ removed independently; the clear button removes either the draft or saved
 shortcut.
 
 Arrow and navigation keys are captured as shortcut keys rather than moving
-focus while the field is recording. The Globe key is represented as `fn` and
-acts only as a modifier, so it must be recorded with another key.
+focus while the field is recording. A plain arrow remains a plain arrow even
+when macOS attaches its internal function-key flag. The Globe key is represented
+as `fn` only when it is physically held and acts only as a modifier, so it must
+be recorded with another key. System-reserved Control-arrow chords are captured
+only while the recording field and XP[d] window are active.
 
 XP[d] stores the recorded physical key code with its modifiers and replays one
 key-down/key-up chord through macOS when the mapping runs. Accessibility
 post-event access is required; physical button input only checks that permission
 silently. Older text-only shortcut mappings remain visible but must be
 re-recorded before XP[d] will execute them.
+
+For arrows, Home, End, Page Up, Page Down, and forward Delete, playback restores
+macOS's internal navigation-function event flag without displaying or storing
+`fn`. This lets shortcuts such as `⌃←` behave like the physical keys while
+keeping Globe/Fn an independent, explicitly captured modifier.
 
 ## Additional Standard actions
 

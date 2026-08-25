@@ -826,7 +826,10 @@ final class ActionRunner {
             return
         }
 
-        let flags = Self.cgEventFlags(for: shortcut.modifiers)
+        let flags = Self.cgEventFlags(
+            for: shortcut.modifiers,
+            keyCode: shortcut.keyCode
+        )
         keyDown.flags = flags
         keyUp.flags = flags
         eventPoster(keyDown)
@@ -835,7 +838,8 @@ final class ActionRunner {
     }
 
     static func cgEventFlags(
-        for modifiers: Set<KeyboardShortcut.Modifier>
+        for modifiers: Set<KeyboardShortcut.Modifier>,
+        keyCode: UInt16? = nil
     ) -> CGEventFlags {
         var flags: CGEventFlags = []
         if modifiers.contains(.command) {
@@ -850,10 +854,26 @@ final class ActionRunner {
         if modifiers.contains(.shift) {
             flags.insert(.maskShift)
         }
-        if modifiers.contains(.function) {
+        // macOS represents the arrow/navigation key family as function-key
+        // events even when the physical Globe/Fn key is not held.  Capturing
+        // deliberately strips that implicit state from the stored modifier
+        // set, so restore it from the key code when replaying the event.
+        // Keep this list aligned with the navigation labels in
+        // KeyboardShortcutCaptureFormatter.keyLabel.  F1…F12 and ordinary
+        // keys must not gain the secondary-function flag implicitly.
+        if modifiers.contains(.function) || keyCode.map(Self.isNavigationKeyCode) == true {
             flags.insert(.maskSecondaryFn)
         }
         return flags
+    }
+
+    private static func isNavigationKeyCode(_ keyCode: UInt16) -> Bool {
+        switch keyCode {
+        case 115, 116, 117, 119, 121, 123, 124, 125, 126:
+            return true
+        default:
+            return false
+        }
     }
 
     func scroll(

@@ -103,13 +103,40 @@ final class KeyboardShortcutCaptureFormatterTests: XCTestCase {
             keyCode: 123
         ))
 
-        let shortcut = try XCTUnwrap(KeyboardShortcutCaptureFormatter.shortcut(for: event))
+        let shortcut = try XCTUnwrap(KeyboardShortcutCaptureFormatter.shortcut(
+            for: event,
+            isFunctionModifierPressed: true
+        ))
         XCTAssertEqual(shortcut.keyCode, 123)
         XCTAssertEqual(
             shortcut.modifiers,
             [.command, .control, .option, .shift, .function]
         )
         XCTAssertEqual(shortcut.displayString, "⌘⌃⌥⇧fn←")
+    }
+
+    func testNavigationFunctionFlagDoesNotImplyPhysicalFn() throws {
+        let event = try XCTUnwrap(NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [.control, .function],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "",
+            charactersIgnoringModifiers: "",
+            isARepeat: false,
+            keyCode: 124
+        ))
+
+        let shortcut = try XCTUnwrap(KeyboardShortcutCaptureFormatter.shortcut(
+            for: event,
+            isFunctionModifierPressed: false
+        ))
+
+        XCTAssertEqual(shortcut.keyCode, 124)
+        XCTAssertEqual(shortcut.modifiers, [.control])
+        XCTAssertEqual(shortcut.displayString, "⌃→")
     }
 
     func testFunctionKeyCodeIsModifierOnlyDuringCapture() throws {

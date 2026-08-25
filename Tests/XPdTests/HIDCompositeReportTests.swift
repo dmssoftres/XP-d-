@@ -341,7 +341,7 @@ final class HIDCompositeReportTests: XCTestCase {
             bytes: report2Bytes(buttons: k10 | k8)
         )
 
-        scheduler.advance(by: 0.71)
+        scheduler.advance(by: 0.49)
         XCTAssertTrue(executed.isEmpty)
         scheduler.advance(by: 0.01)
         XCTAssertEqual(executed, ["K10 + K8 Hold"])
@@ -387,7 +387,7 @@ final class HIDCompositeReportTests: XCTestCase {
             reportID: 2,
             bytes: report2Bytes(buttons: k10 | k8)
         )
-        scheduler.advance(by: 0.72)
+        scheduler.advance(by: 0.50)
 
         XCTAssertEqual(executed, ["K10 + K8 Hold"])
 
@@ -445,7 +445,7 @@ final class HIDCompositeReportTests: XCTestCase {
             reportID: 2,
             bytes: report2Bytes(buttons: k10 | k8)
         )
-        scheduler.advance(by: 0.72)
+        scheduler.advance(by: 0.50)
         store.hid.simulateInputReportForTesting(
             reportID: 2,
             bytes: report2Bytes(buttons: k10)
@@ -455,7 +455,7 @@ final class HIDCompositeReportTests: XCTestCase {
             reportID: 2,
             bytes: report2Bytes(buttons: k10 | k9)
         )
-        scheduler.advance(by: 0.72)
+        scheduler.advance(by: 0.50)
         store.hid.simulateInputReportForTesting(
             reportID: 2,
             bytes: report2Bytes(buttons: k10)
