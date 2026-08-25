@@ -11,7 +11,11 @@ enum KeyboardShortcutCaptureFormatter {
             return nil
         }
 
-        let key = keyLabel(for: event)
+        let keyCode = normalizedKeyCode(
+            for: event.keyCode,
+            isFunctionModifierPressed: isFunctionModifierPressed
+        )
+        let key = keyLabel(for: event, keyCode: keyCode)
         guard !key.isEmpty else { return nil }
 
         var modifiers = modifierSet(for: event.modifierFlags)
@@ -26,10 +30,28 @@ enum KeyboardShortcutCaptureFormatter {
             }
         }
         return KeyboardShortcut(
-            keyCode: event.keyCode,
+            keyCode: keyCode,
             modifiers: modifiers,
             displayString: displayString(key: key, modifiers: modifiers)
         )
+    }
+
+    /// macOS reports the navigation keys as Home/End/Page Up/Page Down when
+    /// the physical Fn/Globe key is held. Preserve the physical arrow key in
+    /// a captured shortcut only when the separate Fn state confirms it was
+    /// held; genuine navigation keys must remain unchanged otherwise.
+    static func normalizedKeyCode(
+        for keyCode: UInt16,
+        isFunctionModifierPressed: Bool?
+    ) -> UInt16 {
+        guard isFunctionModifierPressed == true else { return keyCode }
+        switch keyCode {
+        case 115: return 123 // Home -> Left
+        case 119: return 124 // End -> Right
+        case 116: return 126 // Page Up -> Up
+        case 121: return 125 // Page Down -> Down
+        default: return keyCode
+        }
     }
 
     static func displayString(key: String, modifiers: Set<KeyboardShortcut.Modifier>) -> String {
@@ -73,8 +95,26 @@ enum KeyboardShortcutCaptureFormatter {
         }
     }
 
-    static func keyLabel(for event: NSEvent) -> String {
-        switch event.keyCode {
+    static func keyLabel(
+        for event: NSEvent,
+        isFunctionModifierPressed: Bool? = nil,
+        keyCode: UInt16? = nil
+    ) -> String {
+        let keyCode = keyCode ?? normalizedKeyCode(
+            for: event.keyCode,
+            isFunctionModifierPressed: isFunctionModifierPressed
+        )
+        let knownLabel = keyLabel(for: keyCode)
+        guard knownLabel.isEmpty == false else {
+            return event.charactersIgnoringModifiers?
+                .uppercased()
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        }
+        return knownLabel
+    }
+
+    static func keyLabel(for keyCode: UInt16) -> String {
+        switch keyCode {
         case 36: return "↩"
         case 48: return "⇥"
         case 49: return "Space"
@@ -90,12 +130,7 @@ enum KeyboardShortcutCaptureFormatter {
         case 125: return "↓"
         case 126: return "↑"
         default:
-            if let functionKey = KeyboardShortcut.functionKeyLabel(for: event.keyCode) {
-                return functionKey
-            }
-            return event.charactersIgnoringModifiers?
-                .uppercased()
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return KeyboardShortcut.functionKeyLabel(for: keyCode) ?? ""
         }
     }
 }
@@ -484,7 +519,10 @@ struct KeyboardShortcutCaptureField: View {
                             return
                         }
                         draftKeyCode = captured.keyCode
-                        draftKeyLabel = KeyboardShortcutCaptureFormatter.keyLabel(for: event)
+                        draftKeyLabel = KeyboardShortcutCaptureFormatter.keyLabel(
+                            for: event,
+                            keyCode: captured.keyCode
+                        )
                         draftModifiers = captured.modifiers
                         didEditDraft = true
                     },

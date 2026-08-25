@@ -89,6 +89,100 @@ final class KeyboardShortcutCaptureFormatterTests: XCTestCase {
         }
     }
 
+    func testNormalizesFunctionNavigationKeysBackToArrowsWithControl() throws {
+        let expected: [(raw: UInt16, normalized: UInt16, label: String)] = [
+            (115, 123, "←"),
+            (119, 124, "→"),
+            (116, 126, "↑"),
+            (121, 125, "↓")
+        ]
+
+        for value in expected {
+            let event = try makeKeyEvent(
+                keyCode: value.raw,
+                modifierFlags: [.control, .function]
+            )
+            let shortcut = try XCTUnwrap(KeyboardShortcutCaptureFormatter.shortcut(
+                for: event,
+                isFunctionModifierPressed: true
+            ))
+
+            XCTAssertEqual(shortcut.keyCode, value.normalized)
+            XCTAssertEqual(shortcut.modifiers, [.control, .function])
+            XCTAssertEqual(shortcut.displayString, "⌃fn\(value.label)")
+            XCTAssertEqual(
+                KeyboardShortcutCaptureFormatter.keyLabel(
+                    for: event,
+                    isFunctionModifierPressed: true
+                ),
+                value.label
+            )
+            XCTAssertEqual(
+                KeyboardShortcutCaptureFormatter.keyLabel(for: shortcut.keyCode),
+                value.label
+            )
+        }
+    }
+
+    func testPreservesNavigationKeysWithoutConfirmedPhysicalFunction() throws {
+        let expected: [(raw: UInt16, label: String)] = [
+            (115, "Home"),
+            (119, "End"),
+            (116, "Page Up"),
+            (121, "Page Down")
+        ]
+
+        for value in expected {
+            let event = try makeKeyEvent(
+                keyCode: value.raw,
+                modifierFlags: [.control]
+            )
+
+            for physicalFunctionState in [false, nil] as [Bool?] {
+                let shortcut = try XCTUnwrap(KeyboardShortcutCaptureFormatter.shortcut(
+                    for: event,
+                    isFunctionModifierPressed: physicalFunctionState
+                ))
+
+                XCTAssertEqual(shortcut.keyCode, value.raw)
+                XCTAssertEqual(shortcut.modifiers, [.control])
+                XCTAssertEqual(shortcut.displayString, "⌃\(value.label)")
+                XCTAssertEqual(
+                    KeyboardShortcutCaptureFormatter.keyLabel(
+                        for: event,
+                        isFunctionModifierPressed: physicalFunctionState
+                    ),
+                    value.label
+                )
+            }
+        }
+    }
+
+    func testLeavesRawArrowsAndForwardDeleteUnchangedWithFunction() throws {
+        let values: [(keyCode: UInt16, label: String)] = [
+            (123, "←"),
+            (124, "→"),
+            (125, "↓"),
+            (126, "↑"),
+            (117, "Delete")
+        ]
+
+        for value in values {
+            let event = try makeKeyEvent(
+                keyCode: value.keyCode,
+                modifierFlags: [.control, .function]
+            )
+            let shortcut = try XCTUnwrap(KeyboardShortcutCaptureFormatter.shortcut(
+                for: event,
+                isFunctionModifierPressed: true
+            ))
+
+            XCTAssertEqual(shortcut.keyCode, value.keyCode)
+            XCTAssertEqual(shortcut.modifiers, [.control, .function])
+            XCTAssertEqual(shortcut.displayString, "⌃fn\(value.label)")
+        }
+    }
+
     func testRetainsModifiersWhenCapturingArrowWithFunction() throws {
         let event = try XCTUnwrap(NSEvent.keyEvent(
             with: .keyDown,
@@ -292,5 +386,23 @@ final class KeyboardShortcutCaptureFormatterTests: XCTestCase {
         XCTAssertEqual(decoded.keyboardShortcut?.modifiers, [.command, .shift])
         XCTAssertEqual(decoded.remoteTriggerModifiers, [.command, .shift])
         XCTAssertEqual(decoded.remoteTriggerFunctionKey, 118)
+    }
+
+    private func makeKeyEvent(
+        keyCode: UInt16,
+        modifierFlags: NSEvent.ModifierFlags
+    ) throws -> NSEvent {
+        try XCTUnwrap(NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: modifierFlags,
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "",
+            charactersIgnoringModifiers: "",
+            isARepeat: false,
+            keyCode: keyCode
+        ))
     }
 }

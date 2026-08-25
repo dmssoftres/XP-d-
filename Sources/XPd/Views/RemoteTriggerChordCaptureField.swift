@@ -162,7 +162,10 @@ struct RemoteTriggerChordCaptureField: View {
                             return
                         }
                         draftKeyCode = captured.keyCode
-                        draftKeyDisplay = KeyboardShortcutCaptureFormatter.keyLabel(for: event)
+                        draftKeyDisplay = KeyboardShortcutCaptureFormatter.keyLabel(
+                            for: event,
+                            keyCode: captured.keyCode
+                        )
                         draftModifiers = captured.modifiers
                         didEditKeyboardCondition = true
                     },
