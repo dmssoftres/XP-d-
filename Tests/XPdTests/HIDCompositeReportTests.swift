@@ -606,7 +606,7 @@ final class HIDCompositeReportTests: XCTestCase {
         XCTAssertEqual(executed, ["K10 + K8 Hold", "K10 + K9 Hold"])
     }
 
-    func testReport2ExactCompositeBindingWinsOverBitmaskDecomposition() {
+    func testSavedReport2ExactCompositeBindingWinsOverBitmaskDecomposition() throws {
         let scheduler = TestScheduler()
         var executed: [String] = []
         let store = makeReport2Store(scheduler: scheduler) { mapping, completion in
@@ -615,9 +615,24 @@ final class HIDCompositeReportTests: XCTestCase {
         }
         let compositeMask = report2ButtonBit(.k8) | report2ButtonBit(.k10)
 
-        learnReport2(report2ButtonBit(.k8), for: .k8, in: store)
-        learnReport2(report2ButtonBit(.k10), for: .k10, in: store)
-        learnReport2(compositeMask, for: .k1, in: store)
+        let configuration = XPdConfiguration(
+            profiles: [.init(name: "Global", mappings: [], hidBindings: [])],
+            profileName: "Global",
+            showsInputOverlay: true,
+            hardwareLayouts: [
+                .init(
+                    id: "legacy-composite",
+                    name: "Legacy composite",
+                    bindings: [
+                        .init(control: .k1, signature: report2Signature(compositeMask)),
+                        .init(control: .k8, signature: report2Signature(report2ButtonBit(.k8))),
+                        .init(control: .k10, signature: report2Signature(report2ButtonBit(.k10)))
+                    ]
+                )
+            ],
+            activeHardwareLayoutID: "legacy-composite"
+        )
+        XCTAssertTrue(store.importConfiguration(try configuration.encodedData()))
         XCTAssertTrue(store.setRemoteModifier(.k10, enabled: true))
         store.update(
             Mapping(action: .openApplication, command: "Exact composite"),

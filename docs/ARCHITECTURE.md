@@ -37,7 +37,23 @@ displaced live controls cancel pending gestures. Inherited Hold/Double
 application targets are read at execution time; invalid Tap mappings stop before
 side effects.
 
-Configuration UI/profile-manager edits → `MappingStore` → one ordered version-8 profile collection in `UserDefaults`. Standard K1–K10 titles, designated K-modifier controls, and modifier colours are profile-scoped and excluded from MIDI profiles. Mapping keys include an exact, deterministically encoded set of K-modifier controls; an empty set is the Base layer. The inspector uses one single-choice field to select an individual/saved MOD layer and a separate additive builder to compose active MOD buttons. It also keeps separate presentation-only gesture selections for Base and the currently selected exact MOD layer; every editor operation receives its explicit gesture and layer identity. A mapping stores keyboard modifier flags plus at most one ordinary key condition; the legacy F-key field remains losslessly supported. Renaming a non-Global profile replaces its name identity atomically while preserving order, realm, mappings, HID bindings, button titles, modifier designations, colours, active selection, and remembered workspace targets. Versions 2–7 migrate without dropping supported data; v7 modifiers migrate to Orange. Imports validate realms, remembered profiles, typed MIDI values, exact mapping layers, keyboard trigger keys, bindings, and Standard metadata before one replacement.
+Configuration UI/profile-manager edits → `MappingStore` → schema-v9 persistence
+in `UserDefaults`. One ordered profile collection owns mappings, realm/MIDI
+state, Standard titles, modifier designations, and colours. A separate ordered
+hardware-layout collection owns device HID bindings and one active layout ID.
+Profile creation, renaming, deletion, and switching cannot alter raw device
+identity. Versions 2–8 group exact normalized legacy binding sets into named
+layouts without discarding divergent sets; the old active profile selects the
+initial layout. Portable imports validate all profiles and layouts before one
+atomic replacement, and v9 profile JSON omits `hidBindings`.
+
+Mapping keys include an exact, deterministically encoded set of K-modifier
+controls; an empty set is the Base layer. The inspector uses one single-choice
+field to select an individual/saved MOD layer and a separate additive builder
+to compose active MOD buttons. It keeps separate presentation-only gesture
+selections for Base and the selected exact MOD layer. A mapping stores keyboard
+modifier flags plus at most one ordinary key condition; the legacy F-key field
+remains losslessly supported.
 
 Standard profile activation/modifier enablement → require a non-empty learned HID
 binding for every designated K. Missing input fails closed: activation disables
@@ -75,7 +91,17 @@ reconciles additions and partial releases so releasing a destination while its
 modifier remains held completes the layer without rearming the modifier Base.
 MIDI routing performs the same state diff, presses Fn before newly added
 destinations, and releases destinations before Fn. Report-6 nil/wheel releases
-never clear a separate report-2 held set. HID bindings remain profile-specific.
+never clear a separate report-2 held set. HID bindings come only from the active
+device-level hardware layout and remain unchanged across profile transitions.
+
+Guided Learn All → copy the active layout into session-only candidate state →
+capture K1–K10 in physical order with an explicit release between buttons →
+reject malformed, empty, duplicate, composite, mixed-encoding, masking, and
+rollover-invalid sets → commit all ten once. Wheel and center bindings remain
+untouched. Cancel, disconnect, profile/layout change, or validation failure
+discards the candidate. Layout switching cancels pending Standard gestures and
+learning, resets MIDI/Fn held state, closes the selector, then exposes the new
+binding set.
 
 The owner currently sees K1→F13 through K10→F22 in XPPen's editor. The current
 raw encoding is not established without a new trace. Transport does not select
@@ -159,7 +185,10 @@ Every actual send attempt also emits one transient monitor event back to the
 main-actor store. The MIDI inspector keeps only the newest 100 events and can
 copy or clear them; monitor history is diagnostic state and is never persisted.
 
-Wheel-center hold → open selector with current profile order → wheel rotation updates only the pending highlight → center release activates the highlighted profile and loads its mappings/HID bindings. Adding, renaming, deleting, or importing profiles closes stale selector state.
+Wheel-center hold → open selector with current profile order → wheel rotation
+updates only the pending highlight → center release activates the highlighted
+profile and loads its mappings while retaining the active hardware layout.
+Adding, renaming, deleting, or importing profiles closes stale selector state.
 
 Matching HID connection → BLE PnP read/verification → notify-only FFE0/0002 plus FFE0/0003 subscription → validated `02 F2 01 <percent>` packet → `HIDService` battery state → header and menu-bar UI. Disconnect, identity mismatch, Bluetooth loss, or invalid data clears/withholds the BLE value.
 

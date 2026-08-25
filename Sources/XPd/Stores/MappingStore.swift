@@ -259,9 +259,20 @@ final class MappingStore {
         }
     }
     private(set) var mappings: [MappingKey: Mapping] = [:]
+    /// HID identities belong to the physical remote, not to a profile. The
+    /// profile state below retains a legacy `hidBindings` decode slot only so
+    /// v2-v8 payloads can be migrated without data loss; all live routing
+    /// reads the active hardware layout.
+    private(set) var hardwareLayouts: [XPdConfiguration.HardwareLayout] = []
+    private(set) var activeHardwareLayoutID: String = ""
+    var activeHardwareLayoutName: String {
+        hardwareLayouts.first(where: { $0.id == activeHardwareLayoutID })?.name ?? ""
+    }
     private(set) var hidBindings: [RemoteControl: String] = [:]
     /// K buttons designated as dual-role Standard-mode modifiers. The set is
-    /// profile-scoped and intentionally empty when decoding older data.
+    /// profile-scoped persisted designation. Controls whose current hardware
+    /// layout has no learned input remain designated, but are unavailable at
+    /// runtime until that layout learns them again.
     private(set) var remoteModifierControls: Set<RemoteControl> = []
     /// Profile-scoped presentation metadata for eligible K controls. This is
     /// independent of designation so the selected colour survives a later
@@ -271,6 +282,14 @@ final class MappingStore {
     /// populate this dictionary; titles are shared across gestures.
     private(set) var standardButtonTitles: [RemoteControl: String] = [:]
     private(set) var learningControl: RemoteControl?
+    private(set) var learningAllControl: RemoteControl?
+    private(set) var learningAllProgress: Int = 0
+    private(set) var isLearningAll = false
+    private(set) var isLearningAllAwaitingRelease = false
+    /// Session-only feedback for Learn All. This never enters a profile or
+    /// hardware-layout payload; it is visible only while the captured button
+    /// is awaiting its release boundary.
+    private(set) var learningAllCapturedSignature: String?
     private(set) var lastHIDLearningResult: ActionExecutionResult?
     private(set) var liveControl: RemoteControl?
     private(set) var lastActionResult: ActionExecutionResult?
@@ -424,6 +443,19 @@ final class MappingStore {
         private enum CodingKeys: String, CodingKey {
             case mappings, hidBindings, standardButtonTitles, remoteModifierControls, modifierColors, realm, midiSettings
         }
+
+        /// Current persisted profile payloads deliberately omit the legacy
+        /// per-profile HID field. The decoder above remains permissive so a
+        /// v2-v8 payload can still be read and grouped into hardware layouts.
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(mappings, forKey: .mappings)
+            try container.encode(standardButtonTitles, forKey: .standardButtonTitles)
+            try container.encode(remoteModifierControls, forKey: .remoteModifierControls)
+            try container.encode(modifierColors, forKey: .modifierColors)
+            try container.encode(realm, forKey: .realm)
+            try container.encodeIfPresent(midiSettings, forKey: .midiSettings)
+        }
     }
 
     private struct PersistedProfile: Codable, Equatable {
@@ -431,9 +463,20 @@ final class MappingStore {
         let state: ProfileState
     }
 
+    /// The local defaults payload uses a small private representation so the
+    /// app can retain v8 backups even while the portable XPdConfiguration
+    /// model moves to top-level HardwareLayout records.
+    private struct PersistedHardwareLayout: Codable, Equatable {
+        let id: String
+        let name: String
+        let bindings: [RemoteControl: String]
+    }
+
     private struct PersistedProfiles: Codable, Equatable {
         let version: Int
         let profiles: [PersistedProfile]
+        let hardwareLayouts: [PersistedHardwareLayout]
+        let activeHardwareLayoutID: String?
         let activeProfileName: String
         let activeRealm: ProfileRealm
         let lastStandardProfileName: String?
@@ -444,6 +487,8 @@ final class MappingStore {
         init(
             version: Int,
             profiles: [PersistedProfile],
+            hardwareLayouts: [PersistedHardwareLayout] = [],
+            activeHardwareLayoutID: String? = nil,
             activeProfileName: String,
             activeRealm: ProfileRealm = .standard,
             lastStandardProfileName: String? = nil,
@@ -453,6 +498,8 @@ final class MappingStore {
         ) {
             self.version = version
             self.profiles = profiles
+            self.hardwareLayouts = hardwareLayouts
+            self.activeHardwareLayoutID = activeHardwareLayoutID
             self.activeProfileName = activeProfileName
             self.activeRealm = activeRealm
             self.lastStandardProfileName = lastStandardProfileName
@@ -465,6 +512,8 @@ final class MappingStore {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             version = try container.decode(Int.self, forKey: .version)
             profiles = try container.decodeIfPresent([PersistedProfile].self, forKey: .profiles) ?? []
+            hardwareLayouts = try container.decodeIfPresent([PersistedHardwareLayout].self, forKey: .hardwareLayouts) ?? []
+            activeHardwareLayoutID = try container.decodeIfPresent(String.self, forKey: .activeHardwareLayoutID)
             activeProfileName = try container.decodeIfPresent(String.self, forKey: .activeProfileName) ?? "Global"
             activeRealm = try container.decodeIfPresent(ProfileRealm.self, forKey: .activeRealm) ?? .standard
             lastStandardProfileName = try container.decodeIfPresent(String.self, forKey: .lastStandardProfileName)
@@ -475,14 +524,15 @@ final class MappingStore {
         }
 
         private enum CodingKeys: String, CodingKey {
-            case version, profiles, activeProfileName, activeRealm
+            case version, profiles, hardwareLayouts, activeHardwareLayoutID, activeProfileName, activeRealm
             case lastStandardProfileName, lastMIDIProfileName, midiLocked, workspaceLockControl
         }
     }
 
     private let defaults: UserDefaults
-    private let profilesDefaultsKey = "XPd.profiles.v8"
-    private let previousProfilesDefaultsKey = "XPd.profiles.v7"
+    private let profilesDefaultsKey = "XPd.profiles.v9"
+    private let previousProfilesDefaultsKey = "XPd.profiles.v8"
+    private let preModifierColorsProfilesDefaultsKey = "XPd.profiles.v7"
     private let preRemoteTriggerKeysProfilesDefaultsKey = "XPd.profiles.v6"
     private let preRemoteLayersProfilesDefaultsKey = "XPd.profiles.v5"
     private let preTitlesProfilesDefaultsKey = "XPd.profiles.v4"
@@ -497,6 +547,15 @@ final class MappingStore {
     private let wheelSensitivityDefaultsKey = "XPd.wheelSensitivity.v1"
     private let standardModifierHoldThresholdDefaultsKey = "XPd.standardModifierHoldThreshold.v1"
     private var profileStates: [String: ProfileState] = [:]
+    private var learningAllCandidate: [RemoteControl: String] = [:]
+    private var learningAllCaptured: [RemoteControl: String] = [:]
+    private var learningAllEncoding: HIDKeyboardReport.Encoding?
+    private var learningAllLayoutID: String?
+    /// A selected hardware layout may not expose every persisted modifier.
+    /// Keep that availability separate from the saved designation so merely
+    /// switching layouts cannot erase the user's Standard-layer design.
+    private var unavailableRemoteModifierControls: Set<RemoteControl> = []
+    private var shouldPersistProfilesAfterLoad = true
     private var liveInputGeneration = 0
     private var isProfileSelectorVisible = false
     private var isWheelCenterHeld = false
@@ -648,13 +707,15 @@ final class MappingStore {
         isReplacingConfiguration = false
         defaults.set(profileName, forKey: profileNameDefaultsKey)
         activateProfile(named: profileName)
-        saveAllProfiles()
+        if shouldPersistProfilesAfterLoad {
+            saveAllProfiles()
+        }
 
         hid.onInput = { [weak self] signature in
             self?.handleHIDInput(signature)
         }
         hid.onDisconnect = { [weak self] in
-            if self?.learningControl != nil {
+            if self?.learningControl != nil || self?.isLearningAll == true {
                 self?.lastHIDLearningResult = .failure(
                     "Learning canceled because the remote disconnected."
                 )
@@ -913,7 +974,7 @@ final class MappingStore {
             && modifierControls.allSatisfy {
                 $0 != destination
                     && $0.isModifierEligible
-                    && remoteModifierControls.contains($0)
+                    && isRemoteModifier($0)
             }
     }
 
@@ -941,7 +1002,9 @@ final class MappingStore {
     /// Returns the currently designated Standard-mode K-button modifiers.
     /// MIDI profiles and non-button controls always expose an empty set.
     func isRemoteModifier(_ control: RemoteControl) -> Bool {
-        activeRealm == .standard && remoteModifierControls.contains(control)
+        activeRealm == .standard
+            && remoteModifierControls.contains(control)
+            && !unavailableRemoteModifierControls.contains(control)
     }
 
     /// Returns the profile-scoped colour that should be shown for a K
@@ -976,7 +1039,9 @@ final class MappingStore {
     }
 
     private func suggestedModifierColor(excluding control: RemoteControl?) -> ModifierColor {
-        let activeControls = remoteModifierControls.filter { $0 != control }
+        let activeControls = remoteModifierControls
+            .subtracting(unavailableRemoteModifierControls)
+            .filter { $0 != control }
         let counts = Dictionary(
             uniqueKeysWithValues: ModifierColor.allCases.map { color in
                 (
@@ -1009,6 +1074,7 @@ final class MappingStore {
                 return false
             }
             remoteModifierControls.insert(control)
+            unavailableRemoteModifierControls.remove(control)
             if modifierColors[control] == nil {
                 // Compute before this control participates in the active set;
                 // this matches the store's deterministic suggested colour.
@@ -1020,6 +1086,7 @@ final class MappingStore {
             }
         } else {
             remoteModifierControls.remove(control)
+            unavailableRemoteModifierControls.remove(control)
         }
         sanitizeSelectedMappingModifier()
         save()
@@ -1777,7 +1844,9 @@ final class MappingStore {
         for control: RemoteControl
     ) -> Set<RemoteControl> {
         guard activeRealm == .standard, control.isModifierEligible else { return [] }
-        return modifierControls.intersection(remoteModifierControls).subtracting([control])
+        return modifierControls
+            .intersection(remoteModifierControls.subtracting(unavailableRemoteModifierControls))
+            .subtracting([control])
     }
 
     private func sanitizeSelectedMappingModifier() {
@@ -1793,8 +1862,10 @@ final class MappingStore {
         selectedMappingModifiers = sanitized
     }
 
-    /// Adds a profile with an independent copy of the default mapping/HID
-    /// state and activates it so it is immediately ready for editing.
+    /// Adds a profile with an independent copy of the mapping state and
+    /// activates it so it is immediately ready for editing. HID identity is
+    /// deliberately taken from the active hardware layout and is never
+    /// seeded from a profile default.
     @discardableResult
     func addProfile(named rawName: String) throws -> String {
         try addProfile(named: rawName, realm: .standard, midiSettings: nil)
@@ -1817,13 +1888,14 @@ final class MappingStore {
         } else {
             resolvedMIDISettings = nil
         }
+        cancelLearning()
         cancelPendingButtonGestures()
         closeProfileSelector()
         resetMIDIState(force: true)
         saveActiveProfile()
         profileStates[name] = ProfileState(
             mappings: Self.defaultProfileState().mappings,
-            hidBindings: Self.defaultProfileState().hidBindings,
+            hidBindings: [:],
             realm: realm,
             midiSettings: resolvedMIDISettings
         )
@@ -1870,6 +1942,7 @@ final class MappingStore {
         let name = try validatedProfileName(rawName, excluding: existingName)
         guard name != existingName else { return existingName }
 
+        cancelLearning()
         closeProfileSelector()
         saveActiveProfile()
         guard let state = profileStates.removeValue(forKey: existingName) else {
@@ -1943,6 +2016,7 @@ final class MappingStore {
             throw ProfileError.profileNotFound(name)
         }
 
+        cancelLearning()
         cancelPendingButtonGestures()
         closeProfileSelector()
         if mappingClipboard?.source.profileName == name {
@@ -1964,6 +2038,7 @@ final class MappingStore {
 
     func learnSelectedControl() {
         cancelPendingButtonGestures()
+        cancelLearningAllState()
         lastHIDLearningResult = nil
         learningControl = selectedControl
         liveControl = nil
@@ -1971,7 +2046,7 @@ final class MappingStore {
 
     /// Starts input learning for the selected K button in a MIDI profile.
     /// MIDI mappings remain in the profile's typed settings; this operation
-    /// only replaces the selected control's profile-scoped HID identity.
+    /// replaces the selected control's identity in the active device layout.
     func learnSelectedMIDIControl() {
         guard activeRealm == .midi, selectedControl.isMIDIButton else {
             lastHIDLearningResult = .failure("Select a MIDI K button before relearning its input.")
@@ -1981,15 +2056,65 @@ final class MappingStore {
     }
 
     func cancelLearning() {
+        let wasLearningAll = isLearningAll
         learningControl = nil
+        cancelLearningAllState()
+        if wasLearningAll {
+            resetMIDIState(force: true)
+        }
+    }
+
+    /// Starts an atomic K1…K10 capture. The existing layout is copied into a
+    /// session-only candidate so wheel/center bindings and all non-K inputs
+    /// remain untouched until the complete set validates.
+    func beginLearningAllHIDControls() {
+        cancelPendingButtonGestures()
+        // Learn All consumes the following HID reports, including the
+        // release that would normally end a MIDI note/Fn interaction. Reset
+        // before capture begins so a held control can never be stranded.
+        resetMIDIState(force: true)
+        learningControl = nil
+        lastHIDLearningResult = nil
+        learningAllCandidate = hidBindings
+        learningAllCaptured = [:]
+        learningAllEncoding = nil
+        learningAllLayoutID = activeHardwareLayoutID
+        learningAllProgress = 0
+        learningAllControl = Self.hardwareLearningControls.first
+        isLearningAll = learningAllControl != nil
+        learningAllCapturedSignature = nil
+        liveControl = nil
+    }
+
+    /// Selects an explicitly named physical layout. Runtime gesture, MIDI,
+    /// and in-flight learning state is cleared before the new binding set is
+    /// exposed, so no old control can leak into the new layout.
+    @discardableResult
+    func selectHardwareLayout(id: String) -> Bool {
+        guard hardwareLayouts.contains(where: { $0.id == id }) else {
+            lastActionResult = .failure("Hardware layout not found: \(id).")
+            return false
+        }
+        guard activeHardwareLayoutID != id else { return true }
+        cancelPendingButtonGestures()
+        cancelLearning()
+        resetMIDIState(force: true)
+        closeProfileSelector()
+        activeHardwareLayoutID = id
+        refreshActiveHardwareLayoutBindings()
+        saveAllProfiles()
+        return true
     }
 
     func clearHIDBinding(for control: RemoteControl) {
         if remoteModifierControls.contains(control) {
             cancelPendingButtonGestures()
         }
-        hidBindings.removeValue(forKey: control)
+        var updated = hidBindings
+        updated.removeValue(forKey: control)
+        updateActiveHardwareLayoutBindings(updated)
         if remoteModifierControls.remove(control) != nil {
+            unavailableRemoteModifierControls.remove(control)
             sanitizeSelectedMappingModifier()
             save()
         } else {
@@ -1999,6 +2124,145 @@ final class MappingStore {
 
     func hidBinding(for control: RemoteControl) -> String? {
         hidBindings[control]
+    }
+
+    private static let hardwareLearningControls: [RemoteControl] =
+        RemoteControl.allCases.filter(\.isMIDIButton)
+
+    private func cancelLearningAllState() {
+        learningAllCandidate = [:]
+        learningAllCaptured = [:]
+        learningAllEncoding = nil
+        learningAllLayoutID = nil
+        learningAllCapturedSignature = nil
+        isLearningAllAwaitingRelease = false
+        learningAllControl = nil
+        learningAllProgress = 0
+        isLearningAll = false
+    }
+
+    private func updateActiveHardwareLayoutBindings(_ bindings: [RemoteControl: String]) {
+        guard let index = hardwareLayouts.firstIndex(where: { $0.id == activeHardwareLayoutID }) else {
+            hidBindings = bindings
+            refreshModifierAvailability()
+            return
+        }
+        let normalized = Self.normalizedHIDBindings(bindings)
+        hardwareLayouts[index] = Self.makeHardwareLayout(
+            id: hardwareLayouts[index].id,
+            name: hardwareLayouts[index].name,
+            bindings: normalized
+        )
+        hidBindings = normalized
+        refreshModifierAvailability()
+    }
+
+    private func refreshActiveHardwareLayoutBindings() {
+        guard let layout = hardwareLayouts.first(where: { $0.id == activeHardwareLayoutID }) else {
+            hidBindings = [:]
+            refreshModifierAvailability()
+            return
+        }
+        hidBindings = Self.bindingDictionary(from: layout.bindings)
+        refreshModifierAvailability()
+    }
+
+    private func refreshModifierAvailability() {
+        unavailableRemoteModifierControls = remoteModifierControls.filter { control in
+            guard let binding = hidBindings[control] else { return true }
+            return binding.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+
+    private func failLearningAll(_ message: String) {
+        cancelLearningAllState()
+        lastHIDLearningResult = .failure(message)
+    }
+
+    private func captureLearningAllInput(_ signature: String) {
+        guard isLearningAll,
+              let control = learningAllControl else { return }
+        guard let report = HIDKeyboardReport(signature: signature) else {
+            failLearningAll("Learn All rejected a malformed HID report. Press one K button.")
+            return
+        }
+
+        let normalizedSignature = Self.normalizedHIDSignature(signature)
+        if report.encoding == .report2OneHot, report.oneHotMask == 0 {
+            completeLearningAllRelease()
+            return
+        }
+        if isLearningAllAwaitingRelease {
+            if learningAllCaptured[control] == normalizedSignature {
+                return
+            }
+            failLearningAll("Release the current K button before pressing the next one.")
+            return
+        }
+        switch report.encoding {
+        case .report2OneHot:
+            guard report.isCompatibleIndividualBinding else {
+                failLearningAll("Learn All rejected a report-2 release or composite. Press one K button.")
+                return
+            }
+        case .report6BootKeyboard:
+            guard report.modifierByte != 0 || !report.keyUsages.isEmpty else {
+                failLearningAll("Learn All rejected an empty report-6 input. Press one K button.")
+                return
+            }
+        }
+
+        if let learningAllEncoding, learningAllEncoding != report.encoding {
+            failLearningAll("Learn All rejected mixed report encodings. Capture all K buttons from one HID collection.")
+            return
+        }
+        if learningAllCaptured.values.contains(normalizedSignature) {
+            failLearningAll("Learn All rejected a duplicate HID input. Each K button must have a distinct report.")
+            return
+        }
+
+        learningAllEncoding = report.encoding
+        learningAllCaptured[control] = normalizedSignature
+        learningAllCandidate[control] = normalizedSignature
+        learningAllCapturedSignature = normalizedSignature
+        learningAllProgress += 1
+        isLearningAllAwaitingRelease = true
+    }
+
+    private func completeLearningAllRelease() {
+        guard isLearningAll, isLearningAllAwaitingRelease else { return }
+        isLearningAllAwaitingRelease = false
+        learningAllCapturedSignature = nil
+
+        guard learningAllProgress < Self.hardwareLearningControls.count else {
+            let KControls = Set(Self.hardwareLearningControls)
+            let captured = learningAllCandidate.filter { KControls.contains($0.key) }
+            guard captured.count == KControls.count,
+                  captured.values.count == Set(captured.values).count else {
+                failLearningAll("Learn All could not produce ten distinct K bindings.")
+                return
+            }
+            guard HIDKeyboardReportCollisionAnalyzer.collisions(among: captured).isEmpty else {
+                failLearningAll("Learn All rejected masking collisions among the captured K bindings.")
+                return
+            }
+            guard HIDKeyboardReportCollisionAnalyzer.rolloverCollisions(among: captured).isEmpty else {
+                failLearningAll("Learn All rejected a keyboard rollover collision among the captured K bindings.")
+                return
+            }
+            guard learningAllLayoutID == activeHardwareLayoutID else {
+                failLearningAll("Learn All was canceled because the hardware layout changed.")
+                return
+            }
+
+            updateActiveHardwareLayoutBindings(learningAllCandidate)
+            saveHIDBindings()
+            cancelLearningAllState()
+            lastHIDLearningResult = .success("Learned K1–K10 into the active hardware layout.")
+            return
+        }
+
+        learningAllControl = Self.hardwareLearningControls[learningAllProgress]
     }
 
     /// Reports order-specific Standard layer collisions for the selected
@@ -2075,7 +2339,7 @@ final class MappingStore {
             return XPdConfiguration.Profile(
                 name: name,
                 mappings: Self.mappingEntries(from: state.mappings),
-                hidBindings: Self.hidBindingEntries(from: state.hidBindings),
+                hidBindings: [],
                 realm: state.realm,
                 midiSettings: state.midiSettings,
                 standardButtonTitles: Self.standardButtonTitleEntries(from: state.standardButtonTitles),
@@ -2091,7 +2355,9 @@ final class MappingStore {
             lastStandardProfileName: lastStandardProfileName,
             lastMIDIProfileName: lastMIDIProfileName,
             midiLocked: midiLocked,
-            workspaceLockControl: workspaceLockControl
+            workspaceLockControl: workspaceLockControl,
+            hardwareLayouts: hardwareLayouts,
+            activeHardwareLayoutID: activeHardwareLayoutID
         )
 
         do {
@@ -2142,10 +2408,6 @@ final class MappingStore {
                 )] = mapping
             }
 
-            var importedHIDBindings: [RemoteControl: String] = [:]
-            for entry in profile.hidBindings {
-                importedHIDBindings[entry.control] = entry.signature
-            }
             var importedStandardButtonTitles: [RemoteControl: String] = [:]
             for entry in profile.standardButtonTitles {
                 let title = entry.title.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2158,7 +2420,7 @@ final class MappingStore {
             })
             importedStates[profile.name] = ProfileState(
                 mappings: importedMappings,
-                hidBindings: importedHIDBindings,
+                hidBindings: [:],
                 standardButtonTitles: importedStandardButtonTitles,
                 remoteModifierControls: profile.remoteModifierControls,
                 modifierColors: importedModifierColors,
@@ -2180,12 +2442,17 @@ final class MappingStore {
             return false
         }
 
+        cancelLearning()
         cancelPendingButtonGestures()
         resetMIDIState(force: true)
         isReplacingConfiguration = true
         mappingClipboard = nil
         profileStates = importedStates
         availableProfiles = configuration.profiles.map(\.name)
+        installHardwareLayouts(
+            configuration.hardwareLayouts,
+            activeID: configuration.activeHardwareLayoutID
+        )
         profileName = configuration.profileName
         activeRealm = configuration.activeRealm
         lastStandardProfileName = configuration.lastStandardProfileName
@@ -2291,26 +2558,36 @@ final class MappingStore {
         selectedControl = control
     }
 
-    /// MIDI K-button learning must capture one physical control, not a
+    /// K-button learning must capture one physical control, not a
     /// report-2 snapshot containing several held controls or a release state.
     /// Legacy report-6 remains supported when it contains an actual keyboard
     /// state; its several key slots may represent one configured shortcut.
-    private func midiLearningValidationError(for signature: String) -> String? {
+    private func individualKLearningValidationError(
+        for signature: String,
+        requiresParseableReport: Bool
+    ) -> String? {
         guard let report = HIDKeyboardReport(signature: signature) else {
-            return "MIDI K learning requires a valid individual HID report. Press one K button on the remote."
+            // Existing Standard fixtures and imported legacy layouts may use
+            // opaque test/compatibility signatures. Live report-2 and
+            // report-6 input is always parseable and receives the strict
+            // individual-boundary checks below; MIDI has always required a
+            // parseable physical report.
+            return requiresParseableReport
+                ? "K learning requires a valid individual HID report. Press one K button on the remote."
+                : nil
         }
 
         switch report.encoding {
         case .report2OneHot:
             guard let mask = report.oneHotMask, mask != 0 else {
-                return "MIDI K learning requires one K button, not a report-2 release state."
+                return "K learning requires one K button, not a report-2 release state."
             }
             guard report.isCompatibleIndividualBinding else {
-                return "MIDI K learning rejected a multi-control report. Press only one K button at a time."
+                return "K learning rejected a multi-control report. Press only one K button at a time."
             }
         case .report6BootKeyboard:
             guard report.modifierByte != 0 || !report.keyUsages.isEmpty else {
-                return "MIDI K learning requires a non-empty individual report-6 input. Press one K button."
+                return "K learning requires a non-empty individual report-6 input. Press one K button."
             }
         }
 
@@ -2331,6 +2608,15 @@ final class MappingStore {
                activeRealm == .standard,
                matched.isMIDIButton {
                 remoteTriggerModifierCaptureHandler?(matched)
+            }
+            return
+        }
+
+        if isLearningAll {
+            if let signature {
+                captureLearningAllInput(signature)
+            } else {
+                completeLearningAllRelease()
             }
             return
         }
@@ -2404,9 +2690,11 @@ final class MappingStore {
         }
 
         if let learningControl {
-            if activeRealm == .midi,
-               learningControl.isMIDIButton,
-               let error = midiLearningValidationError(for: signature) {
+            if learningControl.isMIDIButton,
+               let error = individualKLearningValidationError(
+                   for: signature,
+                   requiresParseableReport: activeRealm == .midi
+               ) {
                 self.learningControl = nil
                 lastHIDLearningResult = .failure(error)
                 return
@@ -2421,7 +2709,9 @@ final class MappingStore {
                 )
                 return
             }
-            hidBindings[learningControl] = signature
+            var updatedBindings = hidBindings
+            updatedBindings[learningControl] = Self.normalizedHIDSignature(signature)
+            updateActiveHardwareLayoutBindings(updatedBindings)
             selectedControl = learningControl
             liveControl = learningControl
             self.learningControl = nil
@@ -3261,7 +3551,9 @@ final class MappingStore {
         guard ambiguousStandardCycles.isEmpty,
               !activeStandardModifierCycleConsumed,
               primaries.count == 1,
-              modifiers.count <= remoteModifierControls.count else {
+              modifiers.count <= remoteModifierControls
+                  .subtracting(unavailableRemoteModifierControls)
+                  .count else {
             cancelActiveStandardPrimaryGestures()
             return
         }
@@ -3868,7 +4160,10 @@ final class MappingStore {
         guard availableProfiles.contains(name) else { return }
         profileStates[name] = ProfileState(
             mappings: mappings,
-            hidBindings: hidBindings,
+            // Legacy decode compatibility only. Current persistence writes
+            // hardwareLayouts at the top level and ProfileState.encode omits
+            // this field entirely.
+            hidBindings: [:],
             standardButtonTitles: activeRealm == .standard ? standardButtonTitles : [:],
             remoteModifierControls: activeRealm == .standard ? remoteModifierControls : [],
             modifierColors: activeRealm == .standard ? modifierColors : [:],
@@ -3881,9 +4176,10 @@ final class MappingStore {
         let previousRealm = activeRealm
         guard let state = profileStates[name] else {
             mappings = [:]
-            hidBindings = [:]
+            refreshActiveHardwareLayoutBindings()
             standardButtonTitles = [:]
             remoteModifierControls = []
+            unavailableRemoteModifierControls = []
             modifierColors = [:]
             selectedMappingModifiers = []
             activeRealm = .standard
@@ -3892,29 +4188,22 @@ final class MappingStore {
             return
         }
         mappings = state.mappings
-        hidBindings = state.hidBindings
+        refreshActiveHardwareLayoutBindings()
         standardButtonTitles = state.standardButtonTitles
-        remoteModifierControls = state.remoteModifierControls.filter { control in
-            guard control.isModifierEligible,
-                  let binding = state.hidBindings[control] else { return false }
-            return !binding.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        }
+        remoteModifierControls = state.remoteModifierControls.filter(\.isModifierEligible)
+        refreshModifierAvailability()
         modifierColors = state.modifierColors.filter { $0.key.isModifierEligible }
         selectedMappingModifiers = []
         activeRealm = state.realm
         midiSettings = state.midiSettings
-        let persistedModifiers = state.remoteModifierControls.filter(\.isModifierEligible)
-        let disabledUnboundModifiers = persistedModifiers.subtracting(remoteModifierControls)
-        if !disabledUnboundModifiers.isEmpty {
+        if !unavailableRemoteModifierControls.isEmpty {
             let controls = RemoteControl.allCases
-                .filter { disabledUnboundModifiers.contains($0) }
+                .filter { unavailableRemoteModifierControls.contains($0) }
                 .map(\.rawValue)
                 .joined(separator: ", ")
             lastActionResult = .failure(
-                "Disabled modifier designation for \(controls) because a learned HID input is missing. Learn each input in Status & Input first."
+                "Modifier designation for \(controls) is unavailable in this hardware layout because a learned HID input is missing. Learn each input in Status & Input to reactivate it."
             )
-            saveActiveProfile(named: name)
-            saveAllProfiles()
         }
         if activeRealm == .midi {
             lastMIDIProfileName = name
@@ -3934,6 +4223,7 @@ final class MappingStore {
     }
 
     private func saveAllProfiles() {
+        guard shouldPersistProfilesAfterLoad else { return }
         do {
             let persisted = PersistedProfiles(
                 version: XPdConfiguration.currentVersion,
@@ -3941,6 +4231,14 @@ final class MappingStore {
                     guard let state = profileStates[name] else { return nil }
                     return PersistedProfile(name: name, state: state)
                 },
+                hardwareLayouts: hardwareLayouts.map { layout in
+                    PersistedHardwareLayout(
+                        id: layout.id,
+                        name: layout.name,
+                        bindings: Self.bindingDictionary(from: layout.bindings)
+                    )
+                },
+                activeHardwareLayoutID: activeHardwareLayoutID,
                 activeProfileName: profileName,
                 activeRealm: activeRealm,
                 lastStandardProfileName: lastStandardProfileName,
@@ -3957,13 +4255,98 @@ final class MappingStore {
         }
     }
 
+    private func installHardwareLayouts(
+        _ layouts: [XPdConfiguration.HardwareLayout],
+        activeID: String?
+    ) {
+        let normalized = layouts.map { layout in
+            Self.makeHardwareLayout(
+                id: layout.id,
+                name: layout.name,
+                bindings: Self.normalizedHIDBindings(Self.bindingDictionary(from: layout.bindings))
+            )
+        }
+        hardwareLayouts = normalized.isEmpty
+            ? [Self.makeHardwareLayout(id: Self.defaultHardwareLayoutID, name: "Default remote", bindings: Self.defaultHIDBindings)]
+            : normalized
+        activeHardwareLayoutID = activeID.flatMap { id in
+            hardwareLayouts.contains(where: { $0.id == id }) ? id : nil
+        } ?? hardwareLayouts.first?.id ?? Self.defaultHardwareLayoutID
+        refreshActiveHardwareLayoutBindings()
+    }
+
+    private func installHardwareLayoutsFromPersisted(
+        _ layouts: [PersistedHardwareLayout],
+        activeID: String?,
+        profileName: String,
+        states: [String: ProfileState]
+    ) {
+        if !layouts.isEmpty {
+            installHardwareLayouts(
+                layouts.map {
+                    Self.makeHardwareLayout(id: $0.id, name: $0.name, bindings: $0.bindings)
+                },
+                activeID: activeID
+            )
+            return
+        }
+        installHardwareLayoutsFromLegacyProfiles(states, activeProfileName: profileName)
+    }
+
+    /// Exact normalized equality is the migration key. Every divergent
+    /// per-profile binding set becomes a named layout; identical sets are
+    /// represented once, with the active profile's set selecting the active
+    /// layout deterministically.
+    private func installHardwareLayoutsFromLegacyProfiles(
+        _ states: [String: ProfileState],
+        activeProfileName: String
+    ) {
+        var layouts: [(origin: String, bindings: [RemoteControl: String])] = []
+        for profileName in availableProfiles {
+            let bindings = Self.normalizedHIDBindings(states[profileName]?.hidBindings ?? [:])
+            guard !layouts.contains(where: { Self.bindingSetsEqual($0.bindings, bindings) }) else { continue }
+            layouts.append((profileName, bindings))
+        }
+        if layouts.isEmpty {
+            layouts = [("Default remote", Self.defaultHIDBindings)]
+        }
+
+        let activeBindings = Self.normalizedHIDBindings(states[activeProfileName]?.hidBindings ?? [:])
+        let converted = layouts.map { item in
+            Self.makeHardwareLayout(
+                id: Self.stableHardwareLayoutID(for: item.bindings),
+                name: "Migrated from \(item.origin)",
+                bindings: item.bindings
+            )
+        }
+        let activeID = converted.first(where: {
+            Self.bindingSetsEqual(Self.bindingDictionary(from: $0.bindings), activeBindings)
+        })?.id
+        installHardwareLayouts(converted, activeID: activeID)
+    }
+
     private func loadOrMigrateProfiles() -> Bool {
-        if let data = defaults.data(forKey: profilesDefaultsKey),
-           let decoded = try? JSONDecoder().decode(PersistedProfiles.self, from: data),
-           decoded.version == XPdConfiguration.currentVersion,
-           isValidPersistedProfiles(decoded) {
+        // A present v9 payload is authoritative. Never fall back to an older
+        // backup when it is corrupt: doing so could silently roll the user
+        // back to stale state and overwrite the only newer bytes.
+        if let data = defaults.data(forKey: profilesDefaultsKey) {
+            guard let decoded = try? JSONDecoder().decode(PersistedProfiles.self, from: data),
+                  decoded.version == XPdConfiguration.currentVersion,
+                  Self.hasValidOriginalHardwareLayoutBindings(decoded.hardwareLayouts),
+                  isValidPersistedProfiles(decoded),
+                  let decodedStates = Self.uniqueProfileStates(from: decoded.profiles) else {
+                return failLocalProfilesLoad(
+                    "Could not read the saved v9 configuration. Its original data was left unchanged."
+                )
+            }
             availableProfiles = decoded.profiles.map(\.name)
-            profileStates = Dictionary(uniqueKeysWithValues: decoded.profiles.map { ($0.name, $0.state) })
+            profileStates = decodedStates
+            installHardwareLayoutsFromPersisted(
+                decoded.hardwareLayouts,
+                activeID: decoded.activeHardwareLayoutID,
+                profileName: decoded.activeProfileName,
+                states: profileStates
+            )
             loadedProfileName = decoded.activeProfileName
             loadedActiveRealm = decoded.activeRealm
             loadedLastStandardProfileName = decoded.lastStandardProfileName
@@ -3974,36 +4357,35 @@ final class MappingStore {
             return false
         }
 
-        // v7 already contains exact K layers and remote modifier designations
-        // but predates modifier colours. Preserve any state fields present and
-        // assign Orange to every designated control without an assignment.
-        if let data = defaults.data(forKey: previousProfilesDefaultsKey),
-           let decoded = try? JSONDecoder().decode(PersistedProfiles.self, from: data),
-           decoded.version == XPdConfiguration.preModifierColorsVersion {
-            availableProfiles = decoded.profiles.map(\.name)
-            profileStates = Dictionary(uniqueKeysWithValues: decoded.profiles.map { profile in
-                var colors = profile.state.modifierColors
-                for modifier in profile.state.remoteModifierControls where colors[modifier] == nil {
-                    colors[modifier] = .orange
-                }
-                return (
-                    profile.name,
-                    ProfileState(
-                        mappings: profile.state.mappings,
-                        hidBindings: profile.state.hidBindings,
-                        standardButtonTitles: profile.state.standardButtonTitles,
-                        remoteModifierControls: profile.state.remoteModifierControls,
-                        modifierColors: colors,
-                        realm: profile.state.realm,
-                        midiSettings: profile.state.midiSettings
-                    )
+        // v8 is the last profile-owned HID schema. Preserve all profile
+        // metadata, then group its exact binding sets into top-level layouts.
+        // The v8 payload remains untouched if this conversion cannot be
+        // validated and written as v9.
+        if let data = defaults.data(forKey: previousProfilesDefaultsKey) {
+            guard let decoded = try? JSONDecoder().decode(PersistedProfiles.self, from: data),
+                  decoded.version == XPdConfiguration.preHardwareLayoutsVersion,
+                  let decodedStates = Self.uniqueProfileStates(from: decoded.profiles),
+                  Self.hasValidOriginalLegacyHIDBindings(decoded.profiles) else {
+                return failLocalProfilesLoad(
+                    "Could not migrate the saved v8 configuration. The original data was left unchanged."
                 )
-            })
+            }
+            availableProfiles = decoded.profiles.map(\.name)
+            profileStates = decodedStates
+            installHardwareLayoutsFromLegacyProfiles(profileStates, activeProfileName: decoded.activeProfileName)
             let upgraded = PersistedProfiles(
                 version: XPdConfiguration.currentVersion,
                 profiles: availableProfiles.compactMap { name in
                     profileStates[name].map { PersistedProfile(name: name, state: $0) }
                 },
+                hardwareLayouts: hardwareLayouts.map {
+                    PersistedHardwareLayout(
+                        id: $0.id,
+                        name: $0.name,
+                        bindings: Self.bindingDictionary(from: $0.bindings)
+                    )
+                },
+                activeHardwareLayoutID: activeHardwareLayoutID,
                 activeProfileName: decoded.activeProfileName,
                 activeRealm: decoded.activeRealm,
                 lastStandardProfileName: decoded.lastStandardProfileName,
@@ -4012,9 +4394,67 @@ final class MappingStore {
                 workspaceLockControl: decoded.workspaceLockControl
             )
             guard isValidPersistedProfiles(upgraded) else {
-                availableProfiles = XPdConfiguration.defaultProfileNames
-                profileStates = Self.defaultProfileStates()
-                return false
+                return failLocalProfilesLoad(
+                    "Could not migrate the saved v8 configuration. The original data was left unchanged."
+                )
+            }
+            loadedProfileName = decoded.activeProfileName
+            loadedActiveRealm = decoded.activeRealm
+            loadedLastStandardProfileName = decoded.lastStandardProfileName
+            loadedLastMIDIProfileName = decoded.lastMIDIProfileName
+            loadedMIDIIsLocked = decoded.midiLocked
+            loadedWorkspaceLockControl = decoded.workspaceLockControl
+            saveAllProfiles()
+            return false
+        }
+
+        // v7 already contains exact K layers and remote modifier designations
+        // but predates modifier colours. Preserve any state fields present and
+        // assign Orange to every designated control without an assignment.
+        if let data = defaults.data(forKey: preModifierColorsProfilesDefaultsKey),
+           let decoded = try? JSONDecoder().decode(PersistedProfiles.self, from: data),
+           decoded.version == XPdConfiguration.preModifierColorsVersion {
+            guard let decodedStates = Self.uniqueProfileStates(from: decoded.profiles) else {
+                return failLocalProfilesLoad(
+                    "Could not migrate the saved v7 configuration. The original data was left unchanged."
+                )
+            }
+            availableProfiles = decoded.profiles.map(\.name)
+            profileStates = decodedStates
+            for name in availableProfiles {
+                guard var state = profileStates[name] else { continue }
+                var colors = state.modifierColors
+                for modifier in state.remoteModifierControls where colors[modifier] == nil {
+                    colors[modifier] = .orange
+                }
+                state.modifierColors = colors
+                profileStates[name] = state
+            }
+            installHardwareLayoutsFromLegacyProfiles(profileStates, activeProfileName: decoded.activeProfileName)
+            let upgraded = PersistedProfiles(
+                version: XPdConfiguration.currentVersion,
+                profiles: availableProfiles.compactMap { name in
+                    profileStates[name].map { PersistedProfile(name: name, state: $0) }
+                },
+                hardwareLayouts: hardwareLayouts.map {
+                    PersistedHardwareLayout(
+                        id: $0.id,
+                        name: $0.name,
+                        bindings: Self.bindingDictionary(from: $0.bindings)
+                    )
+                },
+                activeHardwareLayoutID: activeHardwareLayoutID,
+                activeProfileName: decoded.activeProfileName,
+                activeRealm: decoded.activeRealm,
+                lastStandardProfileName: decoded.lastStandardProfileName,
+                lastMIDIProfileName: decoded.lastMIDIProfileName,
+                midiLocked: decoded.midiLocked,
+                workspaceLockControl: decoded.workspaceLockControl
+            )
+            guard isValidPersistedProfiles(upgraded) else {
+                return failLocalProfilesLoad(
+                    "Could not migrate the saved v7 configuration. The original data was left unchanged."
+                )
             }
             loadedProfileName = decoded.activeProfileName
             loadedActiveRealm = decoded.activeRealm
@@ -4032,30 +4472,36 @@ final class MappingStore {
         if let data = defaults.data(forKey: preRemoteTriggerKeysProfilesDefaultsKey),
            let decoded = try? JSONDecoder().decode(PersistedProfiles.self, from: data),
            decoded.version == XPdConfiguration.preRemoteTriggerKeysVersion {
+            guard let decodedStates = Self.uniqueProfileStates(from: decoded.profiles) else {
+                return failLocalProfilesLoad(
+                    "Could not migrate the saved v6 configuration. The original data was left unchanged."
+                )
+            }
             availableProfiles = decoded.profiles.map(\.name)
-            profileStates = Dictionary(uniqueKeysWithValues: decoded.profiles.map { profile in
-                var colors = profile.state.modifierColors
-                for modifier in profile.state.remoteModifierControls where colors[modifier] == nil {
+            profileStates = decodedStates
+            for name in availableProfiles {
+                guard var state = profileStates[name] else { continue }
+                var colors = state.modifierColors
+                for modifier in state.remoteModifierControls where colors[modifier] == nil {
                     colors[modifier] = .orange
                 }
-                return (
-                    profile.name,
-                    ProfileState(
-                        mappings: profile.state.mappings,
-                        hidBindings: profile.state.hidBindings,
-                        standardButtonTitles: profile.state.standardButtonTitles,
-                        remoteModifierControls: profile.state.remoteModifierControls,
-                        modifierColors: colors,
-                        realm: profile.state.realm,
-                        midiSettings: profile.state.midiSettings
-                    )
-                )
-            })
+                state.modifierColors = colors
+                profileStates[name] = state
+            }
+            installHardwareLayoutsFromLegacyProfiles(profileStates, activeProfileName: decoded.activeProfileName)
             let upgraded = PersistedProfiles(
                 version: XPdConfiguration.currentVersion,
                 profiles: availableProfiles.compactMap { name in
                     profileStates[name].map { PersistedProfile(name: name, state: $0) }
                 },
+                hardwareLayouts: hardwareLayouts.map {
+                    PersistedHardwareLayout(
+                        id: $0.id,
+                        name: $0.name,
+                        bindings: Self.bindingDictionary(from: $0.bindings)
+                    )
+                },
+                activeHardwareLayoutID: activeHardwareLayoutID,
                 activeProfileName: decoded.activeProfileName,
                 activeRealm: decoded.activeRealm,
                 lastStandardProfileName: decoded.lastStandardProfileName,
@@ -4064,9 +4510,9 @@ final class MappingStore {
                 workspaceLockControl: decoded.workspaceLockControl
             )
             guard isValidPersistedProfiles(upgraded) else {
-                availableProfiles = XPdConfiguration.defaultProfileNames
-                profileStates = Self.defaultProfileStates()
-                return false
+                return failLocalProfilesLoad(
+                    "Could not migrate the saved v6 configuration. The original data was left unchanged."
+                )
             }
             loadedProfileName = decoded.activeProfileName
             loadedActiveRealm = decoded.activeRealm
@@ -4085,25 +4531,33 @@ final class MappingStore {
         if let data = defaults.data(forKey: preRemoteLayersProfilesDefaultsKey),
            let decoded = try? JSONDecoder().decode(PersistedProfiles.self, from: data),
            decoded.version == XPdConfiguration.preRemoteLayersVersion {
-            availableProfiles = decoded.profiles.map(\.name)
-            profileStates = Dictionary(uniqueKeysWithValues: decoded.profiles.map { profile in
-                (
-                    profile.name,
-                    ProfileState(
-                        mappings: profile.state.mappings,
-                        hidBindings: profile.state.hidBindings,
-                        standardButtonTitles: profile.state.standardButtonTitles,
-                        remoteModifierControls: [],
-                        realm: profile.state.realm,
-                        midiSettings: profile.state.midiSettings
-                    )
+            guard let decodedStates = Self.uniqueProfileStates(from: decoded.profiles) else {
+                return failLocalProfilesLoad(
+                    "Could not migrate the saved v5 configuration. The original data was left unchanged."
                 )
-            })
+            }
+            availableProfiles = decoded.profiles.map(\.name)
+            profileStates = decodedStates
+            for name in availableProfiles {
+                guard var state = profileStates[name] else { continue }
+                state.remoteModifierControls = []
+                state.modifierColors = [:]
+                profileStates[name] = state
+            }
+            installHardwareLayoutsFromLegacyProfiles(profileStates, activeProfileName: decoded.activeProfileName)
             let upgraded = PersistedProfiles(
                 version: XPdConfiguration.currentVersion,
                 profiles: availableProfiles.compactMap { name in
                     profileStates[name].map { PersistedProfile(name: name, state: $0) }
                 },
+                hardwareLayouts: hardwareLayouts.map {
+                    PersistedHardwareLayout(
+                        id: $0.id,
+                        name: $0.name,
+                        bindings: Self.bindingDictionary(from: $0.bindings)
+                    )
+                },
+                activeHardwareLayoutID: activeHardwareLayoutID,
                 activeProfileName: decoded.activeProfileName,
                 activeRealm: decoded.activeRealm,
                 lastStandardProfileName: decoded.lastStandardProfileName,
@@ -4112,9 +4566,9 @@ final class MappingStore {
                 workspaceLockControl: decoded.workspaceLockControl
             )
             guard isValidPersistedProfiles(upgraded) else {
-                availableProfiles = XPdConfiguration.defaultProfileNames
-                profileStates = Self.defaultProfileStates()
-                return false
+                return failLocalProfilesLoad(
+                    "Could not migrate the saved v5 configuration. The original data was left unchanged."
+                )
             }
             loadedProfileName = decoded.activeProfileName
             loadedActiveRealm = decoded.activeRealm
@@ -4130,25 +4584,34 @@ final class MappingStore {
         if let data = defaults.data(forKey: preTitlesProfilesDefaultsKey),
            let decoded = try? JSONDecoder().decode(PersistedProfiles.self, from: data),
            decoded.version == XPdConfiguration.preTitlesVersion {
-            availableProfiles = decoded.profiles.map(\.name)
-            profileStates = Dictionary(uniqueKeysWithValues: decoded.profiles.map { profile in
-                (
-                    profile.name,
-                    ProfileState(
-                        mappings: profile.state.mappings,
-                        hidBindings: profile.state.hidBindings,
-                        standardButtonTitles: [:],
-                        remoteModifierControls: [],
-                        realm: profile.state.realm,
-                        midiSettings: profile.state.midiSettings
-                    )
+            guard let decodedStates = Self.uniqueProfileStates(from: decoded.profiles) else {
+                return failLocalProfilesLoad(
+                    "Could not migrate the saved v4 configuration. The original data was left unchanged."
                 )
-            })
+            }
+            availableProfiles = decoded.profiles.map(\.name)
+            profileStates = decodedStates
+            for name in availableProfiles {
+                guard var state = profileStates[name] else { continue }
+                state.standardButtonTitles = [:]
+                state.remoteModifierControls = []
+                state.modifierColors = [:]
+                profileStates[name] = state
+            }
+            installHardwareLayoutsFromLegacyProfiles(profileStates, activeProfileName: decoded.activeProfileName)
             let upgraded = PersistedProfiles(
                 version: XPdConfiguration.currentVersion,
                 profiles: availableProfiles.compactMap { name in
                     profileStates[name].map { PersistedProfile(name: name, state: $0) }
                 },
+                hardwareLayouts: hardwareLayouts.map {
+                    PersistedHardwareLayout(
+                        id: $0.id,
+                        name: $0.name,
+                        bindings: Self.bindingDictionary(from: $0.bindings)
+                    )
+                },
+                activeHardwareLayoutID: activeHardwareLayoutID,
                 activeProfileName: decoded.activeProfileName,
                 activeRealm: decoded.activeRealm,
                 lastStandardProfileName: decoded.lastStandardProfileName,
@@ -4157,9 +4620,9 @@ final class MappingStore {
                 workspaceLockControl: decoded.workspaceLockControl
             )
             guard isValidPersistedProfiles(upgraded) else {
-                availableProfiles = XPdConfiguration.defaultProfileNames
-                profileStates = Self.defaultProfileStates()
-                return false
+                return failLocalProfilesLoad(
+                    "Could not migrate the saved v4 configuration. The original data was left unchanged."
+                )
             }
             loadedProfileName = decoded.activeProfileName
             loadedActiveRealm = decoded.activeRealm
@@ -4178,22 +4641,43 @@ final class MappingStore {
         if let data = defaults.data(forKey: legacyProfilesDefaultsKey),
            let decoded = try? JSONDecoder().decode(PersistedProfiles.self, from: data),
            decoded.version == XPdConfiguration.previousVersion {
+            guard let decodedStates = Self.uniqueProfileStates(from: decoded.profiles) else {
+                return failLocalProfilesLoad(
+                    "Could not migrate the saved v3 configuration. The original data was left unchanged."
+                )
+            }
             availableProfiles = decoded.profiles.map(\.name)
-            profileStates = Dictionary(uniqueKeysWithValues: decoded.profiles.map { profile in
-                (profile.name, ProfileState(mappings: profile.state.mappings, hidBindings: profile.state.hidBindings))
-            })
+            profileStates = decodedStates
+            for name in availableProfiles {
+                guard var state = profileStates[name] else { continue }
+                state.standardButtonTitles = [:]
+                state.remoteModifierControls = []
+                state.modifierColors = [:]
+                state.realm = .standard
+                state.midiSettings = nil
+                profileStates[name] = state
+            }
+            installHardwareLayoutsFromLegacyProfiles(profileStates, activeProfileName: decoded.activeProfileName)
             guard isValidPersistedProfiles(
                 PersistedProfiles(
                     version: XPdConfiguration.currentVersion,
                     profiles: availableProfiles.compactMap { name in
                         profileStates[name].map { PersistedProfile(name: name, state: $0) }
                     },
+                    hardwareLayouts: hardwareLayouts.map {
+                        PersistedHardwareLayout(
+                            id: $0.id,
+                            name: $0.name,
+                            bindings: Self.bindingDictionary(from: $0.bindings)
+                        )
+                    },
+                    activeHardwareLayoutID: activeHardwareLayoutID,
                     activeProfileName: decoded.activeProfileName
                 )
             ) else {
-                availableProfiles = XPdConfiguration.defaultProfileNames
-                profileStates = Self.defaultProfileStates()
-                return false
+                return failLocalProfilesLoad(
+                    "Could not migrate the saved v3 configuration. The original data was left unchanged."
+                )
             }
             loadedProfileName = decoded.activeProfileName
             loadedActiveRealm = .standard
@@ -4213,6 +4697,13 @@ final class MappingStore {
            let migrated = migrateLegacyPersistedProfiles(decoded) {
             availableProfiles = migrated.order
             profileStates = migrated.states
+            let legacyActiveProfile = defaults.string(forKey: profileNameDefaultsKey)
+                .flatMap { availableProfiles.contains($0) ? $0 : nil } ?? "Global"
+            loadedProfileName = legacyActiveProfile
+            installHardwareLayoutsFromLegacyProfiles(
+                profileStates,
+                activeProfileName: legacyActiveProfile
+            )
             defaults.set(true, forKey: profilesMigrationKey)
             saveAllProfiles()
             return false
@@ -4222,6 +4713,8 @@ final class MappingStore {
         // the new payload was removed or became unreadable after migration.
         if defaults.bool(forKey: profilesMigrationKey) {
             profileStates = Self.defaultProfileStates()
+            availableProfiles = XPdConfiguration.defaultProfileNames
+            installHardwareLayoutsFromLegacyProfiles(profileStates, activeProfileName: "Global")
             return false
         }
 
@@ -4245,19 +4738,26 @@ final class MappingStore {
 
         profileStates = migratedProfiles
         availableProfiles = XPdConfiguration.defaultProfileNames
+        installHardwareLayoutsFromLegacyProfiles(profileStates, activeProfileName: "Global")
         defaults.set(true, forKey: profilesMigrationKey)
         saveAllProfiles()
         return migratedLegacyState
     }
 
     private func isValidPersistedProfiles(_ persisted: PersistedProfiles) -> Bool {
-        guard persisted.version == XPdConfiguration.currentVersion else { return false }
+        guard persisted.version == XPdConfiguration.currentVersion,
+              !persisted.hardwareLayouts.isEmpty,
+              let activeHardwareLayoutID = persisted.activeHardwareLayoutID,
+              !activeHardwareLayoutID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              persisted.hardwareLayouts.contains(where: { $0.id == activeHardwareLayoutID }) else {
+            return false
+        }
         let configuration = XPdConfiguration(
             profiles: persisted.profiles.map { profile in
                 XPdConfiguration.Profile(
                     name: profile.name,
                     mappings: Self.mappingEntries(from: profile.state.mappings),
-                    hidBindings: Self.hidBindingEntries(from: profile.state.hidBindings),
+                    hidBindings: [],
                     realm: profile.state.realm,
                     midiSettings: profile.state.midiSettings,
                     standardButtonTitles: profile.state.standardButtonTitles.map {
@@ -4273,9 +4773,73 @@ final class MappingStore {
             lastStandardProfileName: persisted.lastStandardProfileName,
             lastMIDIProfileName: persisted.lastMIDIProfileName,
             midiLocked: persisted.midiLocked,
-            workspaceLockControl: persisted.workspaceLockControl
+            workspaceLockControl: persisted.workspaceLockControl,
+            hardwareLayouts: persisted.hardwareLayouts.map {
+                Self.makeHardwareLayout(id: $0.id, name: $0.name, bindings: $0.bindings)
+            },
+            activeHardwareLayoutID: activeHardwareLayoutID
         )
         return (try? configuration.validate()) != nil
+    }
+
+    private static func uniqueProfileStates(
+        from profiles: [PersistedProfile]
+    ) -> [String: ProfileState]? {
+        var states: [String: ProfileState] = [:]
+        for profile in profiles {
+            guard states[profile.name] == nil else { return nil }
+            states[profile.name] = profile.state
+        }
+        return states
+    }
+
+    /// Local v8 stores profile-owned HID dictionaries. Validate the exact
+    /// decoded values before whitespace/repeated-prefix normalization so an
+    /// invalid entry cannot disappear while layouts are grouped.
+    private static func hasValidOriginalLegacyHIDBindings(
+        _ profiles: [PersistedProfile]
+    ) -> Bool {
+        profiles.allSatisfy { hasValidOriginalHIDBindingValues($0.state.hidBindings) }
+    }
+
+    /// Schema v9 owns HID identity at the layout level. Validate those raw
+    /// values before `makeHardwareLayout` normalizes them, otherwise an empty
+    /// string could be silently discarded and a corrupt v9 payload rewritten.
+    private static func hasValidOriginalHardwareLayoutBindings(
+        _ layouts: [PersistedHardwareLayout]
+    ) -> Bool {
+        layouts.allSatisfy { hasValidOriginalHIDBindingValues($0.bindings) }
+    }
+
+    private static func hasValidOriginalHIDBindingValues(
+        _ bindings: [RemoteControl: String]
+    ) -> Bool {
+        var rawSignatures = Set<String>()
+        var normalizedSignatures = Set<String>()
+        for signature in bindings.values {
+            guard !signature.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  rawSignatures.insert(signature).inserted else {
+                return false
+            }
+            let normalized = normalizedHIDSignature(signature)
+            guard !normalized.isEmpty,
+                  normalizedSignatures.insert(normalized).inserted else {
+                return false
+            }
+        }
+        return true
+    }
+
+    /// A corrupt local payload must remain recoverable. Keep its bytes and
+    /// make the in-memory fallback non-persisting until the user explicitly
+    /// repairs preferences outside this launch.
+    private func failLocalProfilesLoad(_ message: String) -> Bool {
+        shouldPersistProfilesAfterLoad = false
+        lastPersistenceResult = .failed(message)
+        availableProfiles = XPdConfiguration.defaultProfileNames
+        profileStates = Self.defaultProfileStates()
+        installHardwareLayoutsFromLegacyProfiles(profileStates, activeProfileName: "Global")
+        return false
     }
 
     private func validatedNewProfileName(_ rawName: String) throws -> String {
@@ -4468,6 +5032,68 @@ final class MappingStore {
         bindings.map { control, signature in
             XPdConfiguration.HIDBindingEntry(control: control, signature: signature)
         }
+    }
+
+    private static let defaultHardwareLayoutID = "default-remote"
+
+    private static func bindingDictionary(
+        from entries: [XPdConfiguration.HIDBindingEntry]
+    ) -> [RemoteControl: String] {
+        Dictionary(uniqueKeysWithValues: entries.map { ($0.control, $0.signature) })
+    }
+
+    private static func makeHardwareLayout(
+        id: String,
+        name: String,
+        bindings: [RemoteControl: String]
+    ) -> XPdConfiguration.HardwareLayout {
+        XPdConfiguration.HardwareLayout(
+            id: id,
+            name: name,
+            bindings: hidBindingEntries(from: normalizedHIDBindings(bindings))
+        )
+    }
+
+    private static func normalizedHIDBindings(
+        _ bindings: [RemoteControl: String]
+    ) -> [RemoteControl: String] {
+        bindings.reduce(into: [:]) { result, pair in
+            let signature = normalizedHIDSignature(pair.value)
+            guard !signature.isEmpty else { return }
+            result[pair.key] = signature
+        }
+    }
+
+    private static func normalizedHIDSignature(_ signature: String) -> String {
+        let trimmed = signature.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        // HIDService already emits canonical uppercase hex. Preserve that
+        // spelling in live state and exports; normalization here is limited
+        // to the historical repeated report-6 prefix and surrounding space.
+        return migrateHIDSignature(trimmed)
+    }
+
+    private static func bindingSetsEqual(
+        _ lhs: [RemoteControl: String],
+        _ rhs: [RemoteControl: String]
+    ) -> Bool {
+        normalizedHIDBindings(lhs) == normalizedHIDBindings(rhs)
+    }
+
+    private static func stableHardwareLayoutID(
+        for bindings: [RemoteControl: String]
+    ) -> String {
+        let canonical = RemoteControl.allCases.compactMap { control in
+            bindings[control].map { "\(control.rawValue)=\(normalizedHIDSignature($0))" }
+        }.joined(separator: "|")
+        // FNV-1a keeps IDs deterministic without introducing a crypto
+        // dependency into the local preferences format.
+        var hash: UInt64 = 14695981039346656037
+        for byte in canonical.utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 1099511628211
+        }
+        return "layout-\(String(hash, radix: 16))"
     }
 
     private static func configurationErrorMessage(for error: Error) -> String {

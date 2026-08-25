@@ -46,6 +46,137 @@ final class XPdConfigurationTests: XCTestCase {
         XCTAssertTrue(decoded.showsInputOverlay)
     }
 
+    func testVersionEightMigrationDeduplicatesIdenticalBindingSets() throws {
+        let globalBindings = [
+            XPdConfiguration.HIDBindingEntry(control: .k1, signature: "r6:k1"),
+            XPdConfiguration.HIDBindingEntry(control: .k2, signature: "r6:k2")
+        ]
+        let legacy = XPdConfiguration(
+            version: XPdConfiguration.preHardwareLayoutsVersion,
+            profiles: [
+                .init(name: "Global", mappings: [], hidBindings: globalBindings),
+                .init(name: "Finder", mappings: [], hidBindings: Array(globalBindings.reversed())),
+                .init(name: "Logic Pro", mappings: [], hidBindings: [])
+            ],
+            profileName: "Finder",
+            showsInputOverlay: true
+        )
+
+        let upgraded = try XPdConfiguration.decode(try legacy.encodedData())
+
+        XCTAssertEqual(upgraded.hardwareLayouts.count, 2)
+        XCTAssertEqual(upgraded.hardwareLayouts.map(\.id), ["migrated-1", "migrated-2"])
+        XCTAssertEqual(upgraded.hardwareLayouts.map(\.name), ["Migrated from Global", "Migrated from Logic Pro"])
+        XCTAssertEqual(upgraded.activeHardwareLayoutID, "migrated-1")
+        XCTAssertTrue(upgraded.profiles.allSatisfy { $0.hidBindings.isEmpty })
+        XCTAssertEqual(upgraded.hardwareLayouts[0].hidBindings.map(\.control), [.k1, .k2])
+    }
+
+    func testVersionEightMigrationPreservesDivergentSetsAndSelectsActiveSet() throws {
+        let legacy = XPdConfiguration(
+            version: XPdConfiguration.preHardwareLayoutsVersion,
+            profiles: [
+                .init(
+                    name: "Global",
+                    mappings: [],
+                    hidBindings: [.init(control: .k1, signature: "global-k1")]
+                ),
+                .init(
+                    name: "Studio",
+                    mappings: [],
+                    hidBindings: [.init(control: .k1, signature: "studio-k1")]
+                ),
+                .init(
+                    name: "Logic Pro",
+                    mappings: [],
+                    hidBindings: [.init(control: .k1, signature: "logic-k1")]
+                )
+            ],
+            profileName: "Logic Pro",
+            showsInputOverlay: true
+        )
+
+        let upgraded = try XPdConfiguration.decode(try legacy.encodedData())
+
+        XCTAssertEqual(upgraded.hardwareLayouts.map(\.name), [
+            "Migrated from Global",
+            "Migrated from Studio",
+            "Migrated from Logic Pro"
+        ])
+        XCTAssertEqual(upgraded.hardwareLayouts.map { $0.hidBindings[0].signature }, [
+            "global-k1", "studio-k1", "logic-k1"
+        ])
+        XCTAssertEqual(upgraded.activeHardwareLayoutID, "migrated-3")
+    }
+
+    func testV9OmitsProfileHIDBindingsAndRoundTripsDeterministically() throws {
+        let configuration = XPdConfiguration(
+            profiles: [
+                .init(name: "Global", mappings: [], hidBindings: []),
+                .init(name: "Finder", mappings: [], hidBindings: [])
+            ],
+            profileName: "Global",
+            showsInputOverlay: true,
+            hardwareLayouts: [
+                .init(
+                    id: "xppen-main",
+                    name: "XPPen main",
+                    bindings: [
+                        .init(control: .k2, signature: "r6:k2"),
+                        .init(control: .k1, signature: "r6:k1")
+                    ]
+                )
+            ],
+            activeHardwareLayoutID: "xppen-main"
+        )
+
+        let encoded = try configuration.encodedData()
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        let profiles = try XCTUnwrap(object["profiles"] as? [[String: Any]])
+        XCTAssertTrue(profiles.allSatisfy { $0["hidBindings"] == nil })
+        XCTAssertEqual(object["activeHardwareLayoutID"] as? String, "xppen-main")
+        XCTAssertEqual(encoded, try XPdConfiguration.decode(encoded).encodedData())
+    }
+
+    func testV9HardwareLayoutValidationRejectsInvalidIdentityAndCollisions() {
+        let duplicateIdentity = XPdConfiguration(
+            profiles: [.init(name: "Global", mappings: [], hidBindings: [])],
+            profileName: "Global",
+            showsInputOverlay: true,
+            hardwareLayouts: [
+                .init(id: "same", name: "One", bindings: []),
+                .init(id: "same", name: "Two", bindings: [])
+            ],
+            activeHardwareLayoutID: "same"
+        )
+        XCTAssertThrowsError(try duplicateIdentity.validate()) { error in
+            XCTAssertEqual(error as? XPdConfiguration.ValidationError, .duplicateHardwareLayoutID("same"))
+        }
+
+        let duplicateBinding = XPdConfiguration(
+            profiles: [.init(name: "Global", mappings: [], hidBindings: [])],
+            profileName: "Global",
+            showsInputOverlay: true,
+            hardwareLayouts: [
+                .init(
+                    id: "main",
+                    name: "Main",
+                    bindings: [
+                        .init(control: .k1, signature: "same"),
+                        .init(control: .k2, signature: "same")
+                    ]
+                )
+            ],
+            activeHardwareLayoutID: "main"
+        )
+        XCTAssertThrowsError(try duplicateBinding.validate()) { error in
+            XCTAssertEqual(
+                error as? XPdConfiguration.ValidationError,
+                .duplicateHIDSignatureInLayout(layout: "Main", signature: "same")
+            )
+        }
+    }
+
     func testStandardButtonTitlesRoundTripAndSortByControl() throws {
         let configuration = XPdConfiguration(
             profiles: [
@@ -522,7 +653,7 @@ final class XPdConfigurationTests: XCTestCase {
         XCTAssertThrowsError(try configuration.validate()) { error in
             XCTAssertEqual(
                 error as? XPdConfiguration.ValidationError,
-                .duplicateHIDSignature(profile: "Global", signature: "same-report")
+                .duplicateHIDSignatureInLayout(layout: "Default", signature: "same-report")
             )
         }
     }
@@ -589,7 +720,8 @@ final class XPdConfigurationTests: XCTestCase {
         XCTAssertFalse(upgraded.midiLocked)
         XCTAssertEqual(upgraded.workspaceLockControl, .k3)
         XCTAssertEqual(upgraded.profiles[0].mappings[0].mapping.command, "legacy")
-        XCTAssertEqual(upgraded.profiles[0].hidBindings[0].signature, "legacy-report")
+        XCTAssertEqual(upgraded.hardwareLayouts[0].hidBindings[0].signature, "legacy-report")
+        XCTAssertTrue(upgraded.profiles[0].hidBindings.isEmpty)
     }
 
     func testMIDIProfileRoundTripsTypedMappingsAndWorkspaceState() throws {

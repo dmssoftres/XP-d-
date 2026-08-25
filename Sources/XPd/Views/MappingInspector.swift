@@ -340,7 +340,18 @@ struct MappingInspector: View {
                         if let control = store.learningAllControl {
                             let kControls = RemoteControl.allCases.filter(\.isMIDIButton)
                             let step = (kControls.firstIndex(of: control) ?? 0) + 1
-                            Text("Step \(step) of \(kControls.count) · Press \(control.rawValue). Composite or duplicate inputs are rejected.")
+                            if store.isLearningAllAwaitingRelease {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("Step \(step) of \(kControls.count) · Release \(control.rawValue).")
+                                    if let capturedSignature = store.learningAllCapturedSignature {
+                                        Text("Captured: \(capturedSignature)")
+                                            .font(.system(.caption, design: .monospaced))
+                                            .textSelection(.enabled)
+                                    }
+                                }
+                            } else {
+                                Text("Step \(step) of \(kControls.count) · Press \(control.rawValue). Composite or duplicate inputs are rejected.")
+                            }
                         } else {
                             Text("Preparing the next K button…")
                         }
@@ -349,6 +360,25 @@ struct MappingInspector: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 }
+
+                DisclosureGroup("Saved K1–K10 signatures") {
+                    VStack(alignment: .leading, spacing: 5) {
+                        ForEach(RemoteControl.allCases.filter(\.isMIDIButton), id: \.self) { control in
+                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                Text(control.rawValue)
+                                    .font(.caption.weight(.semibold))
+                                    .frame(width: 28, alignment: .leading)
+                                Text(verbatim: store.hidBinding(for: control) ?? "Not learned")
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                                Spacer(minLength: 0)
+                            }
+                        }
+                    }
+                    .padding(.top, 4)
+                }
+                .font(.caption)
             }
             .padding(4)
         }

@@ -19,9 +19,8 @@ final class MIDIProfileRelearningTests: XCTestCase {
         super.tearDown()
     }
 
-    func testSingleButtonReport2RelearnIsScopedToActiveMIDIProfileAndPreservesMappings() throws {
+    func testSingleButtonReport2RelearnUpdatesDeviceLayoutAndPreservesProfileMappings() throws {
         let store = makeStore()
-        let globalK1Binding = try XCTUnwrap(store.hidBinding(for: .k1))
 
         _ = try store.addMIDIProfile(named: "MIDI A")
         let primaryA = MIDIButtonMapping(
@@ -57,7 +56,6 @@ final class MIDIProfileRelearningTests: XCTestCase {
         )
         store.updatePrimaryButtonMapping(primaryB, for: .k1)
         let settingsB = try XCTUnwrap(store.currentMIDISettings)
-        let bK1Binding = try XCTUnwrap(store.hidBinding(for: .k1))
         let bK2Binding = try XCTUnwrap(store.hidBinding(for: .k2))
 
         XCTAssertTrue(store.selectProfile("MIDI A"))
@@ -78,11 +76,11 @@ final class MIDIProfileRelearningTests: XCTestCase {
 
         XCTAssertTrue(store.selectProfile("MIDI B"))
         XCTAssertEqual(store.currentMIDISettings, settingsB)
-        XCTAssertEqual(store.hidBinding(for: .k1), bK1Binding)
+        XCTAssertEqual(store.hidBinding(for: .k1), learnedSignature)
         XCTAssertEqual(store.hidBinding(for: .k2), bK2Binding)
 
         XCTAssertTrue(store.selectProfile("Global"))
-        XCTAssertEqual(store.hidBinding(for: .k1), globalK1Binding)
+        XCTAssertEqual(store.hidBinding(for: .k1), learnedSignature)
     }
 
     func testMIDIRelearnRejectsCompositeReport2AndPreservesOldBinding() throws {

@@ -69,7 +69,7 @@ final class ModifierColorTests: XCTestCase {
         XCTAssertNotNil(try XCTUnwrap(reloaded.exportConfiguration()))
     }
 
-    func testPortableV8RoundTripIsDeterministic() throws {
+    func testPortableV9RoundTripIsDeterministic() throws {
         let store = makeStore()
         XCTAssertTrue(store.setModifierColor(.green, for: .k8))
         XCTAssertTrue(store.setModifierColor(.red, for: .k3))
@@ -110,7 +110,7 @@ final class ModifierColorTests: XCTestCase {
         XCTAssertEqual(profile.mappings.first?.mapping.command, "Finder")
     }
 
-    func testPersistedVersionSevenProfilesMigrateToV8WithOrangeModifierColour() throws {
+    func testPersistedVersionSevenProfilesMigrateToV9WithOrangeModifierColour() throws {
         let source = makeStore()
         XCTAssertTrue(source.setRemoteModifier(.k3, enabled: true))
         source.update(
@@ -120,21 +120,29 @@ final class ModifierColorTests: XCTestCase {
             modifierControls: [.k3]
         )
 
-        let currentData = try XCTUnwrap(defaults.data(forKey: "XPd.profiles.v8"))
+        let currentData = try XCTUnwrap(defaults.data(forKey: "XPd.profiles.v9"))
         var root = try XCTUnwrap(JSONSerialization.jsonObject(with: currentData) as? [String: Any])
+        let layouts = try XCTUnwrap(root["hardwareLayouts"] as? [[String: Any]])
+        let activeLayoutID = try XCTUnwrap(root["activeHardwareLayoutID"] as? String)
+        let activeBindings = try XCTUnwrap(
+            layouts.first(where: { $0["id"] as? String == activeLayoutID })?["bindings"]
+        )
         root["version"] = XPdConfiguration.preModifierColorsVersion
         var profiles = try XCTUnwrap(root["profiles"] as? [[String: Any]])
         for index in profiles.indices {
             var state = try XCTUnwrap(profiles[index]["state"] as? [String: Any])
+            state["hidBindings"] = activeBindings
             state.removeValue(forKey: "modifierColors")
             profiles[index]["state"] = state
         }
         root["profiles"] = profiles
+        root.removeValue(forKey: "hardwareLayouts")
+        root.removeValue(forKey: "activeHardwareLayoutID")
         defaults.set(
             try JSONSerialization.data(withJSONObject: root),
             forKey: "XPd.profiles.v7"
         )
-        defaults.removeObject(forKey: "XPd.profiles.v8")
+        defaults.removeObject(forKey: "XPd.profiles.v9")
 
         let restored = makeStore()
         XCTAssertTrue(restored.isRemoteModifier(.k3))
@@ -143,7 +151,7 @@ final class ModifierColorTests: XCTestCase {
             restored.mapping(for: .k1, gesture: .tap, modifierControls: [.k3]).command,
             "Finder"
         )
-        XCTAssertNotNil(defaults.data(forKey: "XPd.profiles.v8"))
+        XCTAssertNotNil(defaults.data(forKey: "XPd.profiles.v9"))
     }
 
     func testModifierColourValidationRejectsDuplicateNonKAndMIDIEntries() throws {

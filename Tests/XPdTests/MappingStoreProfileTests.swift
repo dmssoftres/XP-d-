@@ -111,12 +111,26 @@ final class MappingStoreProfileTests: XCTestCase {
         source.setRemoteModifier(.k3, enabled: true)
         source.update(legacyMapping, for: .k1, gesture: .tap, modifierControls: [.k3])
 
-        let currentData = try XCTUnwrap(defaults.data(forKey: "XPd.profiles.v8"))
+        let currentData = try XCTUnwrap(defaults.data(forKey: "XPd.profiles.v9"))
         var object = try XCTUnwrap(JSONSerialization.jsonObject(with: currentData) as? [String: Any])
+        let layouts = try XCTUnwrap(object["hardwareLayouts"] as? [[String: Any]])
+        let activeLayoutID = try XCTUnwrap(object["activeHardwareLayoutID"] as? String)
+        let activeBindings = try XCTUnwrap(
+            layouts.first(where: { $0["id"] as? String == activeLayoutID })?["bindings"]
+        )
+        var profiles = try XCTUnwrap(object["profiles"] as? [[String: Any]])
+        for index in profiles.indices {
+            var state = try XCTUnwrap(profiles[index]["state"] as? [String: Any])
+            state["hidBindings"] = activeBindings
+            profiles[index]["state"] = state
+        }
+        object["profiles"] = profiles
+        object.removeValue(forKey: "hardwareLayouts")
+        object.removeValue(forKey: "activeHardwareLayoutID")
         object["version"] = XPdConfiguration.preRemoteTriggerKeysVersion
         let legacyData = try JSONSerialization.data(withJSONObject: object)
         defaults.set(legacyData, forKey: "XPd.profiles.v6")
-        defaults.removeObject(forKey: "XPd.profiles.v8")
+        defaults.removeObject(forKey: "XPd.profiles.v9")
 
         let restored = makeStore()
         XCTAssertTrue(restored.isRemoteModifier(.k3))
@@ -124,7 +138,7 @@ final class MappingStoreProfileTests: XCTestCase {
             restored.mapping(for: .k1, gesture: .tap, modifierControls: [.k3]),
             legacyMapping
         )
-        let migratedData = try XCTUnwrap(defaults.data(forKey: "XPd.profiles.v8"))
+        let migratedData = try XCTUnwrap(defaults.data(forKey: "XPd.profiles.v9"))
         let migratedObject = try XCTUnwrap(JSONSerialization.jsonObject(with: migratedData) as? [String: Any])
         XCTAssertEqual(migratedObject["version"] as? Int, XPdConfiguration.currentVersion)
     }
@@ -150,7 +164,7 @@ final class MappingStoreProfileTests: XCTestCase {
         XCTAssertEqual(store.standardButtonTitle(for: .k1), String(repeating: "x", count: 24))
     }
 
-    func testAutosaveIsolatedForMappingsAndHIDBindings() {
+    func testAutosaveKeepsMappingsIsolatedAndHIDBindingsDeviceWide() {
         let store = makeStore()
         let global = Mapping(action: .noAction, command: "global")
         store.update(global, for: .k1, gesture: .tap)
@@ -173,10 +187,10 @@ final class MappingStoreProfileTests: XCTestCase {
         reloaded.profileName = "Global"
         XCTAssertEqual(reloaded.mapping(for: .k1, gesture: .tap), global)
         XCTAssertEqual(reloaded.hidBinding(for: .k1), "global-signature")
-        XCTAssertNotEqual(reloaded.hidBinding(for: .k2), "finder-signature")
+        XCTAssertEqual(reloaded.hidBinding(for: .k2), "finder-signature")
     }
 
-    func testLegacySharedStateMigratesIntoGlobalOnly() throws {
+    func testLegacyMappingsRemainGlobalWhileHIDStateBecomesDeviceWide() throws {
         let oldMapping = Mapping(action: .noAction, command: "legacy-global")
         let mappingData = try JSONEncoder().encode([
             MappingKey(control: .k1, gesture: .tap): oldMapping
@@ -196,7 +210,7 @@ final class MappingStoreProfileTests: XCTestCase {
 
         store.profileName = "Finder"
         XCTAssertEqual(store.mapping(for: .k1, gesture: .tap), Mapping())
-        XCTAssertNotEqual(store.hidBinding(for: .k1), "r6:01 11 00 00 00 00 00")
+        XCTAssertEqual(store.hidBinding(for: .k1), "r6:01 11 00 00 00 00 00")
     }
 
     func testMultiProfileExportImportAndInvalidImportAreAtomic() throws {
@@ -213,7 +227,11 @@ final class MappingStoreProfileTests: XCTestCase {
         let data = try XCTUnwrap(source.exportConfiguration())
         let decoded = try XPdConfiguration.decode(data)
         XCTAssertEqual(decoded.profiles.map(\.name), source.availableProfiles)
-        XCTAssertEqual(decoded.profiles.first(where: { $0.name == "Finder" })?.hidBindings.count, 13)
+        XCTAssertTrue(decoded.profiles.allSatisfy { $0.hidBindings.isEmpty })
+        XCTAssertEqual(
+            decoded.hardwareLayouts.first(where: { $0.id == decoded.activeHardwareLayoutID })?.hidBindings.count,
+            13
+        )
 
         let target = makeStore()
         XCTAssertTrue(target.importConfiguration(data))
@@ -392,7 +410,7 @@ final class MappingStoreProfileTests: XCTestCase {
 
         store.profileName = "Global"
         XCTAssertNotEqual(store.mapping(for: .k1, gesture: .tap), studioMapping)
-        XCTAssertNotEqual(store.hidBinding(for: .k2), "studio-k2")
+        XCTAssertEqual(store.hidBinding(for: .k2), "studio-k2")
 
         let reloaded = makeStore()
         XCTAssertEqual(reloaded.availableProfiles, ["Global", "Finder", "Logic Pro", "Studio"])

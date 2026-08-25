@@ -6,7 +6,7 @@ import Foundation
 /// meaningful to the wheel selector, while mapping/HID entries can be sorted
 /// before encoding for stable diffs.
 struct XPdConfiguration: Codable, Equatable {
-    static let currentVersion = 8
+    static let currentVersion = 9
     static let legacyVersion = 2
     static let previousVersion = 3
     /// Version 4 is the immediately previous schema.  It had no
@@ -22,6 +22,9 @@ struct XPdConfiguration: Codable, Equatable {
     /// Version 7 added remote modifier designations but predates the
     /// profile-scoped modifier colour metadata.
     static let preModifierColorsVersion = 7
+    /// Version 8 is the immediately previous schema. It still stored the
+    /// physical HID identity independently in every profile.
+    static let preHardwareLayoutsVersion = 8
     static let defaultProfileNames = ["Global", "Finder", "Logic Pro"]
     static let defaultWorkspaceLockControl: RemoteControl = .k3
 
@@ -34,8 +37,10 @@ struct XPdConfiguration: Codable, Equatable {
     let lastMIDIProfileName: String?
     let midiLocked: Bool
     let workspaceLockControl: RemoteControl
+    let hardwareLayouts: [HardwareLayout]
+    let activeHardwareLayoutID: String
 
-    /// A complete mapping and HID-binding record owned by one profile.
+    /// A behavior profile. `hidBindings` is retained only to decode legacy schemas.
     struct Profile: Codable, Equatable, Identifiable {
         let name: String
         let mappings: [MappingEntry]
@@ -178,6 +183,94 @@ struct XPdConfiguration: Codable, Equatable {
         }
     }
 
+    /// A physical remote's HID identity. Hardware layouts are deliberately
+    /// separate from profiles: switching an action/profile set must not
+    /// silently switch the physical buttons that produce those actions.
+    struct HardwareLayout: Codable, Equatable, Identifiable {
+        let id: String
+        let name: String
+        let hidBindings: [HIDBindingEntry]
+
+        /// Compatibility spelling for callers that refer to the entries as
+        /// generic bindings rather than HID bindings.
+        var bindings: [HIDBindingEntry] { hidBindings }
+
+        init(id: String, name: String, hidBindings: [HIDBindingEntry]) {
+            self.id = id
+            self.name = name
+            self.hidBindings = hidBindings
+        }
+
+        init(id: String, name: String, bindings: [HIDBindingEntry]) {
+            self.init(id: id, name: name, hidBindings: bindings)
+        }
+    }
+
+    /// The v9 profile payload intentionally has no `hidBindings` key. Keep
+    /// this separate from `Profile` so old v2–v8 fixtures can continue to be
+    /// encoded through the compatibility shape.
+    private struct V9ProfilePayload: Codable {
+        let name: String
+        let mappings: [MappingEntry]
+        let realm: ProfileRealm
+        let midiSettings: MIDIProfileSettings?
+        let standardButtonTitles: [StandardButtonTitleEntry]
+        let remoteModifierControls: Set<RemoteControl>
+        let modifierColors: [ModifierColorEntry]
+
+        init(profile: Profile) {
+            name = profile.name
+            mappings = profile.mappings
+            realm = profile.realm
+            midiSettings = profile.midiSettings
+            standardButtonTitles = profile.standardButtonTitles
+            remoteModifierControls = profile.remoteModifierControls
+            modifierColors = profile.modifierColors
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            name = try container.decode(String.self, forKey: .name)
+            mappings = try container.decodeIfPresent([MappingEntry].self, forKey: .mappings) ?? []
+            realm = try container.decodeIfPresent(ProfileRealm.self, forKey: .realm) ?? .standard
+            midiSettings = try container.decodeIfPresent(MIDIProfileSettings.self, forKey: .midiSettings)
+            standardButtonTitles = try container.decodeIfPresent([StandardButtonTitleEntry].self, forKey: .standardButtonTitles) ?? []
+            remoteModifierControls = try container.decodeIfPresent(Set<RemoteControl>.self, forKey: .remoteModifierControls) ?? []
+            modifierColors = try container.decodeIfPresent([ModifierColorEntry].self, forKey: .modifierColors) ?? []
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(name, forKey: .name)
+            try container.encode(mappings, forKey: .mappings)
+            try container.encode(realm, forKey: .realm)
+            try container.encodeIfPresent(midiSettings, forKey: .midiSettings)
+            try container.encode(standardButtonTitles, forKey: .standardButtonTitles)
+            try container.encode(
+                RemoteControl.allCases.filter { remoteModifierControls.contains($0) },
+                forKey: .remoteModifierControls
+            )
+            try container.encode(modifierColors, forKey: .modifierColors)
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case name, mappings, realm, midiSettings, standardButtonTitles, remoteModifierControls, modifierColors
+        }
+
+        var profile: Profile {
+            Profile(
+                name: name,
+                mappings: mappings,
+                hidBindings: [],
+                realm: realm,
+                midiSettings: midiSettings,
+                standardButtonTitles: standardButtonTitles,
+                remoteModifierControls: remoteModifierControls,
+                modifierColors: modifierColors
+            )
+        }
+    }
+
     /// An optional label shown above a Standard-mode K-button in the hardware
     /// preview.  Titles are profile-scoped and intentionally independent of
     /// the Tap/Hold/Double mapping entries.
@@ -213,6 +306,14 @@ struct XPdConfiguration: Codable, Equatable {
         case invalidActiveProfile(String)
         case invalidRememberedProfile(String, ProfileRealm)
         case invalidWorkspaceLockControl(RemoteControl)
+        case emptyHardwareLayoutID
+        case emptyHardwareLayoutName
+        case duplicateHardwareLayoutID(String)
+        case duplicateHardwareLayoutName(String)
+        case invalidActiveHardwareLayout(String)
+        case duplicateHIDControlInLayout(layout: String, control: RemoteControl)
+        case duplicateHIDSignatureInLayout(layout: String, signature: String)
+        case emptyHIDSignatureInLayout(layout: String, control: RemoteControl)
         case invalidRemoteModifierControl(profile: String, control: RemoteControl)
         case remoteModifiersOnMIDIProfile(String)
         case remoteLayersInLegacyProfile(String)
@@ -255,6 +356,22 @@ struct XPdConfiguration: Codable, Equatable {
                 return "Remembered \(realm.rawValue) profile is not present: \(name)."
             case let .invalidWorkspaceLockControl(control):
                 return "Workspace lock control must be a K button: \(control.rawValue)."
+            case .emptyHardwareLayoutID:
+                return "Hardware layout IDs cannot be empty."
+            case .emptyHardwareLayoutName:
+                return "Hardware layout names cannot be empty."
+            case let .duplicateHardwareLayoutID(id):
+                return "Duplicate hardware layout ID: \(id)."
+            case let .duplicateHardwareLayoutName(name):
+                return "Duplicate hardware layout name: \(name)."
+            case let .invalidActiveHardwareLayout(id):
+                return "Invalid active hardware layout: \(id)."
+            case let .duplicateHIDControlInLayout(layout, control):
+                return "Duplicate HID binding in hardware layout \(layout) for \(control.rawValue)."
+            case let .duplicateHIDSignatureInLayout(layout, signature):
+                return "Duplicate HID signature in hardware layout \(layout): \(signature)."
+            case let .emptyHIDSignatureInLayout(layout, control):
+                return "HID signature in hardware layout \(layout) for \(control.rawValue) cannot be empty."
             case let .invalidRemoteModifierControl(profile, control):
                 return "Remote modifier in \(profile) must target a K button: \(control.rawValue)."
             case let .remoteModifiersOnMIDIProfile(profile):
@@ -314,10 +431,14 @@ struct XPdConfiguration: Codable, Equatable {
         lastStandardProfileName: String? = nil,
         lastMIDIProfileName: String? = nil,
         midiLocked: Bool = false,
-        workspaceLockControl: RemoteControl = XPdConfiguration.defaultWorkspaceLockControl
+        workspaceLockControl: RemoteControl = XPdConfiguration.defaultWorkspaceLockControl,
+        hardwareLayouts: [HardwareLayout]? = nil,
+        activeHardwareLayoutID: String? = nil
     ) {
         self.version = version
-        self.profiles = profiles
+        self.profiles = version == Self.currentVersion
+            ? profiles.map(Self.profileWithoutHIDBindings)
+            : profiles
         self.profileName = profileName
         self.showsInputOverlay = showsInputOverlay
         self.activeRealm = activeRealm
@@ -325,6 +446,17 @@ struct XPdConfiguration: Codable, Equatable {
         self.lastMIDIProfileName = lastMIDIProfileName
         self.midiLocked = midiLocked
         self.workspaceLockControl = workspaceLockControl
+        if version == Self.currentVersion {
+            let layouts = hardwareLayouts ?? Self.layoutsDerivedFromProfiles(profiles)
+            self.hardwareLayouts = layouts
+            self.activeHardwareLayoutID = activeHardwareLayoutID
+                ?? Self.activeLayoutID(for: profileName, in: profiles, layouts: layouts)
+                ?? layouts.first?.id
+                ?? ""
+        } else {
+            self.hardwareLayouts = hardwareLayouts ?? []
+            self.activeHardwareLayoutID = activeHardwareLayoutID ?? ""
+        }
     }
 
     init(
@@ -336,7 +468,9 @@ struct XPdConfiguration: Codable, Equatable {
         lastStandardProfileName: String? = nil,
         lastMIDIProfileName: String? = nil,
         midiLocked: Bool = false,
-        workspaceLockKey: RemoteControl = XPdConfiguration.defaultWorkspaceLockControl
+        workspaceLockKey: RemoteControl = XPdConfiguration.defaultWorkspaceLockControl,
+        hardwareLayouts: [HardwareLayout]? = nil,
+        activeHardwareLayoutID: String? = nil
     ) {
         self.init(
             version: version,
@@ -347,7 +481,9 @@ struct XPdConfiguration: Codable, Equatable {
             lastStandardProfileName: lastStandardProfileName,
             lastMIDIProfileName: lastMIDIProfileName,
             midiLocked: midiLocked,
-            workspaceLockControl: workspaceLockKey
+            workspaceLockControl: workspaceLockKey,
+            hardwareLayouts: hardwareLayouts,
+            activeHardwareLayoutID: activeHardwareLayoutID
         )
     }
 
@@ -359,7 +495,12 @@ struct XPdConfiguration: Codable, Equatable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let decodedVersion = try container.decode(Int.self, forKey: .version)
-        let decodedProfiles = try container.decodeIfPresent([Profile].self, forKey: .profiles) ?? []
+        let decodedProfiles: [Profile]
+        if decodedVersion == Self.currentVersion {
+            decodedProfiles = try container.decodeIfPresent([V9ProfilePayload].self, forKey: .profiles)?.map(\.profile) ?? []
+        } else {
+            decodedProfiles = try container.decodeIfPresent([Profile].self, forKey: .profiles) ?? []
+        }
         let decodedProfileName = try container.decodeIfPresent(String.self, forKey: .profileName) ?? "Global"
         let decodedShowsInputOverlay = try container.decodeIfPresent(Bool.self, forKey: .showsInputOverlay) ?? true
         let decodedRealm = try container.decodeIfPresent(ProfileRealm.self, forKey: .activeRealm)
@@ -369,6 +510,8 @@ struct XPdConfiguration: Codable, Equatable {
         let decodedLockControl = try container.decodeIfPresent(RemoteControl.self, forKey: .workspaceLockControl)
             ?? container.decodeIfPresent(RemoteControl.self, forKey: .workspaceLockKey)
             ?? .k3
+        let decodedHardwareLayouts = try container.decodeIfPresent([HardwareLayout].self, forKey: .hardwareLayouts) ?? []
+        let decodedActiveHardwareLayoutID = try container.decodeIfPresent(String.self, forKey: .activeHardwareLayoutID) ?? ""
         version = decodedVersion
         profiles = decodedProfiles
         profileName = decodedProfileName
@@ -378,12 +521,20 @@ struct XPdConfiguration: Codable, Equatable {
         lastMIDIProfileName = decodedLastMIDI
         midiLocked = decodedMIDIlocked
         workspaceLockControl = decodedLockControl
+        hardwareLayouts = decodedHardwareLayouts
+        activeHardwareLayoutID = decodedActiveHardwareLayoutID
     }
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(version, forKey: .version)
-        try container.encode(profiles, forKey: .profiles)
+        if version == Self.currentVersion {
+            try container.encode(profiles.map(V9ProfilePayload.init(profile:)), forKey: .profiles)
+            try container.encode(hardwareLayouts, forKey: .hardwareLayouts)
+            try container.encode(activeHardwareLayoutID, forKey: .activeHardwareLayoutID)
+        } else {
+            try container.encode(profiles, forKey: .profiles)
+        }
         try container.encode(profileName, forKey: .profileName)
         try container.encode(showsInputOverlay, forKey: .showsInputOverlay)
         try container.encode(activeRealm, forKey: .activeRealm)
@@ -394,10 +545,8 @@ struct XPdConfiguration: Codable, Equatable {
     }
 
     /// Decodes and validates the entire document before returning it. Versions
-    /// 2 and 3 are decoded through their published shape and upgraded to v7;
-    /// every migrated profile is explicitly marked as standard. Versions 4–6
-    /// gain the newer fields through compatibility defaults, while v6's
-    /// legacy keyboard/F-key trigger data is retained unchanged.
+    /// 2–8 retain their published profile-owned HID shape while being upgraded
+    /// to the v9 device-level hardware-layout shape.
     static func decode(_ data: Data) throws -> XPdConfiguration {
         let decoder = JSONDecoder()
         let version = try decoder.decode(VersionEnvelope.self, from: data).version
@@ -406,11 +555,15 @@ struct XPdConfiguration: Codable, Equatable {
             let configuration = try decoder.decode(XPdConfiguration.self, from: data)
             try configuration.validate()
             return configuration
+        case preHardwareLayoutsVersion:
+            let legacy = try decoder.decode(XPdConfiguration.self, from: data)
+            try legacy.validateV8()
+            return try migrateLegacy(legacy)
         case preModifierColorsVersion:
             let legacy = try decoder.decode(XPdConfiguration.self, from: data)
             try legacy.validateV7()
-            return XPdConfiguration(
-                version: currentVersion,
+            let normalized = XPdConfiguration(
+                version: preHardwareLayoutsVersion,
                 profiles: legacy.profiles.map { profile in
                     Profile(
                         name: profile.name,
@@ -420,7 +573,9 @@ struct XPdConfiguration: Codable, Equatable {
                         midiSettings: profile.midiSettings,
                         standardButtonTitles: profile.standardButtonTitles,
                         remoteModifierControls: profile.remoteModifierControls,
-                        modifierColors: profile.remoteModifierControls.map {
+                        modifierColors: RemoteControl.allCases.filter {
+                            profile.remoteModifierControls.contains($0)
+                        }.map {
                             ModifierColorEntry(control: $0, color: .orange)
                         }
                     )
@@ -433,11 +588,13 @@ struct XPdConfiguration: Codable, Equatable {
                 midiLocked: legacy.midiLocked,
                 workspaceLockControl: legacy.workspaceLockControl
             )
+            try normalized.validateV8()
+            return try migrateLegacy(normalized)
         case preRemoteTriggerKeysVersion:
             let legacy = try decoder.decode(XPdConfiguration.self, from: data)
             try legacy.validateV6()
-            return XPdConfiguration(
-                version: currentVersion,
+            let normalized = XPdConfiguration(
+                version: preHardwareLayoutsVersion,
                 profiles: legacy.profiles.map { profile in
                     Profile(
                         name: profile.name,
@@ -447,7 +604,9 @@ struct XPdConfiguration: Codable, Equatable {
                         midiSettings: profile.midiSettings,
                         standardButtonTitles: profile.standardButtonTitles,
                         remoteModifierControls: profile.remoteModifierControls,
-                        modifierColors: profile.remoteModifierControls.map {
+                        modifierColors: RemoteControl.allCases.filter {
+                            profile.remoteModifierControls.contains($0)
+                        }.map {
                             ModifierColorEntry(control: $0, color: .orange)
                         }
                     )
@@ -460,11 +619,13 @@ struct XPdConfiguration: Codable, Equatable {
                 midiLocked: legacy.midiLocked,
                 workspaceLockControl: legacy.workspaceLockControl
             )
+            try normalized.validateV8()
+            return try migrateLegacy(normalized)
         case preRemoteLayersVersion:
             let legacy = try decoder.decode(XPdConfiguration.self, from: data)
             try legacy.validateV5()
-            return XPdConfiguration(
-                version: currentVersion,
+            let normalized = XPdConfiguration(
+                version: preHardwareLayoutsVersion,
                 profiles: legacy.profiles.map {
                     Profile(
                         name: $0.name,
@@ -485,11 +646,13 @@ struct XPdConfiguration: Codable, Equatable {
                 midiLocked: legacy.midiLocked,
                 workspaceLockControl: legacy.workspaceLockControl
             )
+            try normalized.validateV8()
+            return try migrateLegacy(normalized)
         case preTitlesVersion:
             let legacy = try decoder.decode(XPdConfiguration.self, from: data)
             try legacy.validateV4()
-            return XPdConfiguration(
-                version: currentVersion,
+            let normalized = XPdConfiguration(
+                version: preHardwareLayoutsVersion,
                 profiles: legacy.profiles.map {
                     Profile(
                         name: $0.name,
@@ -510,6 +673,8 @@ struct XPdConfiguration: Codable, Equatable {
                 midiLocked: legacy.midiLocked,
                 workspaceLockControl: legacy.workspaceLockControl
             )
+            try normalized.validateV8()
+            return try migrateLegacy(normalized)
         case legacyVersion, previousVersion:
             let legacy = try decoder.decode(XPdConfiguration.self, from: data)
             if version == legacyVersion {
@@ -517,8 +682,8 @@ struct XPdConfiguration: Codable, Equatable {
             } else {
                 try legacy.validateV3()
             }
-            return XPdConfiguration(
-                version: currentVersion,
+            let normalized = XPdConfiguration(
+                version: preHardwareLayoutsVersion,
                 profiles: legacy.profiles.map {
                     Profile(
                         name: $0.name,
@@ -539,9 +704,102 @@ struct XPdConfiguration: Codable, Equatable {
                 midiLocked: false,
                 workspaceLockControl: .k3
             )
+            try normalized.validateV8()
+            return try migrateLegacy(normalized)
         default:
             throw ValidationError.unsupportedVersion(version)
         }
+    }
+
+    private static func migrateLegacy(_ legacy: XPdConfiguration) throws -> XPdConfiguration {
+        var layouts: [HardwareLayout] = []
+        var profileLayoutIndexes: [Int] = []
+
+        for profile in legacy.profiles {
+            let normalizedBindings = normalizedHIDBindings(profile.hidBindings)
+            if let existingIndex = layouts.firstIndex(where: { $0.hidBindings == normalizedBindings }) {
+                profileLayoutIndexes.append(existingIndex)
+            } else {
+                let index = layouts.count
+                layouts.append(
+                    HardwareLayout(
+                        id: "migrated-\(index + 1)",
+                        name: "Migrated from \(profile.name)",
+                        hidBindings: normalizedBindings
+                    )
+                )
+                profileLayoutIndexes.append(index)
+            }
+        }
+
+        let activeProfileIndex = legacy.profiles.firstIndex(where: { $0.name == legacy.profileName }) ?? 0
+        let activeLayoutIndex = profileLayoutIndexes[activeProfileIndex]
+        let migrated = XPdConfiguration(
+            version: Self.currentVersion,
+            profiles: legacy.profiles.map(profileWithoutHIDBindings),
+            profileName: legacy.profileName,
+            showsInputOverlay: legacy.showsInputOverlay,
+            activeRealm: legacy.activeRealm,
+            lastStandardProfileName: legacy.lastStandardProfileName,
+            lastMIDIProfileName: legacy.lastMIDIProfileName,
+            midiLocked: legacy.midiLocked,
+            workspaceLockControl: legacy.workspaceLockControl,
+            hardwareLayouts: layouts,
+            activeHardwareLayoutID: layouts[activeLayoutIndex].id
+        )
+        try migrated.validate()
+        return migrated
+    }
+
+    private static func profileWithoutHIDBindings(_ profile: Profile) -> Profile {
+        Profile(
+            name: profile.name,
+            mappings: profile.mappings,
+            hidBindings: [],
+            realm: profile.realm,
+            midiSettings: profile.midiSettings,
+            standardButtonTitles: profile.standardButtonTitles,
+            remoteModifierControls: profile.remoteModifierControls,
+            modifierColors: profile.modifierColors
+        )
+    }
+
+    private static func normalizedHIDBindings(_ bindings: [HIDBindingEntry]) -> [HIDBindingEntry] {
+        bindings.sorted {
+            let lhsControl = controlIndex($0.control)
+            let rhsControl = controlIndex($1.control)
+            if lhsControl != rhsControl { return lhsControl < rhsControl }
+            return $0.signature < $1.signature
+        }
+    }
+
+    private static func layoutsDerivedFromProfiles(_ profiles: [Profile]) -> [HardwareLayout] {
+        var layouts: [HardwareLayout] = []
+        for profile in profiles {
+            let normalizedBindings = normalizedHIDBindings(profile.hidBindings)
+            guard !layouts.contains(where: { $0.hidBindings == normalizedBindings }) else { continue }
+            layouts.append(
+                HardwareLayout(
+                    id: "layout-\(layouts.count + 1)",
+                    name: layouts.isEmpty ? "Default" : "Layout \(layouts.count + 1)",
+                    hidBindings: normalizedBindings
+                )
+            )
+        }
+        if layouts.isEmpty {
+            layouts.append(HardwareLayout(id: "layout-1", name: "Default", hidBindings: []))
+        }
+        return layouts
+    }
+
+    private static func activeLayoutID(
+        for profileName: String,
+        in profiles: [Profile],
+        layouts: [HardwareLayout]
+    ) -> String? {
+        guard let profile = profiles.first(where: { $0.name == profileName }) else { return nil }
+        let normalizedBindings = normalizedHIDBindings(profile.hidBindings)
+        return layouts.first(where: { $0.hidBindings == normalizedBindings })?.id
     }
 
     /// Validates semantic constraints that Codable cannot express itself.
@@ -584,6 +842,7 @@ struct XPdConfiguration: Codable, Equatable {
         try validateRememberedProfile(lastStandardProfileName, realm: .standard)
         try validateRememberedProfile(lastMIDIProfileName, realm: .midi)
 
+        try validateHardwareLayouts()
         try validateEntries()
     }
 
@@ -708,6 +967,16 @@ struct XPdConfiguration: Codable, Equatable {
         try validateEntries(allowModifierColors: false)
     }
 
+    /// Version 8 is the final profile-owned HID schema. It is validated
+    /// before its bindings are grouped into v9 hardware layouts.
+    private func validateV8() throws {
+        guard version == Self.preHardwareLayoutsVersion else {
+            throw ValidationError.unsupportedVersion(version)
+        }
+        try validateCurrentProfileShape()
+        try validateEntries()
+    }
+
     private func validateCurrentProfileShape() throws {
         guard !profiles.isEmpty else {
             throw ValidationError.missingProfileName("Global")
@@ -748,6 +1017,54 @@ struct XPdConfiguration: Codable, Equatable {
         guard let name else { return }
         guard profiles.contains(where: { $0.name == name && $0.realm == realm }) else {
             throw ValidationError.invalidRememberedProfile(name, realm)
+        }
+    }
+
+    private func validateHardwareLayouts() throws {
+        var layoutIDs = Set<String>()
+        var layoutNames = Set<String>()
+
+        for layout in hardwareLayouts {
+            guard !layout.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw ValidationError.emptyHardwareLayoutID
+            }
+            guard !layout.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw ValidationError.emptyHardwareLayoutName
+            }
+            guard layoutIDs.insert(layout.id).inserted else {
+                throw ValidationError.duplicateHardwareLayoutID(layout.id)
+            }
+            let nameKey = Self.profileNameComparisonKey(layout.name)
+            guard layoutNames.insert(nameKey).inserted else {
+                throw ValidationError.duplicateHardwareLayoutName(layout.name)
+            }
+
+            var controls = Set<RemoteControl>()
+            var signatures = Set<String>()
+            for entry in layout.hidBindings {
+                guard !entry.signature.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw ValidationError.emptyHIDSignatureInLayout(
+                        layout: layout.name,
+                        control: entry.control
+                    )
+                }
+                guard controls.insert(entry.control).inserted else {
+                    throw ValidationError.duplicateHIDControlInLayout(
+                        layout: layout.name,
+                        control: entry.control
+                    )
+                }
+                guard signatures.insert(entry.signature).inserted else {
+                    throw ValidationError.duplicateHIDSignatureInLayout(
+                        layout: layout.name,
+                        signature: entry.signature
+                    )
+                }
+            }
+        }
+
+        guard layoutIDs.contains(activeHardwareLayoutID) else {
+            throw ValidationError.invalidActiveHardwareLayout(activeHardwareLayoutID)
         }
     }
 
@@ -951,6 +1268,8 @@ struct XPdConfiguration: Codable, Equatable {
             try validateV6()
         case Self.preModifierColorsVersion:
             try validateV7()
+        case Self.preHardwareLayoutsVersion:
+            try validateV8()
         case Self.currentVersion:
             try validate()
         default:
@@ -996,7 +1315,19 @@ struct XPdConfiguration: Codable, Equatable {
             lastStandardProfileName: lastStandardProfileName,
             lastMIDIProfileName: lastMIDIProfileName,
             midiLocked: midiLocked,
-            workspaceLockControl: workspaceLockControl
+            workspaceLockControl: workspaceLockControl,
+            hardwareLayouts: version == Self.currentVersion
+                ? hardwareLayouts.map { layout in
+                    HardwareLayout(
+                        id: layout.id,
+                        name: layout.name,
+                        hidBindings: Self.normalizedHIDBindings(layout.hidBindings)
+                    )
+                }
+                : nil,
+            activeHardwareLayoutID: version == Self.currentVersion
+                ? activeHardwareLayoutID
+                : nil
         )
 
         let encoder = JSONEncoder()
@@ -1012,6 +1343,7 @@ struct XPdConfiguration: Codable, Equatable {
         case version, profiles, profileName, showsInputOverlay
         case activeRealm, lastStandardProfileName, lastMIDIProfileName
         case midiLocked, workspaceLockControl, workspaceLockKey
+        case hardwareLayouts, activeHardwareLayoutID
     }
 
     private static func sortedMIDISettings(_ settings: MIDIProfileSettings?) -> MIDIProfileSettings? {

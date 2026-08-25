@@ -32,8 +32,8 @@ final class MappingStoreModifierBindingTests: XCTestCase {
             gesture: .tap,
             modifierControls: [.k10]
         )
-        try mutatePersistedProfiles { state in
-            state["hidBindings"] = try removingBinding(for: .k10, from: state["hidBindings"])
+        try mutatePersistedProfiles { layout in
+            layout["bindings"] = try removingBinding(for: .k10, from: layout["bindings"])
         }
 
         let restored = makeStore()
@@ -350,18 +350,17 @@ final class MappingStoreModifierBindingTests: XCTestCase {
     private func mutatePersistedProfiles(
         _ mutate: (inout JSONDictionary) throws -> Void
     ) throws {
-        let data = try XCTUnwrap(defaults.data(forKey: "XPd.profiles.v8"))
+        let data = try XCTUnwrap(defaults.data(forKey: "XPd.profiles.v9"))
         var root = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? JSONDictionary)
-        var profiles = try XCTUnwrap(root["profiles"] as? [JSONDictionary])
-        guard let globalIndex = profiles.firstIndex(where: { $0["name"] as? String == "Global" }) else {
-            XCTFail("Persisted fixture is missing the Global profile")
+        var layouts = try XCTUnwrap(root["hardwareLayouts"] as? [JSONDictionary])
+        let activeID = try XCTUnwrap(root["activeHardwareLayoutID"] as? String)
+        guard let activeIndex = layouts.firstIndex(where: { $0["id"] as? String == activeID }) else {
+            XCTFail("Persisted fixture is missing the active hardware layout")
             return
         }
-        var state = try XCTUnwrap(profiles[globalIndex]["state"] as? JSONDictionary)
-        try mutate(&state)
-        profiles[globalIndex]["state"] = state
-        root["profiles"] = profiles
-        defaults.set(try JSONSerialization.data(withJSONObject: root), forKey: "XPd.profiles.v8")
+        try mutate(&layouts[activeIndex])
+        root["hardwareLayouts"] = layouts
+        defaults.set(try JSONSerialization.data(withJSONObject: root), forKey: "XPd.profiles.v9")
     }
 
     private func bindingPairs(from value: Any?) throws -> [Any] {
