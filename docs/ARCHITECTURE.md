@@ -47,9 +47,10 @@ learned K report pairs for order-specific masking; this is inferred compatibilit
 not a live hardware claim. Clearing a designated modifier binding cancels pending
 input and removes the designation in the same save.
 
-Standard K-layer input → accumulate either factory report-6 keyboard states or
-the verified programmed report-2 `F0` bitfield until their respective empty/zero
-release boundary → ignore empty reports 1, 7, and 9 from the device's unrelated
+Standard K-layer input → reconcile the owner's current report-6 F13–F22 keyboard
+snapshots; retain legacy factory report-6 and historical programmed report-2
+`F0` support until their respective empty/zero release boundary → ignore empty
+reports 1, 7, and 9 from the device's unrelated
 mouse/digitizer collections → classify every designated K as a modifier and
 require exactly one non-designated primary → route Tap/Hold/Double through the
 exact modifier-set `MappingKey`. Pending gesture identity includes the primary,
@@ -69,12 +70,18 @@ order is irrelevant within one active rollover cycle. Profile/import/learning/
 disconnect/wheel boundaries cancel active state. Physical timing still requires
 owner acceptance on the target remote.
 
-Programmed report-2 input is a complete held-button snapshot. Standard routing
+Historical programmed report-2 input is a complete held-button snapshot. Standard routing
 reconciles additions and partial releases so releasing a destination while its
 modifier remains held completes the layer without rearming the modifier Base.
 MIDI routing performs the same state diff, presses Fn before newly added
 destinations, and releases destinations before Fn. Report-6 nil/wheel releases
 never clear a separate report-2 held set. HID bindings remain profile-specific.
+
+The current owner setup emits K1→F13 through K10→F22 as report-6 usages
+`0x68...0x71`, including over BLE. Transport does not select the keyboard
+encoding. Compatibility warnings analyze saved profile bindings only; they must
+not be presented as live hardware evidence when those bindings still contain
+the factory defaults.
 
 Raw report callback → normalize a possible report-ID prefix → append the report
 to a 12-entry chronological in-memory trace before duplicate/empty semantic
