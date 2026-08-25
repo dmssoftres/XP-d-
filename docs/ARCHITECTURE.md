@@ -47,9 +47,9 @@ learned K report pairs for order-specific masking; this is inferred compatibilit
 not a live hardware claim. Clearing a designated modifier binding cancels pending
 input and removes the designation in the same save.
 
-Standard K-layer input → reconcile the owner's current report-6 F13–F22 keyboard
-snapshots; retain legacy factory report-6 and historical programmed report-2
-`F0` support until their respective empty/zero release boundary → ignore empty
+Standard K-layer input → reconcile learned report-6 keyboard snapshots or the
+programmed report-2 `F0` bitfield until their respective empty/zero release
+boundary → ignore empty
 reports 1, 7, and 9 from the device's unrelated
 mouse/digitizer collections → classify every designated K as a modifier and
 require exactly one non-designated primary → route Tap/Hold/Double through the
@@ -70,18 +70,19 @@ order is irrelevant within one active rollover cycle. Profile/import/learning/
 disconnect/wheel boundaries cancel active state. Physical timing still requires
 owner acceptance on the target remote.
 
-Historical programmed report-2 input is a complete held-button snapshot. Standard routing
+Programmed report-2 input is a complete held-button snapshot. Standard routing
 reconciles additions and partial releases so releasing a destination while its
 modifier remains held completes the layer without rearming the modifier Base.
 MIDI routing performs the same state diff, presses Fn before newly added
 destinations, and releases destinations before Fn. Report-6 nil/wheel releases
 never clear a separate report-2 held set. HID bindings remain profile-specific.
 
-The current owner setup emits K1→F13 through K10→F22 as report-6 usages
-`0x68...0x71`, including over BLE. Transport does not select the keyboard
-encoding. Compatibility warnings analyze saved profile bindings only; they must
-not be presented as live hardware evidence when those bindings still contain
-the factory defaults.
+The owner currently sees K1→F13 through K10→F22 in XPPen's editor. The current
+raw encoding is not established without a new trace. Transport does not select
+the keyboard encoding, and editor labels do not prove it. Compatibility warnings
+analyze saved profile bindings only; current saved values were deliberately
+restored to factory report 6 before the later onboard Store and were never
+relearned afterward.
 
 Raw report callback → normalize a possible report-ID prefix → append the report
 to a 12-entry chronological in-memory trace before duplicate/empty semantic
