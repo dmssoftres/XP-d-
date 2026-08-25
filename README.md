@@ -71,6 +71,10 @@ changing the existing mapping. While recording, modifier and key chips can be
 removed independently; the clear button removes either the draft or saved
 shortcut.
 
+Arrow and navigation keys are captured as shortcut keys rather than moving
+focus while the field is recording. The Globe key is represented as `fn` and
+acts only as a modifier, so it must be recorded with another key.
+
 XP[d] stores the recorded physical key code with its modifiers and replays one
 key-down/key-up chord through macOS when the mapping runs. Accessibility
 post-event access is required; physical button input only checks that permission

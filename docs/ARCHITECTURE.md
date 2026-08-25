@@ -89,9 +89,9 @@ the chosen exact K-modifier set to the right action column → render one comple
 overwriting, or deleting other exact-layer mappings. Title, modifier designation,
 gesture, and result state remain shared outside the split. Keyboard-shortcut and
 trigger-chord capture are mutually exclusive across the two columns so only one
-local event monitor/capture handler remains active.
+first-responder capture bridge remains active.
 
-Keyboard-shortcut capture → local AppKit key-down/flags-changed monitor → in-view draft for exactly one simultaneous chord (zero or more modifiers plus one physical key) → second mouse click commits structured chord data and its readable display text. Escape, selection/action changes, and view removal cancel the draft without changing either mapping. Remote K-buttons remain mapping triggers and are never recorded as shortcut inputs. `ActionRunner` silently preflights post-event access and, only for a structured chord, posts one matching key-down/key-up pair; legacy command-text shortcuts remain visible but are rejected with re-record guidance.
+Keyboard-shortcut capture → a one-pixel, non-hit-testing AppKit view becomes first responder → key-down, key-equivalent, and flags-changed events update an in-view draft for exactly one simultaneous chord (zero or more modifiers plus one physical key) → second mouse click commits structured chord data and its readable display text. The bridge consumes navigation keys while recording, preserves Globe/Fn as modifier state, and restores the previous responder when removed. Escape, selection/action changes, and view removal cancel the draft without changing either mapping. Remote K-buttons remain mapping triggers and are never recorded as shortcut inputs. `ActionRunner` silently preflights post-event access and, only for a structured chord, posts one matching key-down/key-up pair; legacy command-text shortcuts remain visible but are rejected with re-record guidance.
 
 Additional Standard action editor → action-specific text editor or constrained
 picker → existing `Mapping.command` persistence field → `ActionRunner` native or
@@ -182,7 +182,7 @@ The build script compiles `XPd`, assembles `dist/XP[d].app`, creates its Info.pl
 - Wheel-center report changes or loses its device-specific standalone empty report-6 distinction: selector confirmation may regress and requires controlled real-hardware recapture.
 - Action target unavailable or permission denied: report a structured action failure without corrupting mappings. Existing application targets are unhidden/restored where permitted, directly activated, and asynchronously verified as foreground; a failed or ineffective direct activation makes one same-path `NSWorkspace` reopen attempt without creating another instance.
 - Inherited Hold/Double target invalid: show the Tap validation failure and do not invoke `ActionRunner`.
-- Keyboard-shortcut capture interrupted: remove the local event monitor and discard the in-memory chord draft without writing into the current or newly selected mapping.
+- Keyboard-shortcut capture interrupted: remove the temporary first-responder bridge, restore normal focus where possible, and discard the in-memory chord draft without writing into the current or newly selected mapping.
 - CoreMIDI source creation/send failure: keep profile state intact, report the
   affected port, and retain failed live/toggle state so cleanup can retry.
 - Unverified physical Fn rollover: do not substitute a latch or claim the

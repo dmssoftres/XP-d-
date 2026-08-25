@@ -32,7 +32,6 @@ struct RemoteTriggerChordCaptureField: View {
     @State private var draftKeyDisplay = ""
     @State private var currentModifierFlags: NSEvent.ModifierFlags = []
     @State private var didEditKeyboardCondition = false
-    @State private var eventMonitor: Any?
 
     private var hasDraft: Bool {
         draftKeyCode != nil || !draftModifiers.isEmpty || !draftModifierControls.isEmpty
@@ -152,6 +151,31 @@ struct RemoteTriggerChordCaptureField: View {
         .onDisappear {
             stopRecording(commit: false)
         }
+        .overlay {
+            if isRecording {
+                KeyboardShortcutCaptureResponder(
+                    onKeyDown: { event in
+                        guard let captured = KeyboardShortcutCaptureFormatter.shortcut(for: event) else {
+                            return
+                        }
+                        draftKeyCode = captured.keyCode
+                        draftKeyDisplay = KeyboardShortcutCaptureFormatter.keyLabel(for: event)
+                        draftModifiers = captured.modifiers
+                        didEditKeyboardCondition = true
+                    },
+                    onFlagsChanged: { event in
+                        currentModifierFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+                        if draftKeyCode == nil {
+                            draftModifiers = KeyboardShortcutCaptureFormatter.modifierSet(for: currentModifierFlags)
+                            didEditKeyboardCondition = true
+                        }
+                    },
+                    onEscape: nil
+                )
+                .frame(width: 1, height: 1)
+                .allowsHitTesting(false)
+            }
+        }
     }
 
     private func removableChip(
@@ -237,27 +261,6 @@ struct RemoteTriggerChordCaptureField: View {
             draftModifierControls.insert(control)
         }
         onRecordingChange(true)
-
-        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { event in
-            switch event.type {
-            case .keyDown:
-                if let captured = KeyboardShortcutCaptureFormatter.shortcut(for: event) {
-                    draftKeyCode = captured.keyCode
-                    draftKeyDisplay = KeyboardShortcutCaptureFormatter.keyLabel(for: event)
-                    draftModifiers = captured.modifiers
-                    didEditKeyboardCondition = true
-                }
-            case .flagsChanged:
-                currentModifierFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-                if draftKeyCode == nil {
-                    draftModifiers = KeyboardShortcutCaptureFormatter.modifierSet(for: currentModifierFlags)
-                    didEditKeyboardCondition = true
-                }
-            default:
-                break
-            }
-            return nil
-        }
     }
 
     private func clearTriggerKeys() {
@@ -273,10 +276,6 @@ struct RemoteTriggerChordCaptureField: View {
 
     private func stopRecording(commit: Bool) {
         guard isRecording else { return }
-        if let eventMonitor {
-            NSEvent.removeMonitor(eventMonitor)
-            self.eventMonitor = nil
-        }
         isRecording = false
         endRemoteCapture()
         onRecordingChange(false)

@@ -87,6 +87,115 @@ enum KeyboardShortcutCaptureFormatter {
     }
 }
 
+/// A non-hit-testing AppKit responder used while a SwiftUI capture field is
+/// recording. SwiftUI controls are allowed to handle arrow keys and key
+/// equivalents as focus/navigation commands; a dedicated first responder
+/// keeps those events inside the recorder without changing the click-to-start
+/// and click-to-commit interaction.
+struct KeyboardShortcutCaptureResponder: NSViewRepresentable {
+    let onKeyDown: (NSEvent) -> Void
+    let onFlagsChanged: (NSEvent) -> Void
+    let onEscape: (() -> Void)?
+
+    func makeNSView(context: Context) -> KeyboardShortcutCaptureResponderView {
+        let view = KeyboardShortcutCaptureResponderView()
+        view.onKeyDown = onKeyDown
+        view.onFlagsChanged = onFlagsChanged
+        view.onEscape = onEscape
+        return view
+    }
+
+    func updateNSView(_ nsView: KeyboardShortcutCaptureResponderView, context: Context) {
+        nsView.onKeyDown = onKeyDown
+        nsView.onFlagsChanged = onFlagsChanged
+        nsView.onEscape = onEscape
+        nsView.requestFirstResponder()
+    }
+
+    static func dismantleNSView(_ nsView: KeyboardShortcutCaptureResponderView, coordinator: ()) {
+        nsView.restorePreviousFirstResponder()
+    }
+}
+
+final class KeyboardShortcutCaptureResponderView: NSView {
+    var onKeyDown: ((NSEvent) -> Void)?
+    var onFlagsChanged: ((NSEvent) -> Void)?
+    var onEscape: (() -> Void)?
+
+    private weak var previousFirstResponder: NSResponder?
+    private var hasRequestedFirstResponder = false
+    private var firstResponderRequestScheduled = false
+
+    override var acceptsFirstResponder: Bool { true }
+    override var canBecomeKeyView: Bool { true }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        requestFirstResponder()
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        // The SwiftUI button underneath remains responsible for mouse clicks,
+        // including the click that commits a completed draft.
+        nil
+    }
+
+    func requestFirstResponder() {
+        guard let window else { return }
+        guard window.firstResponder !== self else { return }
+
+        if !hasRequestedFirstResponder {
+            previousFirstResponder = window.firstResponder
+            hasRequestedFirstResponder = true
+        }
+
+        if window.makeFirstResponder(self) {
+            return
+        }
+
+        guard !firstResponderRequestScheduled else { return }
+        firstResponderRequestScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.firstResponderRequestScheduled = false
+            guard let window = self.window else { return }
+            if window.firstResponder !== self {
+                _ = window.makeFirstResponder(self)
+            }
+        }
+    }
+
+    func restorePreviousFirstResponder() {
+        guard let window, window.firstResponder === self else { return }
+        _ = window.makeFirstResponder(previousFirstResponder)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53, let onEscape {
+            onEscape()
+        } else {
+            onKeyDown?(event)
+        }
+        // Consume repeats and unrecognized keys while recording so arrow and
+        // navigation input cannot escape into SwiftUI focus movement.
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.keyCode == 53, let onEscape {
+            onEscape()
+        } else {
+            onKeyDown?(event)
+        }
+        // Command/control key equivalents (including command-arrow) are
+        // offered here before keyDown; route them through the same formatter.
+        return true
+    }
+
+    override func flagsChanged(with event: NSEvent) {
+        onFlagsChanged?(event)
+    }
+}
+
 /// A click-to-record field for one simultaneous keyboard chord.  Modifier
 /// `flagsChanged` events update the current state only; a non-modifier
 /// `keyDown` captures that state and replaces the single draft chord.
@@ -102,7 +211,6 @@ struct KeyboardShortcutCaptureField: View {
     @State private var draftModifiers: Set<KeyboardShortcut.Modifier> = []
     @State private var currentModifierFlags: NSEvent.ModifierFlags = []
     @State private var didEditDraft = false
-    @State private var eventMonitor: Any?
 
     private var draftShortcut: KeyboardShortcut? {
         guard let keyCode = draftKeyCode, !draftKeyLabel.isEmpty else { return nil }
@@ -192,6 +300,44 @@ struct KeyboardShortcutCaptureField: View {
         .onDisappear {
             stopRecording(commit: false)
         }
+        .overlay {
+            if isRecording {
+                KeyboardShortcutCaptureResponder(
+                    onKeyDown: { event in
+                        guard let captured = KeyboardShortcutCaptureFormatter.shortcut(for: event) else {
+                            return
+                        }
+                        draftKeyCode = captured.keyCode
+                        draftKeyLabel = KeyboardShortcutCaptureFormatter.keyLabel(for: event)
+                        draftModifiers = captured.modifiers
+                        didEditDraft = true
+                    },
+                    onFlagsChanged: { event in
+                        guard let modifierFlag = KeyboardShortcutCaptureFormatter.modifierFlag(for: event.keyCode) else {
+                            return
+                        }
+                        if event.modifierFlags.contains(modifierFlag) {
+                            currentModifierFlags.insert(modifierFlag)
+                        } else {
+                            currentModifierFlags.remove(modifierFlag)
+                        }
+
+                        // Before the final key is pressed, show held
+                        // modifiers as removable chips. Once a key is
+                        // captured, keep the draft stable so releasing a
+                        // modifier cannot mutate the saved chord.
+                        if draftKeyCode == nil {
+                            draftModifiers = KeyboardShortcutCaptureFormatter.modifierSet(for: currentModifierFlags)
+                        }
+                    },
+                    onEscape: {
+                        stopRecording(commit: false)
+                    }
+                )
+                .frame(width: 1, height: 1)
+                .allowsHitTesting(false)
+            }
+        }
     }
 
     private func removableChip(
@@ -251,38 +397,6 @@ struct KeyboardShortcutCaptureField: View {
         didEditDraft = false
         isRecording = true
         onRecordingChange(true)
-        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { event in
-            switch event.type {
-            case .keyDown:
-                if event.keyCode == 53 {
-                    stopRecording(commit: false)
-                } else if let captured = KeyboardShortcutCaptureFormatter.shortcut(for: event) {
-                    draftKeyCode = captured.keyCode
-                    draftKeyLabel = KeyboardShortcutCaptureFormatter.keyLabel(for: event)
-                    draftModifiers = captured.modifiers
-                    didEditDraft = true
-                }
-            case .flagsChanged:
-                if let modifierFlag = KeyboardShortcutCaptureFormatter.modifierFlag(for: event.keyCode) {
-                    if event.modifierFlags.contains(modifierFlag) {
-                        currentModifierFlags.insert(modifierFlag)
-                    } else {
-                        currentModifierFlags.remove(modifierFlag)
-                    }
-
-                    // Before the final key is pressed, show held modifiers as
-                    // removable chips.  Once a key is captured, keep the
-                    // draft stable so releasing a modifier cannot mutate the
-                    // saved chord.
-                    if draftKeyCode == nil {
-                        draftModifiers = KeyboardShortcutCaptureFormatter.modifierSet(for: currentModifierFlags)
-                    }
-                }
-            default:
-                break
-            }
-            return nil
-        }
     }
 
     private func removeModifier(_ modifier: KeyboardShortcut.Modifier) {
@@ -312,10 +426,6 @@ struct KeyboardShortcutCaptureField: View {
 
     private func stopRecording(commit: Bool) {
         guard isRecording else { return }
-        if let eventMonitor {
-            NSEvent.removeMonitor(eventMonitor)
-            self.eventMonitor = nil
-        }
         isRecording = false
         onRecordingChange(false)
         if commit, didEditDraft {

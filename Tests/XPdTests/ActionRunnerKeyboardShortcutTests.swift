@@ -43,6 +43,37 @@ final class ActionRunnerKeyboardShortcutTests: XCTestCase {
         XCTAssertEqual(postedEvents[1].flags, expectedFlags)
     }
 
+    func testKeyboardShortcutPlaybackPreservesArrowKeyAndSecondaryFunctionFlag() {
+        let shortcut = KeyboardShortcut(
+            keyCode: 123,
+            modifiers: [.function],
+            displayString: "fn←"
+        )
+        var postedEvents: [CGEvent] = []
+        let runner = ActionRunner(
+            postEventAccessProvider: { true },
+            eventPoster: { postedEvents.append($0) }
+        )
+        var result: ActionExecutionResult?
+
+        runner.execute(
+            mapping: Mapping(
+                action: .keyboardShortcut,
+                command: shortcut.displayString,
+                keyboardShortcut: shortcut
+            )
+        ) { result = $0 }
+
+        XCTAssertEqual(result, .success("Sent fn←"))
+        XCTAssertEqual(postedEvents.count, 2)
+        XCTAssertEqual(
+            postedEvents.map { $0.getIntegerValueField(.keyboardEventKeycode) },
+            [123, 123]
+        )
+        XCTAssertEqual(postedEvents.map(\.type), [.keyDown, .keyUp])
+        XCTAssertTrue(postedEvents.allSatisfy { $0.flags.contains(.maskSecondaryFn) })
+    }
+
     func testKeyboardShortcutFailsWithoutPostEventAccessAndDoesNotPost() {
         let shortcut = KeyboardShortcut(keyCode: 35, modifiers: [.command], displayString: "⌘P")
         var postedEvents: [CGEvent] = []
