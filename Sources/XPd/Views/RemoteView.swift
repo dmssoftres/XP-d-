@@ -356,7 +356,15 @@ struct RemoteView: View {
     private func standardKeyButton(_ control: RemoteControl, height: CGFloat) -> some View {
         let title = store.standardButtonTitle(for: control)
         let routes = store.standardApplicationRoutes(for: control)
-        let routeSelection = standardApplicationRouteDisplaySelection(routes)
+        let nonApplicationRoutes = store.standardNonApplicationRoutes(for: control)
+        let routeSelection = standardApplicationRouteDisplaySelection(
+            routes,
+            hasNonApplicationMarkers: !nonApplicationRoutes.isEmpty
+        )
+        let nonApplicationMarkerSelection = standardNonApplicationMarkerDisplaySelection(
+            nonApplicationRoutes,
+            applicationHiddenCount: routeSelection.hiddenCount
+        )
         let hasMainWindowToggle = store.hasMainWindowToggleMapping(for: control)
         return Button {
             store.selectedControl = control
@@ -388,9 +396,11 @@ struct RemoteView: View {
                     applicationRouteStrip(
                         routeSelection.visible,
                         hiddenCount: routeSelection.hiddenCount,
-                        height: height
+                        height: height,
+                        reservesBottomRow: !nonApplicationRoutes.isEmpty
                     )
                 }
+
             }
             .frame(maxWidth: .infinity, minHeight: height, maxHeight: height)
             .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
@@ -399,6 +409,11 @@ struct RemoteView: View {
             selected: store.selectedControl == control,
             live: store.liveControl == control
         ))
+        .overlay(alignment: .bottomTrailing) {
+            if !nonApplicationRoutes.isEmpty {
+                standardNonApplicationMarkerStrip(nonApplicationMarkerSelection)
+            }
+        }
         .overlay(alignment: .topLeading) {
             if hasMainWindowToggle {
                 Image(nsImage: NSApplication.shared.applicationIconImage)
@@ -431,7 +446,8 @@ struct RemoteView: View {
                 title: title,
                 routes: routes,
                 hiddenCount: routeSelection.hiddenCount,
-                hasMainWindowToggle: hasMainWindowToggle
+                hasMainWindowToggle: hasMainWindowToggle,
+                nonApplicationMarkers: nonApplicationMarkerSelection
             )
         )
         .help(
@@ -440,15 +456,87 @@ struct RemoteView: View {
                 title: title,
                 routes: routes,
                 hiddenCount: routeSelection.hiddenCount,
-                hasMainWindowToggle: hasMainWindowToggle
+                hasMainWindowToggle: hasMainWindowToggle,
+                nonApplicationMarkers: nonApplicationMarkerSelection
             )
         )
+    }
+
+    private func standardNonApplicationMarkerStrip(
+        _ selection: StandardNonApplicationMarkerDisplaySelection
+    ) -> some View {
+        HStack(spacing: standardNonApplicationMarkerGroupSpacing) {
+            ForEach(selection.visible) { group in
+                standardNonApplicationMarkerGroup(group)
+            }
+
+            if selection.hiddenCount > 0 {
+                Text("+\(selection.hiddenCount)")
+                    .font(.system(size: 5.5, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.92))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.55)
+                    .frame(width: standardNonApplicationMarkerOverflowWidth, height: 9)
+                    .background(.black.opacity(0.70), in: Capsule())
+            }
+
+            if selection.applicationHiddenCount > 0 {
+                Text("A+\(selection.applicationHiddenCount)")
+                    .font(.system(size: 5.5, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.92))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.45)
+                    .frame(width: standardNonApplicationMarkerApplicationOverflowWidth, height: 9)
+                    .background(.black.opacity(0.70), in: Capsule())
+            }
+        }
+        .padding(.horizontal, 1)
+        .padding(.vertical, 2)
+        .background(.black.opacity(0.42), in: Capsule())
+        .overlay {
+            Capsule()
+                .stroke(.white.opacity(0.16), lineWidth: 0.5)
+        }
+        .frame(width: standardNonApplicationMarkerRailWidth, height: 18, alignment: .bottomTrailing)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        .padding(.bottom, 3)
+        .padding(.trailing, standardNonApplicationMarkerTrailingInset)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    private func standardNonApplicationMarkerGroup(
+        _ group: StandardNonApplicationMarkerGroup
+    ) -> some View {
+        HStack(spacing: standardNonApplicationMarkerDotSpacing) {
+            if group.isBase {
+                standardNonApplicationMarkerDot(.white.opacity(0.92))
+            } else {
+                ForEach(group.modifierControls) { modifier in
+                    standardNonApplicationMarkerDot(store.modifierColor(for: modifier).swiftUIColor)
+                }
+            }
+        }
+    }
+
+    private func standardNonApplicationMarkerDot(_ color: Color) -> some View {
+        Circle()
+            .fill(color)
+            .overlay {
+                Circle()
+                    .stroke(.black.opacity(0.76), lineWidth: 0.55)
+            }
+            .frame(
+                width: standardNonApplicationMarkerDotDiameter,
+                height: standardNonApplicationMarkerDotDiameter
+            )
     }
 
     private func applicationRouteStrip(
         _ routes: [StandardApplicationRoute],
         hiddenCount: Int,
-        height: CGFloat
+        height: CGFloat,
+        reservesBottomRow: Bool = false
     ) -> some View {
         ZStack {
             VStack(spacing: 0) {
@@ -471,7 +559,7 @@ struct RemoteView: View {
             // Corner badges remain independent overlays at the key boundary.
             .padding(.vertical, 3)
 
-            if hiddenCount > 0 {
+            if hiddenCount > 0, !reservesBottomRow {
                 Text("+\(hiddenCount)")
                     .font(.system(size: 6, weight: .bold, design: .rounded))
                     .foregroundStyle(.white.opacity(0.92))
@@ -561,7 +649,8 @@ struct RemoteView: View {
         title: String,
         routes: [StandardApplicationRoute],
         hiddenCount: Int,
-        hasMainWindowToggle: Bool
+        hasMainWindowToggle: Bool,
+        nonApplicationMarkers: StandardNonApplicationMarkerDisplaySelection
     ) -> String {
         var parts = [control.rawValue]
         if !title.isEmpty { parts.append(title) }
@@ -580,6 +669,20 @@ struct RemoteView: View {
         }
         if hiddenCount > 0 {
             parts.append("\(hiddenCount) additional application route\(hiddenCount == 1 ? "" : "s") hidden")
+        }
+        let nonApplicationSummary = nonApplicationMarkers.visible.map { group in
+            if group.isBase {
+                return "Base non-application action layer"
+            }
+            let modifiers = group.modifierControls.map(\.rawValue).joined(separator: " + ")
+            return "\(modifiers) non-application action layer"
+        }
+        if !nonApplicationSummary.isEmpty {
+            parts.append(nonApplicationSummary.joined(separator: "; "))
+        }
+        if nonApplicationMarkers.hiddenCount > 0 {
+            let count = nonApplicationMarkers.hiddenCount
+            parts.append("\(count) additional non-application action layer\(count == 1 ? "" : "s") hidden")
         }
         if store.isRemoteModifier(control) {
             parts.append("K modifier")
@@ -639,10 +742,177 @@ struct RemoteView: View {
     }
 }
 
+struct StandardNonApplicationMarkerGroup: Equatable, Identifiable {
+    let modifierControls: [RemoteControl]
+    let isBase: Bool
+
+    var id: String {
+        isBase ? "base" : modifierControls.map(\.rawValue).joined(separator: "+")
+    }
+}
+
+struct StandardNonApplicationMarkerDisplaySelection: Equatable {
+    let visible: [StandardNonApplicationMarkerGroup]
+    let hiddenCount: Int
+    let applicationHiddenCount: Int
+}
+
+let standardNonApplicationMarkerRailWidth: CGFloat = 60
+let standardNonApplicationMarkerTrailingInset: CGFloat = 2
+private let standardNonApplicationMarkerDotDiameter: CGFloat = 5
+private let standardNonApplicationMarkerDotSpacing: CGFloat = 0.5
+private let standardNonApplicationMarkerGroupSpacing: CGFloat = 1
+private let standardNonApplicationMarkerHorizontalPadding: CGFloat = 1
+private let standardNonApplicationMarkerOverflowWidth: CGFloat = 8
+private let standardNonApplicationMarkerApplicationOverflowWidth: CGFloat = 8
+
+func standardNonApplicationMarkerDisplaySelection(
+    _ routes: [StandardNonApplicationRoute],
+    applicationHiddenCount: Int = 0
+) -> StandardNonApplicationMarkerDisplaySelection {
+    var containsBase = false
+    var modifierSets = Set<Set<RemoteControl>>()
+
+    for route in routes {
+        if route.isBase {
+            containsBase = true
+        } else if !route.modifierControls.isEmpty {
+            modifierSets.insert(route.modifierControls)
+        }
+    }
+
+    var groups: [StandardNonApplicationMarkerGroup] = []
+    if containsBase {
+        groups.append(StandardNonApplicationMarkerGroup(modifierControls: [], isBase: true))
+    }
+    groups.append(contentsOf: modifierSets
+        .sorted(by: standardNonApplicationModifierSetPrecedes)
+        .map {
+            StandardNonApplicationMarkerGroup(
+                modifierControls: standardNonApplicationModifierOrder($0),
+                isBase: false
+            )
+        })
+
+    let contentWidth = standardNonApplicationMarkerRailWidth
+        - (standardNonApplicationMarkerHorizontalPadding * 2)
+    let allGroupsWidth = standardNonApplicationMarkerGroupsWidth(groups)
+        + standardNonApplicationMarkerOverflowTailWidth(
+            hasVisibleGroups: !groups.isEmpty,
+            hasMarkerOverflow: false,
+            hasApplicationOverflow: applicationHiddenCount > 0
+        )
+    if allGroupsWidth <= contentWidth {
+        return StandardNonApplicationMarkerDisplaySelection(
+            visible: groups,
+            hiddenCount: 0,
+            applicationHiddenCount: applicationHiddenCount
+        )
+    }
+
+    // Reserve the overflow badge before choosing visible groups. Whole route
+    // groups stay intact, so a combined MOD layer never loses a participant
+    // dot; groups that cannot fit are represented by +N.
+    let visibleWidth = contentWidth
+        - standardNonApplicationMarkerOverflowTailWidth(
+            hasVisibleGroups: true,
+            hasMarkerOverflow: true,
+            hasApplicationOverflow: applicationHiddenCount > 0
+        )
+    var usedWidth: CGFloat = 0
+    var visible: [StandardNonApplicationMarkerGroup] = []
+    for group in groups {
+        let groupWidth = standardNonApplicationMarkerGroupWidth(group)
+        let spacing = visible.isEmpty ? 0 : standardNonApplicationMarkerGroupSpacing
+        guard usedWidth + spacing + groupWidth <= visibleWidth else { break }
+        visible.append(group)
+        usedWidth += spacing + groupWidth
+    }
+
+    return StandardNonApplicationMarkerDisplaySelection(
+        visible: visible,
+        hiddenCount: max(0, groups.count - visible.count),
+        applicationHiddenCount: applicationHiddenCount
+    )
+}
+
+private func standardNonApplicationMarkerOverflowTailWidth(
+    hasVisibleGroups: Bool,
+    hasMarkerOverflow: Bool,
+    hasApplicationOverflow: Bool
+) -> CGFloat {
+    var width: CGFloat = 0
+    var hasPreviousItem = hasVisibleGroups
+    if hasMarkerOverflow {
+        if hasPreviousItem { width += standardNonApplicationMarkerGroupSpacing }
+        width += standardNonApplicationMarkerOverflowWidth
+        hasPreviousItem = true
+    }
+    if hasApplicationOverflow {
+        if hasPreviousItem { width += standardNonApplicationMarkerGroupSpacing }
+        width += standardNonApplicationMarkerApplicationOverflowWidth
+    }
+    return width
+}
+
+private func standardNonApplicationMarkerGroupsWidth(
+    _ groups: [StandardNonApplicationMarkerGroup]
+) -> CGFloat {
+    groups.enumerated().reduce(0) { width, item in
+        let spacing = item.offset == 0 ? 0 : standardNonApplicationMarkerGroupSpacing
+        return width + spacing + standardNonApplicationMarkerGroupWidth(item.element)
+    }
+}
+
+private func standardNonApplicationMarkerGroupWidth(
+    _ group: StandardNonApplicationMarkerGroup
+) -> CGFloat {
+    let count = group.isBase ? 1 : group.modifierControls.count
+    guard count > 0 else { return 0 }
+    return (CGFloat(count) * standardNonApplicationMarkerDotDiameter)
+        + (CGFloat(count - 1) * standardNonApplicationMarkerDotSpacing)
+}
+
+func standardNonApplicationMarkerDisplayWidth(
+    for selection: StandardNonApplicationMarkerDisplaySelection
+) -> CGFloat {
+    standardNonApplicationMarkerGroupsWidth(selection.visible)
+        + standardNonApplicationMarkerOverflowTailWidth(
+            hasVisibleGroups: !selection.visible.isEmpty,
+            hasMarkerOverflow: selection.hiddenCount > 0,
+            hasApplicationOverflow: selection.applicationHiddenCount > 0
+        )
+        + (standardNonApplicationMarkerHorizontalPadding * 2)
+}
+
+private func standardNonApplicationModifierOrder(
+    _ modifiers: Set<RemoteControl>
+) -> [RemoteControl] {
+    RemoteControl.allCases.filter { modifiers.contains($0) }
+}
+
+private func standardNonApplicationModifierSetPrecedes(
+    _ lhs: Set<RemoteControl>,
+    _ rhs: Set<RemoteControl>
+) -> Bool {
+    if lhs.count != rhs.count { return lhs.count < rhs.count }
+
+    let lhsOrder = RemoteControl.allCases.enumerated()
+        .filter { lhs.contains($0.element) }
+        .map(\.offset)
+    let rhsOrder = RemoteControl.allCases.enumerated()
+        .filter { rhs.contains($0.element) }
+        .map(\.offset)
+    return lhsOrder.lexicographicallyPrecedes(rhsOrder)
+}
+
 func standardApplicationRouteDisplaySelection(
-    _ routes: [StandardApplicationRoute]
+    _ routes: [StandardApplicationRoute],
+    hasNonApplicationMarkers: Bool = false
 ) -> (visible: [StandardApplicationRoute], hiddenCount: Int) {
-    let capacity = 4
+    // Non-application markers own the full bottom row, so application icons
+    // use only the two top-row slots while the rail is present.
+    let capacity = hasNonApplicationMarkers ? 2 : 4
     guard routes.count > capacity else {
         return (routes, 0)
     }

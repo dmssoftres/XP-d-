@@ -83,6 +83,23 @@ struct StandardApplicationRoute: Equatable, Identifiable {
     }
 }
 
+/// A presentation-only summary of a configured non-application action on one
+/// exact Standard K-button layer. Gesture-specific actions are intentionally
+/// deduplicated by `MappingStore.standardNonApplicationRoutes(for:)`.
+struct StandardNonApplicationRoute: Equatable, Identifiable {
+    let modifierControls: Set<RemoteControl>
+
+    var id: String {
+        let modifiers = RemoteControl.allCases
+            .filter { modifierControls.contains($0) }
+            .map(\.rawValue)
+            .joined(separator: "+")
+        return modifiers.isEmpty ? "base" : modifiers
+    }
+
+    var isBase: Bool { modifierControls.isEmpty }
+}
+
 enum MappingClipboardOperation: Equatable {
     case copy
     case cut
@@ -746,6 +763,38 @@ final class MappingStore {
         return routes
     }
 
+    /// Returns one presentation route for every exact Standard K-button layer
+    /// containing a currently executable non-application action. Gesture
+    /// differences on one layer are intentionally deduplicated. Inactive or
+    /// invalid modifier layers are omitted, matching application-route
+    /// presentation and runtime resolution semantics.
+    func standardNonApplicationRoutes(for control: RemoteControl) -> [StandardNonApplicationRoute] {
+        guard activeRealm == .standard, control.isMIDIButton else { return [] }
+
+        var routes: [StandardNonApplicationRoute] = []
+        if hasConfiguredNonApplicationAction(for: control, modifierControls: []) {
+            routes.append(StandardNonApplicationRoute(modifierControls: []))
+        }
+
+        let layerSets = Set(
+            mappings.keys.compactMap { key -> Set<RemoteControl>? in
+                guard key.control == control,
+                      !key.modifierControls.isEmpty,
+                      isExecutableApplicationLayer(key.modifierControls, for: control) else {
+                    return nil
+                }
+                return key.modifierControls
+            }
+        )
+
+        for modifierControls in layerSets.sorted(by: orderedModifierSets)
+            where hasConfiguredNonApplicationAction(for: control, modifierControls: modifierControls) {
+            routes.append(StandardNonApplicationRoute(modifierControls: modifierControls))
+        }
+
+        return routes
+    }
+
     /// Saved non-Base layers for one Standard destination. Dormant layers are
     /// intentionally included so the inspector can keep them visible after a
     /// modifier designation is disabled, until their actions are deleted.
@@ -808,6 +857,42 @@ final class MappingStore {
             gesture: gesture,
             modifierControls: modifierControls
         )
+    }
+
+    private func hasConfiguredNonApplicationAction(
+        for control: RemoteControl,
+        modifierControls: Set<RemoteControl>
+    ) -> Bool {
+        GestureKind.allCases.contains { gesture in
+            guard case let .success(mapping) = resolvedMapping(
+                for: control,
+                gesture: gesture,
+                modifierControls: modifierControls
+            ) else {
+                return false
+            }
+
+            guard mapping.action != .noAction,
+                  !mapping.action.isApplicationAction,
+                  !(mapping.action == .windowDisplay
+                    && mapping.command == WindowDisplayAction.toggleXPd.rawValue) else {
+                return false
+            }
+
+            guard InputOverlayPresentation(mapping: mapping).isConfigured else {
+                return false
+            }
+
+            if mapping.action == .keyboardShortcut {
+                guard let shortcut = mapping.keyboardShortcut,
+                      !shortcut.displayString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      shortcut.keyCode <= 127 else {
+                    return false
+                }
+            }
+
+            return true
+        }
     }
 
     private func isExecutableApplicationLayer(
