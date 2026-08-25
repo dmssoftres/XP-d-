@@ -176,6 +176,142 @@ final class HIDCompositeReportTests: XCTestCase {
         XCTAssertEqual(executed, ["K10 base"])
     }
 
+    func testDecodedReport6RepeatedDestinationUnderHeldK10ExecutesEachLayeredTap() {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeReport2Store(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+        clearAllKBindings(in: store)
+        learnReport6("r6:00 71 00 00 00 00 00", for: .k10, in: store)
+        learnReport6("r6:00 6D 00 00 00 00 00", for: .k6, in: store)
+        XCTAssertTrue(store.setRemoteModifier(.k10, enabled: true))
+        store.standardModifierHoldThreshold = 0.5
+        store.update(
+            Mapping(action: .openApplication, command: "K10 Base"),
+            for: .k10,
+            gesture: .tap
+        )
+        store.update(
+            Mapping(action: .openApplication, command: "K10 + K6 Layer"),
+            for: .k6,
+            gesture: .tap,
+            modifierControls: [.k10]
+        )
+
+        let k10AndK6 = [UInt8](arrayLiteral: 0x00, 0x71, 0x6D, 0, 0, 0, 0)
+        let k10Only = [UInt8](arrayLiteral: 0x00, 0x71, 0, 0, 0, 0, 0)
+
+        store.hid.simulateInputReportForTesting(reportID: 6, bytes: k10Only)
+        store.hid.simulateInputReportForTesting(reportID: 6, bytes: k10AndK6)
+        store.hid.simulateInputReportForTesting(reportID: 6, bytes: k10Only)
+        scheduler.advance(by: 0.30)
+
+        store.hid.simulateInputReportForTesting(reportID: 6, bytes: k10AndK6)
+        store.hid.simulateInputReportForTesting(reportID: 6, bytes: k10Only)
+        scheduler.advance(by: 0.30)
+
+        store.hid.simulateInputReportForTesting(
+            reportID: 6,
+            bytes: [UInt8](repeating: 0, count: 7)
+        )
+        scheduler.advance(by: 0.30)
+
+        XCTAssertEqual(executed, ["K10 + K6 Layer", "K10 + K6 Layer"])
+        XCTAssertFalse(executed.contains("K10 Base"))
+    }
+
+    func testDecodedReport6TransitionFromK6ToK3UnderHeldK10ReconcilesDestination() {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeReport2Store(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+        clearAllKBindings(in: store)
+        learnReport6("r6:00 71 00 00 00 00 00", for: .k10, in: store)
+        learnReport6("r6:00 6D 00 00 00 00 00", for: .k6, in: store)
+        learnReport6("r6:00 6A 00 00 00 00 00", for: .k3, in: store)
+        XCTAssertTrue(store.setRemoteModifier(.k10, enabled: true))
+        store.standardModifierHoldThreshold = 0.5
+        store.update(
+            Mapping(action: .openApplication, command: "K10 Base"),
+            for: .k10,
+            gesture: .tap
+        )
+        store.update(
+            Mapping(action: .openApplication, command: "K10 + K6 Layer"),
+            for: .k6,
+            gesture: .tap,
+            modifierControls: [.k10]
+        )
+        store.update(
+            Mapping(action: .openApplication, command: "K10 + K3 Layer"),
+            for: .k3,
+            gesture: .tap,
+            modifierControls: [.k10]
+        )
+
+        let k10AndK6 = [UInt8](arrayLiteral: 0x00, 0x71, 0x6D, 0, 0, 0, 0)
+        let k10AndK3 = [UInt8](arrayLiteral: 0x00, 0x71, 0x6A, 0, 0, 0, 0)
+        let k10Only = [UInt8](arrayLiteral: 0x00, 0x71, 0, 0, 0, 0, 0)
+
+        store.hid.simulateInputReportForTesting(reportID: 6, bytes: k10Only)
+        store.hid.simulateInputReportForTesting(reportID: 6, bytes: k10AndK6)
+        // K6 is released while K10 remains physically held.
+        store.hid.simulateInputReportForTesting(reportID: 6, bytes: k10Only)
+        store.hid.simulateInputReportForTesting(reportID: 6, bytes: k10AndK3)
+        store.hid.simulateInputReportForTesting(reportID: 6, bytes: k10Only)
+        scheduler.advance(by: 0.30)
+
+        store.hid.simulateInputReportForTesting(
+            reportID: 6,
+            bytes: [UInt8](repeating: 0, count: 7)
+        )
+        scheduler.advance(by: 0.30)
+
+        XCTAssertEqual(executed, ["K10 + K6 Layer", "K10 + K3 Layer"])
+        XCTAssertFalse(executed.contains("K10 Base"))
+    }
+
+    func testDecodedReport6F13StyleChordToK6SnapshotCompletesLayerOnce() {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeReport2Store(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+        clearAllKBindings(in: store)
+        learnReport6("r6:00 71 00 00 00 00 00", for: .k10, in: store)
+        learnReport6("r6:00 6D 00 00 00 00 00", for: .k6, in: store)
+        XCTAssertTrue(store.setRemoteModifier(.k10, enabled: true))
+        store.standardModifierHoldThreshold = 0.5
+        store.update(
+            Mapping(action: .openApplication, command: "K10 Base"),
+            for: .k10,
+            gesture: .tap
+        )
+        store.update(
+            Mapping(action: .openApplication, command: "K10 + K6 Layer"),
+            for: .k6,
+            gesture: .tap,
+            modifierControls: [.k10]
+        )
+
+        let k10AndK6 = [UInt8](arrayLiteral: 0x00, 0x71, 0x6D, 0, 0, 0, 0)
+        let k6Only = [UInt8](arrayLiteral: 0x00, 0x6D, 0, 0, 0, 0, 0)
+        let empty = [UInt8](repeating: 0, count: 7)
+
+        store.hid.simulateInputReportForTesting(reportID: 6, bytes: k10AndK6)
+        store.hid.simulateInputReportForTesting(reportID: 6, bytes: k6Only)
+        store.hid.simulateInputReportForTesting(reportID: 6, bytes: empty)
+        scheduler.advance(by: 0.30)
+
+        XCTAssertEqual(executed, ["K10 + K6 Layer"])
+        XCTAssertFalse(executed.contains("K10 Base"))
+    }
+
     func testReport2OneHotBindingsAreLearnedIndividuallyForEveryKButton() {
         let store = makeReport2Store()
 
@@ -1068,6 +1204,27 @@ final class HIDCompositeReportTests: XCTestCase {
                 (scheduler ?? TestScheduler()).schedule(delay: delay, action: action)
             },
             actionExecutionOverride: actionExecutionOverride
+        )
+    }
+
+    private func clearAllKBindings(in store: MappingStore) {
+        for control in RemoteControl.allCases where control.isMIDIButton {
+            store.clearHIDBinding(for: control)
+        }
+    }
+
+    private func learnReport6(
+        _ signature: String,
+        for control: RemoteControl,
+        in store: MappingStore
+    ) {
+        store.selectedControl = control
+        store.learnSelectedControl()
+        store.simulateHIDInputForTesting(signature)
+        XCTAssertEqual(
+            store.hidBinding(for: control),
+            signature,
+            "Expected \(control.rawValue) to learn its report-6 binding"
         )
     }
 

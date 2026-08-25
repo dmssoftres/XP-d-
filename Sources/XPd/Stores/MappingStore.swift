@@ -544,9 +544,13 @@ final class MappingStore {
     private let buttonGestureRecognizer: ButtonGestureRecognizer
     /// Standard-mode K-button cycles can contain one non-modifier primary
     /// plus any number of designated K modifiers. Report 6 still has one
-    /// generic release boundary; report 2 is a complete state snapshot and
-    /// keeps its active set until the next snapshot or F0/all-zero boundary.
+    /// generic release boundary; retain a separate report-6 snapshot set so
+    /// partial releases can reconcile a changed keyboard state before the
+    /// generic release boundary arrives. Report 2 is a complete state
+    /// snapshot and keeps its active set until the next snapshot or
+    /// F0/all-zero boundary.
     private var activeStandardControls: Set<RemoteControl> = []
+    private var activeStandardReport6Controls: Set<RemoteControl> = []
     private var activeStandardReport2Controls: Set<RemoteControl> = []
     private var activeStandardKeyboardModifiers: [RemoteControl: Set<KeyboardShortcut.Modifier>] = [:]
     private var activeStandardFunctionKeys: [RemoteControl: Set<UInt16>] = [:]
@@ -2367,16 +2371,22 @@ final class MappingStore {
                     return
                 }
             }
-            if activeRealm == .standard, !activeStandardReport2Controls.isEmpty {
-                // Report 2 has an explicit F0/all-zero signature boundary;
-                // a nil callback belongs to report 6 and must not terminate
-                // the report-2 snapshot cycle.
-                return
-            }
-            if activeRealm == .standard, !activeStandardControls.isEmpty {
-                releaseStandardCycle()
-                liveControl = nil
-                return
+            if activeRealm == .standard {
+                // Report 6 is now reconciled as a complete keyboard
+                // snapshot. Its empty callback releases only the report-6
+                // source; a report-2 snapshot may still be active and has
+                // its own explicit F0/all-zero boundary.
+                if !activeStandardReport6Controls.isEmpty {
+                    releaseStandardReport6Controls()
+                }
+                if !activeStandardReport2Controls.isEmpty {
+                    return
+                }
+                if !activeStandardControls.isEmpty {
+                    releaseStandardCycle()
+                    liveControl = nil
+                    return
+                }
             }
             if isWheelCenterHeld {
                 isWheelCenterHeld = false
@@ -2426,6 +2436,25 @@ final class MappingStore {
            report.isReport2OneHot {
             handleStandardReport2Snapshot(report: report, signature: signature)
             return
+        }
+
+        if activeRealm == .standard,
+           let report = HIDKeyboardReport(signature: signature),
+           report.encoding == .report6BootKeyboard {
+            let exactControl = hidBindings.first(where: { $0.value == signature })?.key
+            let isRawWheelReport = report.modifierByte == 0x01
+                && (report.keyUsages == Set<UInt8>([0x56])
+                    || report.keyUsages == Set<UInt8>([0x57]))
+            if !isRawWheelReport,
+               exactControl?.isWheelRotation != true,
+               exactControl != .wheelCenter {
+                handleStandardReport6Snapshot(
+                    report: report,
+                    signature: signature,
+                    exactControl: exactControl
+                )
+                return
+            }
         }
 
         if activeRealm == .midi,
@@ -2926,6 +2955,148 @@ final class MappingStore {
         }
     }
 
+    /// Routes a valid report-6 boot-keyboard snapshot in Standard mode.
+    /// Exact learned bindings remain authoritative; otherwise the snapshot
+    /// must decompose uniquely into learned K controls. Unlike the legacy
+    /// one-way press path, the source held set is reconciled so a changed
+    /// snapshot releases a removed destination before accepting the next one.
+    private func handleStandardReport6Snapshot(
+        report: HIDKeyboardReport,
+        signature: String,
+        exactControl: RemoteControl?
+    ) {
+        guard report.encoding == .report6BootKeyboard else { return }
+
+        let desiredControls: Set<RemoteControl>
+        if let exactControl {
+            guard exactControl.isMIDIButton else { return }
+            if activeStandardReport6Controls.count > 1,
+               activeStandardReport6Controls.contains(exactControl) {
+                // An exact control already present in a composite snapshot
+                // is the remaining report-6 state. This handles either
+                // partial-release direction while preserving exact-control
+                // accumulation when the prior snapshot had only one input.
+                desiredControls = [exactControl]
+            } else {
+                desiredControls = activeStandardReport6Controls
+                    .union([exactControl])
+            }
+        } else if let decomposed = Self.decomposedKeyboardControls(
+            for: signature,
+            bindings: hidBindings
+        ) {
+            desiredControls = Set(decomposed)
+        } else {
+            // Unknown, partially learned, or ambiguous snapshots are
+            // intentionally fail-closed and do not disturb the current set.
+            return
+        }
+
+        if isProfileSelectorVisible {
+            if desiredControls.contains(workspaceLockControl) {
+                _ = toggleWorkspace()
+            } else {
+                closeProfileSelector()
+            }
+            activeStandardReport6Controls.removeAll()
+            return
+        }
+
+        updateStandardReport6Controls(to: desiredControls)
+    }
+
+    private func updateStandardReport6Controls(
+        to desiredControls: Set<RemoteControl>
+    ) {
+        guard activeStandardReport6Controls != desiredControls else { return }
+
+        let previousReport6Controls = activeStandardReport6Controls
+        let previousLiveControl = liveControl
+        let liveControlBelongedToReport6 = previousLiveControl.map {
+            previousReport6Controls.contains($0)
+        } ?? false
+        activeStandardReport6Controls = desiredControls
+
+        // A control held by report 2 is still physically active even when it
+        // disappears from report 6. Keep the aggregate Standard state until
+        // both source snapshots have released it.
+        let removedControls = previousReport6Controls
+            .subtracting(desiredControls)
+            .filter { !activeStandardReport2Controls.contains($0) }
+        let addedControls = desiredControls
+            .subtracting(previousReport6Controls)
+            .filter { !activeStandardControls.contains($0) }
+        let previousIdentity = activeStandardGestureIdentity
+
+        if let previousIdentity,
+           removedControls.contains(previousIdentity.control) {
+            buttonGestureRecognizer.release(previousIdentity)
+            activeStandardGestureIdentity = nil
+        }
+
+        for control in removedControls {
+            if isRemoteModifier(control) {
+                activeStandardModifierHoldTasks.removeValue(forKey: control)?.cancel()
+            } else if activeStandardControls.contains(control) {
+                activeStandardModifierBaseSuppressed = true
+                cancelActiveStandardModifierHoldTasks(reason: "destination-release")
+            }
+            activeStandardControls.remove(control)
+            activeStandardKeyboardModifiers.removeValue(forKey: control)
+            activeStandardFunctionKeys.removeValue(forKey: control)
+            activeStandardKeyboardKeys.removeValue(forKey: control)
+            ambiguousStandardCycles.remove(control)
+        }
+
+        let removedModifierFromActiveGesture = previousIdentity?.modifierControls
+            .contains(where: { removedControls.contains($0) }) == true
+        if let previousIdentity,
+           !removedControls.contains(previousIdentity.control),
+           !removedModifierFromActiveGesture,
+           activeStandardControls.contains(previousIdentity.control) {
+            let modifiers = activeStandardControls.filter(isRemoteModifier)
+            let updatedIdentity = ButtonGestureIdentity(
+                control: previousIdentity.control,
+                modifierControls: Set(modifiers),
+                keyboardModifiers: activeStandardKeyboardModifiers[previousIdentity.control] ?? [],
+                functionKeys: activeStandardFunctionKeys[previousIdentity.control] ?? [],
+                keyboardKeys: activeStandardKeyboardKeys[previousIdentity.control] ?? []
+            )
+            if previousIdentity != updatedIdentity,
+               buttonGestureRecognizer.reclassifyPress(
+                   from: previousIdentity,
+                   to: updatedIdentity
+               ) {
+                activeStandardGestureIdentity = updatedIdentity
+            }
+        }
+
+        let orderedControls = RemoteControl.allCases.filter { addedControls.contains($0) }
+        for control in orderedControls {
+            selectControlFromMappedInput(control)
+            handleStandardKPress(control)
+            if previousLiveControl == nil || liveControlBelongedToReport6 {
+                liveControl = control
+            }
+        }
+
+        if liveControlBelongedToReport6 {
+            if desiredControls.isEmpty {
+                liveControl = nil
+            } else if let previousLiveControl,
+                      !desiredControls.contains(previousLiveControl) {
+                liveControl = RemoteControl.allCases.last {
+                    desiredControls.contains($0)
+                }
+            }
+        }
+    }
+
+    private func releaseStandardReport6Controls() {
+        guard !activeStandardReport6Controls.isEmpty else { return }
+        updateStandardReport6Controls(to: [])
+    }
+
     /// Routes a Standard K-button press through the dual-role layer state
     /// machine. A designated K is held as a modifier candidate; exactly one
     /// non-designated K is the primary. Either press order may form an exact
@@ -3066,6 +3237,7 @@ final class MappingStore {
 
     private func releaseStandardCycle() {
         let controls = activeStandardControls
+        activeStandardReport6Controls.removeAll()
         activeStandardReport2Controls.removeAll()
         modifierArbitrationLogger.info(
             "cycle reset reason=release-boundary controls=\(controls.count, privacy: .public) consumed=\(self.activeStandardModifierCycleConsumed, privacy: .public)"
@@ -3110,6 +3282,7 @@ final class MappingStore {
         cancelActiveStandardPrimaryGestures()
         cancelActiveStandardModifierHoldTasks(reason: "cycle-cancelled")
         activeStandardControls.removeAll()
+        activeStandardReport6Controls.removeAll()
         activeStandardReport2Controls.removeAll()
         activeStandardKeyboardModifiers.removeAll()
         activeStandardFunctionKeys.removeAll()
