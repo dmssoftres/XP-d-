@@ -342,7 +342,7 @@ final class HIDKeyboardReportRuntimeTests: XCTestCase {
         ]
 
         XCTAssertNil(
-            MappingStore.decomposedStandardKeyboardControls(
+            MappingStore.decomposedKeyboardControls(
                 for: "r6:00 04 05 00 00 00 00",
                 bindings: bindings
             )

@@ -514,6 +514,10 @@ final class MappingStore {
     private var lastMIDIProfileName: String?
     private var fnIsActive = false
     private var activeMIDIControls: Set<RemoteControl> = []
+    /// Report 6 is a complete boot-keyboard snapshot. Track its resolved K
+    /// controls independently so a changed two-key snapshot releases only
+    /// the removed key while preserving the note that remains physically held.
+    private var activeMIDIReport6Controls: Set<RemoteControl> = []
     /// Report-2 is a complete K-button state snapshot rather than the
     /// report-6 single-control stream. Keep its held set separate so a
     /// neutral report-2 release cannot release an unrelated report-6 MIDI
@@ -1230,6 +1234,7 @@ final class MappingStore {
         }
         fnIsActive = false
         activeMIDIControls.removeAll()
+        activeMIDIReport6Controls.removeAll()
         activeMIDIReport2Controls.removeAll()
         midiControlLayers.removeAll()
         resetSessionOffsets()
@@ -2320,6 +2325,17 @@ final class MappingStore {
 
         guard let signature else {
             if activeRealm == .midi {
+                if !activeMIDIReport6Controls.isEmpty {
+                    let report6Controls = activeMIDIReport6Controls
+                    releaseMIDIReport6Controls()
+                    if let liveControl, report6Controls.contains(liveControl) {
+                        self.liveControl = orderedMIDIControls(
+                            activeMIDIReport2Controls,
+                            fnFirst: false
+                        ).last
+                    }
+                    return
+                }
                 let report2Controls = activeMIDIReport2Controls
                 if !report2Controls.isEmpty {
                     // A nil callback is the report-6 collection's generic
@@ -2416,6 +2432,17 @@ final class MappingStore {
             return
         }
 
+        if activeRealm == .midi,
+           let report = HIDKeyboardReport(signature: signature),
+           report.encoding == .report6BootKeyboard {
+            let exactControl = hidBindings.first(where: { $0.value == signature })?.key
+            handleMIDIReport6Snapshot(
+                signature: signature,
+                exactControl: exactControl
+            )
+            return
+        }
+
         let resolvedControls: [RemoteControl]
         if let matched = hidBindings.first(where: { $0.value == signature })?.key {
             // An exact learned binding is authoritative. In particular, a
@@ -2433,7 +2460,7 @@ final class MappingStore {
             )
             resolvedControls = compositeControls
         } else if activeRealm == .standard,
-                  let compositeControls = Self.decomposedStandardKeyboardControls(
+                  let compositeControls = Self.decomposedKeyboardControls(
                       for: signature,
                       bindings: hidBindings
                   ) {
@@ -2501,7 +2528,8 @@ final class MappingStore {
                 // A report-6 control may arrive while report-2 still holds
                 // its own K snapshot. Do not release the report-2 control
                 // merely because report 6 displaced the presentation slot.
-                if !activeMIDIReport2Controls.contains(displacedControl) {
+                if !activeMIDIReport2Controls.contains(displacedControl),
+                   !activeMIDIReport6Controls.contains(displacedControl) {
                     handleMIDIControlRelease(displacedControl)
                 }
             }
@@ -2620,7 +2648,7 @@ final class MappingStore {
     /// minimum-cardinality covers and reject the report when more than one
     /// cover has that cardinality. This keeps generic modifier buttons from
     /// becoming spurious controls and fails closed for ambiguous input.
-    static func decomposedStandardKeyboardControls(
+    static func decomposedKeyboardControls(
         for signature: String,
         bindings: [RemoteControl: String]
     ) -> [RemoteControl]? {
@@ -2693,6 +2721,75 @@ final class MappingStore {
         }
 
         return nil
+    }
+
+    /// Routes report-6 keyboard snapshots in MIDI mode. Exact learned
+    /// bindings remain authoritative; combined states must resolve uniquely
+    /// to learned K buttons before their held-set diff can emit independent
+    /// Note On and Note Off events.
+    private func handleMIDIReport6Snapshot(
+        signature: String,
+        exactControl: RemoteControl?
+    ) {
+        let desiredControls: Set<RemoteControl>
+        if let exactControl {
+            desiredControls = [exactControl]
+        } else if let decomposed = Self.decomposedKeyboardControls(
+            for: signature,
+            bindings: hidBindings
+        ) {
+            desiredControls = Set(decomposed)
+        } else {
+            return
+        }
+
+        if isProfileSelectorVisible {
+            if desiredControls.contains(workspaceLockControl) {
+                _ = toggleWorkspace()
+            } else {
+                closeProfileSelector()
+            }
+            liveControl = nil
+            return
+        }
+
+        updateMIDIReport6Controls(to: desiredControls)
+    }
+
+    private func updateMIDIReport6Controls(to desiredControls: Set<RemoteControl>) {
+        let previousReport6Controls = activeMIDIReport6Controls
+        let previousLiveControl = liveControl
+        let liveControlBelongedToReport6 = previousLiveControl.map {
+            previousReport6Controls.contains($0)
+        } ?? false
+        let removed = activeMIDIReport6Controls.subtracting(desiredControls)
+        let added = desiredControls.subtracting(activeMIDIReport6Controls)
+
+        for control in orderedMIDIControls(removed, fnFirst: false) {
+            handleMIDIControlRelease(control)
+            activeMIDIReport6Controls.remove(control)
+        }
+
+        for control in orderedMIDIControls(added, fnFirst: true) {
+            handleMIDIControlPress(control)
+            activeMIDIReport6Controls.insert(control)
+        }
+
+        if desiredControls.isEmpty {
+            if liveControlBelongedToReport6 {
+                liveControl = nil
+            }
+        } else if previousLiveControl == nil || liveControlBelongedToReport6 {
+            liveControl = orderedMIDIControls(desiredControls, fnFirst: false).last
+        }
+    }
+
+    private func releaseMIDIReport6Controls() {
+        guard !activeMIDIReport6Controls.isEmpty else { return }
+        for control in orderedMIDIControls(activeMIDIReport6Controls, fnFirst: false) {
+            handleMIDIControlRelease(control)
+        }
+        activeMIDIReport6Controls.removeAll()
     }
 
     /// Routes a valid report-2 snapshot in Standard mode. Exact learned
@@ -3151,14 +3248,14 @@ final class MappingStore {
 
         // Release destinations before Fn so their recorded layer remains
         // authoritative and the layer-wide MIDI release follows last.
-        for control in orderedMIDIReport2Controls(removed, fnFirst: false) {
+        for control in orderedMIDIControls(removed, fnFirst: false) {
             handleMIDIControlRelease(control)
             activeMIDIReport2Controls.remove(control)
         }
 
         // Fn must be pressed first when it joins an already-held destination;
         // the newly added destination then selects its function-layer mapping.
-        for control in orderedMIDIReport2Controls(added, fnFirst: true) {
+        for control in orderedMIDIControls(added, fnFirst: true) {
             handleMIDIControlPress(control)
             activeMIDIReport2Controls.insert(control)
         }
@@ -3168,7 +3265,7 @@ final class MappingStore {
                 liveControl = nil
             }
         } else if previousLiveControl == nil || liveControlBelongedToReport2 {
-            liveControl = orderedMIDIReport2Controls(desiredControls, fnFirst: false).last
+            liveControl = orderedMIDIControls(desiredControls, fnFirst: false).last
         }
     }
 
@@ -3177,13 +3274,13 @@ final class MappingStore {
     ) {
         let report2Controls = controls ?? activeMIDIReport2Controls
         guard !report2Controls.isEmpty else { return }
-        for control in orderedMIDIReport2Controls(report2Controls, fnFirst: false) {
+        for control in orderedMIDIControls(report2Controls, fnFirst: false) {
             handleMIDIControlRelease(control)
         }
         activeMIDIReport2Controls.subtract(report2Controls)
     }
 
-    private func orderedMIDIReport2Controls(
+    private func orderedMIDIControls(
         _ controls: Set<RemoteControl>,
         fnFirst: Bool
     ) -> [RemoteControl] {
@@ -3629,6 +3726,7 @@ final class MappingStore {
         let hadMIDIState = fnIsActive || !activeMIDIControls.isEmpty
         fnIsActive = false
         activeMIDIControls.removeAll()
+        activeMIDIReport6Controls.removeAll()
         activeMIDIReport2Controls.removeAll()
         midiControlLayers.removeAll()
         resetSessionOffsets()

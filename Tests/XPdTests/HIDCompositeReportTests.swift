@@ -815,6 +815,73 @@ final class HIDCompositeReportTests: XCTestCase {
         XCTAssertFalse(summaries.contains { $0.hasPrefix("Note On 36") })
     }
 
+    func testReport6MIDITwoButtonsOverlapAndReleaseIndependentlyInBothOrders() async throws {
+        let store = makeReport2Store()
+        _ = try store.addMIDIProfile(named: "Report 6 MIDI")
+
+        let empty = [UInt8](repeating: 0, count: 7)
+        let k1 = [UInt8](arrayLiteral: 0x00, 0x68, 0, 0, 0, 0, 0)
+        let k2 = [UInt8](arrayLiteral: 0x00, 0x69, 0, 0, 0, 0, 0)
+        let k1AndK2 = [UInt8](arrayLiteral: 0x00, 0x68, 0x69, 0, 0, 0, 0)
+
+        store.selectedControl = .k1
+        store.learnSelectedMIDIControl()
+        store.hid.simulateInputReportForTesting(reportID: 6, bytes: k1)
+        store.hid.simulateInputReportForTesting(reportID: 6, bytes: empty)
+
+        store.selectedControl = .k2
+        store.learnSelectedMIDIControl()
+        store.hid.simulateInputReportForTesting(reportID: 6, bytes: k2)
+        store.hid.simulateInputReportForTesting(reportID: 6, bytes: empty)
+
+        store.updatePrimaryButtonMapping(
+            MIDIButtonMapping(kind: .note, note: 60, velocity: 100),
+            for: .k1
+        )
+        store.updatePrimaryButtonMapping(
+            MIDIButtonMapping(kind: .note, note: 64, velocity: 100),
+            for: .k2
+        )
+
+        func noteSummaries() -> [String] {
+            store.midiMonitorEvents.reversed().map(\.summary).filter { $0.hasPrefix("Note ") }
+        }
+
+        store.clearMIDIMonitor()
+        store.hid.simulateInputReportForTesting(reportID: 6, bytes: k1)
+        store.hid.simulateInputReportForTesting(reportID: 6, bytes: k1AndK2)
+        store.hid.simulateInputReportForTesting(reportID: 6, bytes: k2)
+        store.hid.simulateInputReportForTesting(reportID: 6, bytes: empty)
+        await store.waitForMIDICommandsForTesting()
+
+        XCTAssertEqual(
+            noteSummaries(),
+            [
+                "Note On 60 · Ch 1 · V100",
+                "Note On 64 · Ch 1 · V100",
+                "Note Off 60 · Ch 1",
+                "Note Off 64 · Ch 1"
+            ]
+        )
+
+        store.clearMIDIMonitor()
+        store.hid.simulateInputReportForTesting(reportID: 6, bytes: k2)
+        store.hid.simulateInputReportForTesting(reportID: 6, bytes: k1AndK2)
+        store.hid.simulateInputReportForTesting(reportID: 6, bytes: k1)
+        store.hid.simulateInputReportForTesting(reportID: 6, bytes: empty)
+        await store.waitForMIDICommandsForTesting()
+
+        XCTAssertEqual(
+            noteSummaries(),
+            [
+                "Note On 64 · Ch 1 · V100",
+                "Note On 60 · Ch 1 · V100",
+                "Note Off 64 · Ch 1",
+                "Note Off 60 · Ch 1"
+            ]
+        )
+    }
+
     func testReport6WheelReleaseDoesNotClearHeldReport2MIDIControls() async throws {
         let store = makeReport2Store()
         _ = try store.addMIDIProfile(named: "Report 2 Wheel Isolation")
