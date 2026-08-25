@@ -250,6 +250,7 @@ final class MappingStore {
             }
             guard profileName != oldValue, !isReplacingConfiguration else { return }
             cancelPendingButtonGestures()
+            cancelLearning()
             resetMIDIState()
             saveActiveProfile(named: oldValue)
             activateProfile(named: profileName)
@@ -1959,6 +1960,17 @@ final class MappingStore {
         liveControl = nil
     }
 
+    /// Starts input learning for the selected K button in a MIDI profile.
+    /// MIDI mappings remain in the profile's typed settings; this operation
+    /// only replaces the selected control's profile-scoped HID identity.
+    func learnSelectedMIDIControl() {
+        guard activeRealm == .midi, selectedControl.isMIDIButton else {
+            lastHIDLearningResult = .failure("Select a MIDI K button before relearning its input.")
+            return
+        }
+        learnSelectedControl()
+    }
+
     func cancelLearning() {
         learningControl = nil
     }
@@ -2262,6 +2274,32 @@ final class MappingStore {
         selectedControl = control
     }
 
+    /// MIDI K-button learning must capture one physical control, not a
+    /// report-2 snapshot containing several held controls or a release state.
+    /// Legacy report-6 remains supported when it contains an actual keyboard
+    /// state; its several key slots may represent one configured shortcut.
+    private func midiLearningValidationError(for signature: String) -> String? {
+        guard let report = HIDKeyboardReport(signature: signature) else {
+            return "MIDI K learning requires a valid individual HID report. Press one K button on the remote."
+        }
+
+        switch report.encoding {
+        case .report2OneHot:
+            guard let mask = report.oneHotMask, mask != 0 else {
+                return "MIDI K learning requires one K button, not a report-2 release state."
+            }
+            guard report.isCompatibleIndividualBinding else {
+                return "MIDI K learning rejected a multi-control report. Press only one K button at a time."
+            }
+        case .report6BootKeyboard:
+            guard report.modifierByte != 0 || !report.keyUsages.isEmpty else {
+                return "MIDI K learning requires a non-empty individual report-6 input. Press one K button."
+            }
+        }
+
+        return nil
+    }
+
     private func handleHIDInput(_ signature: String?) {
         liveInputGeneration += 1
         let generation = liveInputGeneration
@@ -2332,6 +2370,14 @@ final class MappingStore {
         }
 
         if let learningControl {
+            if activeRealm == .midi,
+               learningControl.isMIDIButton,
+               let error = midiLearningValidationError(for: signature) {
+                self.learningControl = nil
+                lastHIDLearningResult = .failure(error)
+                return
+            }
+
             if let conflictingControl = hidBindings.first(where: { control, binding in
                 control != learningControl && binding == signature
             })?.key {

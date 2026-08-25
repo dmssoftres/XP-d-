@@ -353,6 +353,10 @@ struct MappingInspector: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
+            if store.selectedControl.isMIDIButton {
+                midiInputBindingEditor
+            }
+
             fnAssignmentEditor
 
             if store.selectedControl.isWheelRotation {
@@ -380,7 +384,6 @@ struct MappingInspector: View {
                 .lineLimit(2)
             }
 
-            midiLiveHID
             midiInputHUD
         }
         .onAppear {
@@ -739,27 +742,43 @@ struct MappingInspector: View {
         NSPasteboard.general.setString(text, forType: .string)
     }
 
-    private var midiLiveHID: some View {
-        GroupBox("Live HID") {
+    private var midiInputBindingEditor: some View {
+        GroupBox("Input binding") {
             VStack(alignment: .leading, spacing: 8) {
-                Text(store.hidBinding(for: store.selectedControl) ?? "No HID input learned")
-                    .font(.system(.body, design: .monospaced))
-                    .textSelection(.enabled)
-                    .lineLimit(1)
                 HStack {
-                    Button(store.learningControl == store.selectedControl ? "Waiting for input…" : "Learn selected control") {
-                        store.learnSelectedControl()
+                    Label(selectedControlTitle, systemImage: "keyboard")
+                        .font(.subheadline.weight(.medium))
+                    Spacer()
+                    Button(
+                        store.learningControl == store.selectedControl
+                            ? "Waiting for input…"
+                            : "Relearn \(selectedControlTitle)"
+                    ) {
+                        store.learnSelectedMIDIControl()
                     }
                     .disabled(!store.hid.isConnected || !store.hid.hasInputAccess || !store.hid.hasExclusiveControl || store.learningControl != nil)
-                    if store.hidBinding(for: store.selectedControl) != nil {
+
+                    if store.learningControl != nil {
+                        Button("Cancel") { store.cancelLearning() }
+                    } else if store.hidBinding(for: store.selectedControl) != nil {
                         Button("Clear", role: .destructive) { store.clearHIDBinding(for: store.selectedControl) }
                     }
                     Button("Input Monitoring") { store.hid.openInputMonitoringSettings() }
                 }
+
+                Text(store.hidBinding(for: store.selectedControl) ?? "No HID input learned")
+                    .font(.system(.body, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .lineLimit(1)
+
                 if store.learningControl != nil {
-                    Text("Press the matching control on the physical remote.")
+                    Text(store.learningControl == store.selectedControl
+                        ? "Press only this K button on the physical remote. Composite or simultaneous K reports are rejected."
+                        : "Relearning \(store.learningControl?.rawValue ?? "the selected control")…")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 } else if let result = store.lastHIDLearningResult {
                     Label(
                         result.message,
@@ -772,6 +791,10 @@ struct MappingInspector: View {
                     .fixedSize(horizontal: false, vertical: true)
                 } else if !store.hid.hasExclusiveControl, store.hid.hasInputAccess {
                     Text("Exclusive control unavailable · factory input not blocked")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                } else if !store.hid.hasInputAccess {
+                    Text("Allow XP[d] in System Settings › Privacy & Security › Input Monitoring, then relaunch.")
                         .font(.caption)
                         .foregroundStyle(.orange)
                 } else {
