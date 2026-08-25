@@ -58,10 +58,12 @@ struct MappingInspector: View {
                         )
                     }
 
+                    hardwareLayoutEditor
+
             GroupBox("Live HID") {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
-                        Text(store.hidBinding(for: store.selectedControl) ?? "No HID input learned")
+                        Text(verbatim: selectedHIDBindingLabel)
                             .font(.system(.body, design: .monospaced))
                             .textSelection(.enabled)
                             .lineLimit(1)
@@ -72,12 +74,19 @@ struct MappingInspector: View {
                         Button(store.learningControl == store.selectedControl ? "Waiting for input…" : "Learn selected control") {
                             store.learnSelectedControl()
                         }
-                        .disabled(!store.hid.isConnected || !store.hid.hasInputAccess || !store.hid.hasExclusiveControl || store.learningControl != nil)
+                        .disabled(
+                            !store.hid.isConnected
+                                || !store.hid.hasInputAccess
+                                || !store.hid.hasExclusiveControl
+                                || store.learningControl != nil
+                                || store.isLearningAll
+                        )
 
                         if store.hidBinding(for: store.selectedControl) != nil {
                             Button("Clear", role: .destructive) {
                                 store.clearHIDBinding(for: store.selectedControl)
                             }
+                            .disabled(store.isLearningAll)
                         }
 
                         Button {
@@ -88,7 +97,12 @@ struct MappingInspector: View {
                         .help("Open Privacy & Security → Input Monitoring in System Settings")
                     }
 
-                    if store.learningControl != nil {
+                    if store.isLearningAll {
+                        Text("Learn all K buttons is active. Complete or cancel it before learning one control.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else if store.learningControl != nil {
                         Text("Press the matching control on the physical remote.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -255,6 +269,91 @@ struct MappingInspector: View {
         return store.hid.isConnected ? "Connected" : "Offline"
     }
 
+    private var selectedHIDBindingLabel: String {
+        store.hidBinding(for: store.selectedControl) ?? "No HID input learned"
+    }
+
+    private var canBeginLearningAll: Bool {
+        store.hid.isConnected
+            && store.hid.hasInputAccess
+            && store.hid.hasExclusiveControl
+            && store.learningControl == nil
+            && !store.isLearningAll
+    }
+
+    private var hardwareLayoutEditor: some View {
+        GroupBox("Hardware layout") {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Label("Active layout", systemImage: "rectangle.3.group")
+                        .font(.subheadline.weight(.medium))
+                    Spacer(minLength: 8)
+
+                    if store.hardwareLayouts.count > 1 {
+                        Menu {
+                            ForEach(store.hardwareLayouts, id: \.id) { layout in
+                                Button {
+                                    store.selectHardwareLayout(id: layout.id)
+                                } label: {
+                                    HStack {
+                                        Text(layout.name)
+                                        if layout.id == store.activeHardwareLayoutID {
+                                            Image(systemName: "checkmark")
+                                        }
+                                    }
+                                }
+                            }
+                        } label: {
+                            Label(store.activeHardwareLayoutName, systemImage: "chevron.up.chevron.down")
+                                .lineLimit(1)
+                        }
+                        .disabled(store.isLearningAll)
+                    } else {
+                        Text(store.activeHardwareLayoutName)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+
+                HStack(spacing: 8) {
+                    Button {
+                        store.beginLearningAllHIDControls()
+                    } label: {
+                        Label(
+                            store.isLearningAll ? "Learning K buttons…" : "Learn all K buttons",
+                            systemImage: store.isLearningAll ? "dot.radiowaves.left.and.right" : "keyboard"
+                        )
+                    }
+                    .disabled(!canBeginLearningAll)
+
+                    if store.isLearningAll {
+                        Button("Cancel") {
+                            store.cancelLearning()
+                        }
+                    }
+
+                    Spacer(minLength: 4)
+                }
+
+                if store.isLearningAll {
+                    Group {
+                        if let control = store.learningAllControl {
+                            let kControls = RemoteControl.allCases.filter(\.isMIDIButton)
+                            let step = (kControls.firstIndex(of: control) ?? 0) + 1
+                            Text("Step \(step) of \(kControls.count) · Press \(control.rawValue). Composite or duplicate inputs are rejected.")
+                        } else {
+                            Text("Preparing the next K button…")
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(4)
+        }
+    }
+
     @ViewBuilder
     private var standardHIDCompatibility: some View {
         if store.activeRealm == .standard {
@@ -292,7 +391,7 @@ struct MappingInspector: View {
                         }
                     } else {
                         if !collisions.isEmpty {
-                            Text("Learned keyboard assignments overlap:")
+                            Text("Saved bindings overlap:")
                                 .foregroundStyle(.orange)
                             ForEach(collisions, id: \.self) { collision in
                                 Text("• \(collision.firstControl.rawValue) held → \(collision.hiddenControl.rawValue) hidden")
@@ -309,7 +408,7 @@ struct MappingInspector: View {
                             Text("\(invalidCount) saved input(s) are composite or empty report-2 states, not individual one-hot K bindings.")
                                 .foregroundStyle(.orange)
                         }
-                        Text("This is inferred from the learned report-2 or report-6 bindings, not a live hardware observation. Relearn affected buttons with distinct shortcuts in the remote settings.")
+                        Text("This is inferred from saved report-2 or report-6 bindings, not a live hardware observation. Do not change the remote configuration based on this warning alone.")
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -352,6 +451,8 @@ struct MappingInspector: View {
                 : "Primary MIDI mappings are available without holding Fn.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            hardwareLayoutEditor
 
             if store.selectedControl.isMIDIButton {
                 midiInputBindingEditor
@@ -750,29 +851,43 @@ struct MappingInspector: View {
                         .font(.subheadline.weight(.medium))
                     Spacer()
                     Button(
-                        store.learningControl == store.selectedControl
+                        store.isLearningAll
+                            ? "Learn All active…"
+                            : store.learningControl == store.selectedControl
                             ? "Waiting for input…"
                             : "Relearn \(selectedControlTitle)"
                     ) {
                         store.learnSelectedMIDIControl()
                     }
-                    .disabled(!store.hid.isConnected || !store.hid.hasInputAccess || !store.hid.hasExclusiveControl || store.learningControl != nil)
+                    .disabled(
+                        !store.hid.isConnected
+                            || !store.hid.hasInputAccess
+                            || !store.hid.hasExclusiveControl
+                            || store.learningControl != nil
+                            || store.isLearningAll
+                    )
 
                     if store.learningControl != nil {
                         Button("Cancel") { store.cancelLearning() }
                     } else if store.hidBinding(for: store.selectedControl) != nil {
                         Button("Clear", role: .destructive) { store.clearHIDBinding(for: store.selectedControl) }
+                            .disabled(store.isLearningAll)
                     }
                     Button("Input Monitoring") { store.hid.openInputMonitoringSettings() }
                 }
 
-                Text(store.hidBinding(for: store.selectedControl) ?? "No HID input learned")
+                Text(verbatim: selectedHIDBindingLabel)
                     .font(.system(.body, design: .monospaced))
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
                     .lineLimit(1)
 
-                if store.learningControl != nil {
+                if store.isLearningAll {
+                    Text("Learn all K buttons is active. Complete or cancel it before relearning one control.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else if store.learningControl != nil {
                     Text(store.learningControl == store.selectedControl
                         ? "Press only this K button on the physical remote. Composite or simultaneous K reports are rejected."
                         : "Relearning \(store.learningControl?.rawValue ?? "the selected control")…")
