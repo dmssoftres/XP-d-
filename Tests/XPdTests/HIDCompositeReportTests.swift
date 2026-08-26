@@ -127,7 +127,7 @@ final class HIDCompositeReportTests: XCTestCase {
         XCTAssertEqual(executed, ["K10 + K8 layer"])
     }
 
-    func testUnrelatedEmptyReportsDoNotPreventModifierThresholdAction() {
+    func testUnrelatedEmptyReportsDoNotPreventModifierReleaseCommitOrLateLayer() {
         let scheduler = TestScheduler()
         var executed: [String] = []
         let suiteName = "XPdTests.HIDCompositeReportTests.\(UUID().uuidString)"
@@ -167,13 +167,14 @@ final class HIDCompositeReportTests: XCTestCase {
         store.hid.simulateInputReportForTesting(reportID: 7, bytes: emptyReport)
         store.hid.simulateInputReportForTesting(reportID: 9, bytes: emptyReport)
         scheduler.advance(by: 0.5)
-        XCTAssertEqual(executed, ["K10 base"])
+        XCTAssertTrue(executed.isEmpty)
 
-        // The already-fired cycle consumes a later K8 until report-6 release.
+        // Unrelated empty reports do not release K10. A destination arriving
+        // after the standalone threshold still forms the exact layer.
         store.hid.simulateInputReportForTesting(reportID: 6, bytes: k8Report)
         store.hid.simulateInputReportForTesting(reportID: 6, bytes: emptyReport)
-        scheduler.advance(by: 1)
-        XCTAssertEqual(executed, ["K10 base"])
+        scheduler.advance(by: 0.30)
+        XCTAssertEqual(executed, ["K10 + K8 layer"])
     }
 
     func testDecodedReport6RepeatedDestinationUnderHeldK10ExecutesEachLayeredTap() {
@@ -332,7 +333,7 @@ final class HIDCompositeReportTests: XCTestCase {
         }
     }
 
-    func testReport2K10AloneExecutesBaseOnlyAtModifierThreshold() {
+    func testReport2K10AloneExecutesBaseOnlyOnReleaseAfterThreshold() {
         let scheduler = TestScheduler()
         var executed: [String] = []
         let store = makeReport2Store(scheduler: scheduler) { mapping, completion in
@@ -357,7 +358,7 @@ final class HIDCompositeReportTests: XCTestCase {
         XCTAssertTrue(executed.isEmpty)
 
         scheduler.advance(by: 0.01)
-        XCTAssertEqual(executed, ["K10 Base"])
+        XCTAssertTrue(executed.isEmpty)
 
         store.hid.simulateInputReportForTesting(
             reportID: 2,
@@ -408,6 +409,64 @@ final class HIDCompositeReportTests: XCTestCase {
         scheduler.advance(by: 0.30)
 
         XCTAssertEqual(executed, ["K10 + K8 Layer"])
+    }
+
+    func testReport2K10ThenK8AtAndAfterThresholdStillExecutesExactLayer() {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeReport2Store(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+
+        learnReport2(report2ButtonBit(.k8), for: .k8, in: store)
+        learnReport2(report2ButtonBit(.k10), for: .k10, in: store)
+        XCTAssertTrue(store.setRemoteModifier(.k10, enabled: true))
+        store.standardModifierHoldThreshold = 0.5
+        store.update(
+            Mapping(action: .openApplication, command: "K10 Base"),
+            for: .k10,
+            gesture: .tap
+        )
+        store.update(
+            Mapping(action: .openApplication, command: "K10 + K8 Layer"),
+            for: .k8,
+            gesture: .tap,
+            modifierControls: [.k10]
+        )
+
+        let k10 = report2ButtonBit(.k10)
+        let k8 = report2ButtonBit(.k8)
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: k10)
+        )
+        scheduler.advance(by: 0.5)
+        XCTAssertTrue(executed.isEmpty)
+
+        // Equality with the threshold and a later arrival both remain layer
+        // eligible while K10 is physically held.
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: k10 | k8)
+        )
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: k10)
+        )
+        scheduler.advance(by: 0.30)
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: k10 | k8)
+        )
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: 0)
+        )
+        scheduler.advance(by: 0.30)
+
+        XCTAssertEqual(executed, ["K10 + K8 Layer", "K10 + K8 Layer"])
+        XCTAssertFalse(executed.contains("K10 Base"))
     }
 
     func testReport2DestinationFirstThenK10BeforeThresholdRoutesExactLayer() {
@@ -1103,10 +1162,16 @@ final class HIDCompositeReportTests: XCTestCase {
         // or move the existing timer's deadline.
         store.hid.simulateInputReportForTesting(reportID: 2, bytes: k10)
         scheduler.advance(by: 0.01)
-        XCTAssertEqual(executed, ["K10 Base"])
+        XCTAssertTrue(executed.isEmpty)
 
         store.hid.simulateInputReportForTesting(reportID: 2, bytes: k10)
         scheduler.advance(by: 1)
+        XCTAssertTrue(executed.isEmpty)
+
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: 0)
+        )
         XCTAssertEqual(executed, ["K10 Base"])
     }
 

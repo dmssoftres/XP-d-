@@ -646,10 +646,11 @@ final class MappingStore {
     private var activeStandardKeyboardKeys: [RemoteControl: Set<UInt16>] = [:]
     private var activeStandardGestureIdentity: ButtonGestureIdentity?
     private var activeStandardModifierHoldTasks: [RemoteControl: GestureScheduledAction] = [:]
-    /// Once a lone modifier reaches its threshold, its Base Tap has already
-    /// fired and the rest of that physical HID cycle is consumed. This keeps
-    /// a later destination from retroactively becoming a layer.
-    private var activeStandardModifierCycleConsumed = false
+    /// A lone modifier becomes eligible for its standalone Base Tap when this
+    /// threshold is reached, but remains layer-eligible until physical
+    /// release. The Base Tap is committed only at release if no destination
+    /// participated in the cycle.
+    private var activeStandardModifierThresholdReached: Set<RemoteControl> = []
     private var activeStandardModifierBaseSuppressed = false
     private var activeStandardModifierGeneration = 0
     private var ambiguousStandardCycles: Set<RemoteControl> = []
@@ -3559,6 +3560,15 @@ final class MappingStore {
         let addedControls = desiredControls.subtracting(previousReport2Controls)
         let previousIdentity = activeStandardGestureIdentity
 
+        // A lone modifier's standalone action is committed at the physical
+        // release boundary, not by the threshold timer. Capture that
+        // decision before removing the source controls and their keyboard
+        // state below.
+        commitStandaloneStandardModifierIfEligible(
+            controls: activeStandardControls,
+            removedControls: removedControls
+        )
+
         // A report-2 snapshot can remove a destination while leaving its
         // modifier held. Release that destination through the gesture
         // recognizer so its layered Tap remains eligible, but suppress the
@@ -3573,6 +3583,7 @@ final class MappingStore {
         for control in removedControls {
             if isRemoteModifier(control) {
                 activeStandardModifierHoldTasks.removeValue(forKey: control)?.cancel()
+                activeStandardModifierThresholdReached.remove(control)
             } else if activeStandardControls.contains(control) {
                 activeStandardModifierBaseSuppressed = true
                 cancelActiveStandardModifierHoldTasks(reason: "destination-release")
@@ -3690,6 +3701,15 @@ final class MappingStore {
             .filter { !activeStandardControls.contains($0) }
         let previousIdentity = activeStandardGestureIdentity
 
+        // A lone modifier's standalone action is committed at the physical
+        // release boundary, not by the threshold timer. Capture that
+        // decision before removing the source controls and their keyboard
+        // state below.
+        commitStandaloneStandardModifierIfEligible(
+            controls: activeStandardControls,
+            removedControls: removedControls
+        )
+
         if let previousIdentity,
            removedControls.contains(previousIdentity.control) {
             buttonGestureRecognizer.release(previousIdentity)
@@ -3699,6 +3719,7 @@ final class MappingStore {
         for control in removedControls {
             if isRemoteModifier(control) {
                 activeStandardModifierHoldTasks.removeValue(forKey: control)?.cancel()
+                activeStandardModifierThresholdReached.remove(control)
             } else if activeStandardControls.contains(control) {
                 activeStandardModifierBaseSuppressed = true
                 cancelActiveStandardModifierHoldTasks(reason: "destination-release")
@@ -3776,18 +3797,13 @@ final class MappingStore {
         let startsNewCycle = activeStandardControls.isEmpty
         if startsNewCycle {
             activeStandardModifierGeneration &+= 1
-            activeStandardModifierCycleConsumed = false
+            activeStandardModifierThresholdReached.removeAll()
             activeStandardModifierBaseSuppressed = false
         }
 
         modifierArbitrationLogger.info(
-            "standard K input control=\(control.rawValue, privacy: .public) generation=\(self.activeStandardModifierGeneration, privacy: .public) active-count=\(self.activeStandardControls.count, privacy: .public) consumed=\(self.activeStandardModifierCycleConsumed, privacy: .public)"
+            "standard K input control=\(control.rawValue, privacy: .public) generation=\(self.activeStandardModifierGeneration, privacy: .public) active-count=\(self.activeStandardControls.count, privacy: .public) threshold-reached=\(self.activeStandardModifierThresholdReached.contains(control), privacy: .public) base-suppressed=\(self.activeStandardModifierBaseSuppressed, privacy: .public)"
         )
-
-        // A standalone modifier whose threshold already fired consumed this
-        // physical cycle. Ignore every later K press until the report-6
-        // release boundary resets the cycle.
-        guard !activeStandardModifierCycleConsumed else { return }
 
         activeStandardKeyboardModifiers[control] = remoteModifierProvider()
         activeStandardFunctionKeys[control] = remoteFunctionKeyProvider()
@@ -3801,11 +3817,21 @@ final class MappingStore {
                let modifier = modifiers.first {
                 scheduleStandaloneStandardModifier(for: modifier)
             } else {
+                // A modifier stack is intentionally fail-closed. If one
+                // member is released before the other, the remaining member
+                // must not later look like a standalone hold.
+                if modifiers.count > 1 {
+                    activeStandardModifierBaseSuppressed = true
+                }
                 cancelActiveStandardModifierHoldTasks(reason: "multiple-modifiers")
             }
             return
         }
 
+        // The destination's participation is the decisive event. It
+        // suppresses any standalone Base Tap even if the threshold callback
+        // already marked the modifier eligible.
+        activeStandardModifierBaseSuppressed = true
         cancelActiveStandardModifierHoldTasks(reason: "primary-joined")
         guard primaries.count <= 1 else {
             ambiguousStandardCycles.formUnion(primaries)
@@ -3838,7 +3864,6 @@ final class MappingStore {
     private func scheduleStandaloneStandardModifier(for control: RemoteControl) {
         guard activeStandardModifierHoldTasks[control] == nil,
               activeStandardControls.count == 1,
-              activeStandardModifierCycleConsumed == false,
               activeStandardModifierBaseSuppressed == false,
               activeStandardGestureIdentity == nil else { return }
 
@@ -3859,14 +3884,14 @@ final class MappingStore {
             "standalone threshold scheduled control=\(control.rawValue, privacy: .public) threshold=\(threshold, privacy: .public) generation=\(generation, privacy: .public)"
         )
         activeStandardModifierHoldTasks[control] = gestureSchedule(threshold) { [weak self] in
-            self?.fireStandaloneStandardModifier(
+            self?.markStandaloneStandardModifierThresholdReached(
                 identity: identity,
                 generation: generation
             )
         }
     }
 
-    private func fireStandaloneStandardModifier(
+    private func markStandaloneStandardModifierThresholdReached(
         identity: ButtonGestureIdentity,
         generation: Int
     ) {
@@ -3874,35 +3899,59 @@ final class MappingStore {
               activeStandardControls.count == 1,
               activeStandardControls.contains(identity.control),
               isRemoteModifier(identity.control),
-              activeStandardModifierCycleConsumed == false,
               activeStandardModifierBaseSuppressed == false,
               activeStandardGestureIdentity == nil else {
             modifierArbitrationLogger.info(
-                "standalone threshold rejected control=\(identity.control.rawValue, privacy: .public) reason=state expected-generation=\(generation, privacy: .public) actual-generation=\(self.activeStandardModifierGeneration, privacy: .public) active-count=\(self.activeStandardControls.count, privacy: .public) consumed=\(self.activeStandardModifierCycleConsumed, privacy: .public) gesture-active=\(self.activeStandardGestureIdentity != nil, privacy: .public)"
+                "standalone threshold rejected control=\(identity.control.rawValue, privacy: .public) reason=state expected-generation=\(generation, privacy: .public) actual-generation=\(self.activeStandardModifierGeneration, privacy: .public) active-count=\(self.activeStandardControls.count, privacy: .public) base-suppressed=\(self.activeStandardModifierBaseSuppressed, privacy: .public) gesture-active=\(self.activeStandardGestureIdentity != nil, privacy: .public)"
             )
             return
         }
 
         modifierArbitrationLogger.info(
-            "standalone threshold accepted/consumed control=\(identity.control.rawValue, privacy: .public) generation=\(generation, privacy: .public)"
+            "standalone threshold reached/eligible control=\(identity.control.rawValue, privacy: .public) generation=\(generation, privacy: .public)"
         )
 
-        // Mark the cycle consumed before executing user-configured work. Even
-        // when the Base Tap is absent or its trigger conditions do not match,
-        // a later destination must not be allowed to form a layer from this
-        // already-expired modifier hold.
-        activeStandardModifierCycleConsumed = true
+        // The callback is deliberately side-effect free with respect to
+        // mapped actions. The held modifier remains eligible for a later
+        // destination; release commits Base only if no destination joined.
+        activeStandardModifierThresholdReached.insert(identity.control)
         activeStandardModifierHoldTasks.removeValue(forKey: identity.control)
-        cancelActiveStandardModifierHoldTasks(reason: "threshold-fired")
+    }
+
+    private func commitStandaloneStandardModifierIfEligible(
+        controls: Set<RemoteControl>,
+        removedControls: Set<RemoteControl>? = nil
+    ) {
+        guard let modifier = controls.first,
+              controls.count == 1,
+              removedControls.map({ $0.contains(modifier) }) ?? true,
+              isRemoteModifier(modifier),
+              activeStandardModifierThresholdReached.contains(modifier),
+              activeStandardModifierBaseSuppressed == false,
+              activeStandardGestureIdentity == nil else {
+            return
+        }
+
+        let identity = ButtonGestureIdentity(
+            control: modifier,
+            keyboardModifiers: activeStandardKeyboardModifiers[modifier] ?? [],
+            functionKeys: activeStandardFunctionKeys[modifier] ?? [],
+            keyboardKeys: activeStandardKeyboardKeys[modifier] ?? []
+        )
+        activeStandardModifierThresholdReached.remove(modifier)
+        modifierArbitrationLogger.info(
+            "standalone Base Tap committed at release control=\(modifier.rawValue, privacy: .public)"
+        )
         recognizedButtonGesture(identity: identity, gesture: .tap)
     }
 
     private func releaseStandardCycle() {
         let controls = activeStandardControls
+        commitStandaloneStandardModifierIfEligible(controls: controls)
         activeStandardReport6Controls.removeAll()
         activeStandardReport2Controls.removeAll()
         modifierArbitrationLogger.info(
-            "cycle reset reason=release-boundary controls=\(controls.count, privacy: .public) consumed=\(self.activeStandardModifierCycleConsumed, privacy: .public)"
+            "cycle reset reason=release-boundary controls=\(controls.count, privacy: .public) threshold-reached=\(self.activeStandardModifierThresholdReached.count, privacy: .public) base-suppressed=\(self.activeStandardModifierBaseSuppressed, privacy: .public)"
         )
         cancelActiveStandardModifierHoldTasks(reason: "release-boundary")
         activeStandardControls.removeAll()
@@ -3911,7 +3960,7 @@ final class MappingStore {
             activeStandardFunctionKeys.removeAll()
             activeStandardKeyboardKeys.removeAll()
             activeStandardGestureIdentity = nil
-            activeStandardModifierCycleConsumed = false
+            activeStandardModifierThresholdReached.removeAll()
             activeStandardModifierBaseSuppressed = false
             activeStandardModifierGeneration &+= 1
             ambiguousStandardCycles.removeAll()
@@ -3921,7 +3970,6 @@ final class MappingStore {
         let modifiers = controls.filter(isRemoteModifier)
         let primaries = controls.filter { !isRemoteModifier($0) }
         guard ambiguousStandardCycles.isEmpty,
-              !activeStandardModifierCycleConsumed,
               primaries.count == 1,
               modifiers.count <= remoteModifierControls
                   .subtracting(unavailableRemoteModifierControls)
@@ -3951,7 +3999,7 @@ final class MappingStore {
         activeStandardKeyboardModifiers.removeAll()
         activeStandardFunctionKeys.removeAll()
         activeStandardKeyboardKeys.removeAll()
-        activeStandardModifierCycleConsumed = false
+        activeStandardModifierThresholdReached.removeAll()
         activeStandardModifierBaseSuppressed = false
         activeStandardModifierGeneration &+= 1
         ambiguousStandardCycles.removeAll()

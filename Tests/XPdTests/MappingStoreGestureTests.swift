@@ -411,7 +411,7 @@ final class MappingStoreGestureTests: XCTestCase {
         XCTAssertTrue(executed.isEmpty)
     }
 
-    func testStandaloneModifierFiresImmediatelyAtHoldThreshold() {
+    func testStandaloneModifierThresholdOnlyEnablesReleaseTap() {
         let scheduler = TestScheduler()
         var executed: [String] = []
         let store = makeStore(scheduler: scheduler) { mapping, completion in
@@ -427,12 +427,16 @@ final class MappingStoreGestureTests: XCTestCase {
         XCTAssertTrue(executed.isEmpty)
 
         scheduler.advance(by: 0.01)
-        XCTAssertEqual(executed, ["K10 tap"])
+        XCTAssertTrue(executed.isEmpty)
 
-        // The standalone action has already committed while K10 remains down;
-        // release and later scheduler activity must not execute it again.
+        // Crossing the threshold leaves K10 eligible for a late destination.
+        scheduler.advance(by: 1)
+        XCTAssertTrue(executed.isEmpty)
+
+        // With no destination participation, release commits the standalone
+        // action exactly once.
         store.simulateHIDInputForTesting(nil)
-        scheduler.advance(by: 0.30)
+        XCTAssertEqual(executed, ["K10 tap"])
         scheduler.advance(by: 1)
         XCTAssertEqual(executed, ["K10 tap"])
     }
@@ -453,9 +457,8 @@ final class MappingStoreGestureTests: XCTestCase {
         scheduler.advance(by: 0.79)
         XCTAssertTrue(executed.isEmpty)
         scheduler.advance(by: 0.01)
-        XCTAssertEqual(executed, ["K10 tap"])
+        XCTAssertTrue(executed.isEmpty)
         store.simulateHIDInputForTesting(nil)
-        scheduler.advance(by: 0.30)
         XCTAssertEqual(executed, ["K10 tap"])
     }
 
@@ -544,7 +547,7 @@ final class MappingStoreGestureTests: XCTestCase {
         XCTAssertEqual(executed, ["K10+K8 layer"])
     }
 
-    func testPrimaryAtThresholdCannotCreateLayerAfterStandaloneFires() {
+    func testPrimaryAtThresholdStillCreatesLayerWithoutBaseLeakage() {
         let scheduler = TestScheduler()
         var executed: [String] = []
         let store = makeStore(scheduler: scheduler) { mapping, completion in
@@ -562,18 +565,18 @@ final class MappingStoreGestureTests: XCTestCase {
 
         store.simulateHIDInputForTesting(k10Signature)
         scheduler.advance(by: 0.5)
-        XCTAssertEqual(executed, ["K10 tap"])
+        XCTAssertTrue(executed.isEmpty)
 
-        // Equality belongs to the timer: a destination arriving at or after
-        // the fired threshold cannot retroactively create a layer.
+        // A destination arriving exactly at the threshold still joins the
+        // held modifier and selects the exact layer.
         store.simulateHIDInputForTesting(k8Signature)
         store.simulateHIDInputForTesting(nil)
-        scheduler.advance(by: 1)
+        scheduler.advance(by: 0.30)
 
-        XCTAssertEqual(executed, ["K10 tap"])
+        XCTAssertEqual(executed, ["layer"])
     }
 
-    func testPrimaryAfterThresholdIsConsumedUntilReportRelease() {
+    func testPrimaryAfterThresholdStillCreatesLayerUntilReportRelease() {
         let scheduler = TestScheduler()
         var executed: [String] = []
         let store = makeStore(scheduler: scheduler) { mapping, completion in
@@ -588,14 +591,14 @@ final class MappingStoreGestureTests: XCTestCase {
         scheduler.advance(by: 0.51)
         store.simulateHIDInputForTesting(k8Signature)
         scheduler.advance(by: 0.1)
-        XCTAssertEqual(executed, ["K10 tap"])
+        XCTAssertTrue(executed.isEmpty)
 
-        // K8 was consumed by the already-fired K10 cycle. The report-6
-        // release closes that cycle without producing a second action.
+        // K8 remains eligible after the threshold; the report-6 release closes
+        // the cycle and the exact layered Tap is the only action.
         store.simulateHIDInputForTesting(nil)
-        scheduler.advance(by: 1)
+        scheduler.advance(by: 0.30)
 
-        XCTAssertEqual(executed, ["K10 tap"])
+        XCTAssertEqual(executed, ["layer"])
     }
 
     func testModifierHoldThresholdPersistsAndNormalizes() {
@@ -680,6 +683,7 @@ final class MappingStoreGestureTests: XCTestCase {
         store.update(Mapping(action: .openApplication, command: "K10 tap"), for: .k10, gesture: .tap)
 
         store.simulateHIDInputForTesting(k10Signature)
+        scheduler.advance(by: 0.5)
         store.profileName = "Finder"
         scheduler.advance(by: 1)
 
@@ -697,6 +701,7 @@ final class MappingStoreGestureTests: XCTestCase {
         store.update(Mapping(action: .openApplication, command: "K10 tap"), for: .k10, gesture: .tap)
 
         store.simulateHIDInputForTesting(k10Signature)
+        scheduler.advance(by: 0.5)
         store.simulateHIDInputForTesting("wheel:center")
         scheduler.advance(by: 1)
 
@@ -714,6 +719,7 @@ final class MappingStoreGestureTests: XCTestCase {
         store.setRemoteModifier(.k10, enabled: true)
         store.update(Mapping(action: .openApplication, command: "K10 tap"), for: .k10, gesture: .tap)
         store.simulateHIDInputForTesting(k10Signature)
+        scheduler.advance(by: 0.5)
 
         XCTAssertEqual(try store.addProfile(named: "Scratch"), "Scratch")
         scheduler.advance(by: 1)
@@ -732,9 +738,37 @@ final class MappingStoreGestureTests: XCTestCase {
         store.setRemoteModifier(.k10, enabled: true)
         store.update(Mapping(action: .openApplication, command: "K10 tap"), for: .k10, gesture: .tap)
         store.simulateHIDInputForTesting(k10Signature)
+        scheduler.advance(by: 0.5)
 
         try store.deleteProfile(named: "Scratch")
         scheduler.advance(by: 1)
+
+        XCTAssertTrue(executed.isEmpty)
+    }
+
+    func testThresholdEligibilityCancelsOnImportAndDisconnect() throws {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeStore(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+        store.setRemoteModifier(.k10, enabled: true)
+        store.update(Mapping(action: .openApplication, command: "K10 tap"), for: .k10, gesture: .tap)
+
+        store.simulateHIDInputForTesting(k10Signature)
+        scheduler.advance(by: 0.5)
+        let exported = try XCTUnwrap(store.exportConfiguration())
+        XCTAssertTrue(store.importConfiguration(exported))
+        scheduler.advance(by: 1)
+        store.simulateHIDInputForTesting(nil)
+        XCTAssertTrue(executed.isEmpty)
+
+        store.simulateHIDInputForTesting(k10Signature)
+        scheduler.advance(by: 0.5)
+        store.hid.simulateDisconnectForTesting()
+        scheduler.advance(by: 1)
+        store.simulateHIDInputForTesting(nil)
 
         XCTAssertTrue(executed.isEmpty)
     }

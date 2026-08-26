@@ -276,7 +276,9 @@ final class HIDKeyboardReportRuntimeTests: XCTestCase {
         // packet or execute the wrong action.
         store.simulateHIDInputForTesting(k10Signature)
         scheduler.advance(by: 0.5)
+        XCTAssertTrue(executionLog.values.isEmpty)
 
+        store.simulateHIDInputForTesting(nil)
         XCTAssertEqual(executionLog.values, ["K10 base"])
     }
 

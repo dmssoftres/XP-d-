@@ -170,12 +170,13 @@ condition while retaining the physical K chord.
 ## K-button modifier layers
 
 In a Standard profile, any K1–K10 button can be marked **K modifier**. Holding
-one by itself through the configured threshold runs its Base Tap immediately.
-Pressing a destination K while the modifier remains physically held and before
-the threshold cancels standalone and selects that destination's exact alternate
-layer. Once the timer fires, later K input in that physical cycle is consumed
-and cannot retroactively become a layer. Exact combinations such as `K3`, `K4`,
-or `K3 + K4` remain independent.
+one by itself through the configured threshold makes its Base Tap eligible, but
+does not execute it or consume the physical cycle. The modifier remains
+layer-eligible until release. If no destination joins, its Base Tap runs once
+at release; a quick press/release remains inert. Pressing a destination K while
+the modifier remains physically held—before, at, or after the threshold—
+suppresses standalone and selects that destination's exact alternate layer.
+Exact combinations such as `K3`, `K4`, or `K3 + K4` remain independent.
 
 Designated modifiers use their Base Tap mapping as the standalone hold action;
 their Hold and Double mappings remain unavailable because those gestures would

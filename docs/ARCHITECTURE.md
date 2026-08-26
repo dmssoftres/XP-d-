@@ -92,14 +92,15 @@ exact K layer, keyboard modifiers, F keys, and configured ordinary keys so only
 equivalent presses may form a Double. A destination-first press is reclassified
 when a K modifier joins its active K-input cycle. A modifier-only press snapshots the
 global local-only standalone threshold (default 0.5 seconds, normalized to
-0.2–1.5 in 0.1-second steps). Expiry immediately executes Base Tap when exactly
-one modifier remains physically held and no primary participated, then consumes
-the rest of that K-input cycle. A destination arriving while the modifier is
-still physically held and strictly before expiry cancels standalone and selects
-the exact layer. The collection's release state before expiry makes a lone modifier inert;
-the next K starts a new Base cycle. Physically overlapped modifier stacks remain
+0.2–1.5 in 0.1-second steps). Reaching the threshold only records that the
+modifier is eligible for a standalone Base Tap; it does not execute Base, consume
+the cycle, or remove layer eligibility. A destination arriving while the
+modifier remains physically held—before, at, or after the threshold—suppresses
+standalone and selects the exact layer. If no destination participated, release
+after the threshold commits Base Tap exactly once; release before the threshold
+keeps a quick modifier press inert. Physically overlapped modifier stacks remain
 eligible for an exact stacked layer; sequential released modifiers do not merge.
-Same-cycle modifier-only stacks and multi-primary cycles remain consumed. Press
+Same-cycle modifier-only stacks and multi-primary cycles remain fail-closed. Press
 order is irrelevant within one active rollover cycle. Profile/import/learning/
 disconnect/wheel boundaries cancel active state. Physical timing still requires
 owner acceptance on the target remote.

@@ -227,7 +227,7 @@ struct MappingInspector: View {
                         ) { Text("Adjust standalone hold threshold") }
                         .labelsHidden()
                     }
-                    Text("A designated K held alone runs its Base Tap when this timer expires. Press a destination K while the modifier is still held and before the timer expires to run that exact layer instead.")
+                    Text("A designated K held alone becomes eligible for its Base Tap when this timer expires, but stays available as a modifier until release. If no destination joins, the Base Tap runs once on release. A destination K may join before, at, or after the threshold to run its exact layer instead.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
