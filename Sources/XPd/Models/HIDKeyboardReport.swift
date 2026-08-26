@@ -3,10 +3,13 @@ import Foundation
 /// A normalized keyboard-like state from one of the remote's K-button HID
 /// collections.
 ///
-/// The original collection is report 6, a boot-keyboard state with one
-/// modifier byte followed by six ordinary-key slots. The owner's programmed
-/// F13–F22 layout exposes a distinct report 2 collection instead: `F0` followed by a
-/// one-hot bitmask (K1…K8 in the first byte, K9…K10 in the second). Keeping
+/// The current/factory collection observed in saved captures is report 6, a
+/// boot-keyboard state with one modifier byte followed by six ordinary-key
+/// slots. Historical captures from an earlier programmed layout used a
+/// distinct report-2 collection instead: `F0` followed by a one-hot bitmask
+/// (K1…K8 in the first byte, K9…K10 in the second). The Standard F13–F22 fast
+/// path also targets report 6, but that preset is only a resolver choice until
+/// a live report proves that the connected remote emits those usages. Keeping
 /// both parsed forms separate from their raw signatures lets compatibility
 /// checks handle either collection without treating their fields as
 /// interchangeable.

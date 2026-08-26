@@ -38,6 +38,34 @@ the unified wheel action. The wheel scrolls vertically by default, with a
 persisted sensitivity setting from 1 through 10. Counter-clockwise scrolls up
 and clockwise scrolls down.
 
+### Fast Standard F13–F22 preset
+
+Standard **Status & Input** provides one **Use F13–F22 preset** action (or
+**Disable F13–F22 preset** when active). It selects the canonical distinct
+report-6 keyboard usages F13 through F22 (`0x68` through `0x71`) for K1 through
+K10. The `r6` prefix is expected; the usage bytes identify the individual
+controls. This is a direct identity mapping, not a timing or key-repeat
+heuristic, so XP[d] never guesses K5 from a repeated K10 report.
+
+The preset changes Standard K-input resolution only. It does not rewrite the
+active hardware layout, MIDI bindings, MIDI routing, MIDI settings, or held
+MIDI/Fn state, and the preset control is not shown in MIDI profiles. The
+existing **Advanced manual/live verification** workflow remains available when
+the remote's current reports need to be captured instead.
+
+Selecting the preset is not hardware verification. XP[d] does not program the
+remote; until one exact report-6 F13–F22 input arrives on the current
+connection, Status & Input shows **preset selected; hardware not verified**.
+After that live evidence, the status turns green for the connection. Disconnect,
+switching into MIDI and back to Standard, or disabling/re-enabling the preset
+requires fresh evidence. A single live K press is sufficient for this fast
+check; the app does not require a ten-key relearn.
+
+XP[d] does not program the remote. USB is needed only when the remote is not
+already emitting F13–F22 and the official XPPen wired **Store/Save** operation
+must be used; a data-capable cable is required for that vendor operation. No
+undocumented HID programming reports are sent by XP[d].
+
 ## Button gestures
 
 K1–K10 recognize Tap, Hold, and Double from the verified button-down and
@@ -169,18 +197,24 @@ the graphical remote. The badge overlays the existing button presentation, so
 its K number, optional title, and application icon remain in place.
 
 The modifier and destination must overlap in one physical K-input cycle. The
-factory report-6 layout ends that cycle with an empty report 6; the programmed
-F13–F22 layout uses a verified report-2 `F0` bitfield and ends it with a zero
-mask. A release before the threshold makes a lone modifier inert; a later K is
-then a new Base cycle. Empty reports 1, 7, and 9 from unrelated composite
-collections are ignored and cannot fake that release. Multiple designated
-modifiers may be physically overlapped before one destination to select an
-exact stacked layer.
+factory report-6 layout and the Standard F13–F22 preset end that cycle with an
+empty report 6. A historical programmed F13–F22 layout may instead use the
+verified report-2 `F0` bitfield and end it with a zero mask. A release before the
+threshold makes a lone modifier inert; a later K is then a new Base cycle.
+Empty reports 1, 7, and 9 from unrelated composite collections are ignored and
+cannot fake that release. Multiple designated modifiers may be physically
+overlapped before one destination to select an exact stacked layer.
 
-Report-2 bindings are learned per profile. After reprogramming the remote,
-relearn K1–K10 in each existing Standard or MIDI profile that should use the
-new layout. MIDI Fn routing tracks partial report-2 presses and releases without
-letting report-6 wheel traffic clear the held Fn state.
+K1–K10 raw identities belong to the active device-level hardware layout, not to
+individual profiles. In Standard **Status & Input**, **Configure Standard K
+layers** captures ten individual controls and then live-verifies K10→K5 and
+K5→K10 before committing the layout. A hidden or incorrect composite fails
+closed and preserves the prior layout. Live verification is connection-scoped,
+so disconnect, relaunch, or layout mutation returns it to pending.
+
+This bulk workflow is absent from MIDI and does not reset or rewrite MIDI
+profile data. MIDI Fn routing continues to track partial report-2 presses and
+releases without letting report-6 wheel traffic clear the held Fn state.
 
 Within one held K-input cycle, either press order may select the same exact
 layer. A destination-first gesture is reclassified when its designated modifier

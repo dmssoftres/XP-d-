@@ -47,6 +47,23 @@ layouts without discarding divergent sets; the old active profile selects the
 initial layout. Portable imports validate all profiles and layouts before one
 atomic replacement, and v9 profile JSON omits `hidBindings`.
 
+The Standard-only F13–F22 preset is a separate persisted resolver choice. When
+enabled, Standard K-input matching uses the canonical report-6 usages
+`0x68...0x71` (F13...F22) for K1...K10; the `r6` report family is expected and
+the usage byte provides the distinct identity. The choice does not mutate the
+active hardware layout or any MIDI profile payload; only the Standard preset
+selection is persisted. MIDI always reads the unchanged device-level layout and
+has no preset control or routing branch.
+The resolver is direct and deterministic: it does not infer a missing K5 from
+timing, repeats, or a K10 snapshot.
+Selection alone is not treated as hardware confirmation. The store keeps a
+connection-scoped Standard-only evidence flag and turns it on only after an
+exact report-6 F13–F22 input is received while the preset is active. Status &
+Input remains warning/unverified until then; one live K press is enough for
+the fast check, while a ten-key relearn is not required. Disconnect, changing
+realms, or disabling/re-enabling the preset clears the flag. XP[d] never
+programs the remote through this setting.
+
 Mapping keys include an exact, deterministically encoded set of K-modifier
 controls; an empty set is the Base layer. The inspector uses one single-choice
 field to select an individual/saved MOD layer and a separate additive builder
@@ -59,13 +76,14 @@ Standard profile activation/modifier enablement → require a non-empty learned 
 binding for every designated K. Missing input fails closed: activation disables
 the designation and enablement reports Learn-first guidance without synthesizing
 a factory signature. Exact-layer mappings remain saved. Status & Input audits all
-learned K report pairs for order-specific masking; this is inferred compatibility,
-not a live hardware claim. Clearing a designated modifier binding cancels pending
-input and removes the designation in the same save.
+learned K report pairs for order-specific masking. Static independence is saved
+metadata only and is never presented as current live verification. Clearing a
+designated modifier binding cancels pending input, removes the designation in the
+same save, and invalidates connection-scoped Standard K verification.
 
-Standard K-layer input → reconcile learned report-6 keyboard snapshots or the
-programmed report-2 `F0` bitfield until their respective empty/zero release
-boundary → ignore empty
+Standard K-layer input → reconcile learned report-6 keyboard snapshots,
+including the explicit F13–F22 preset, or the historical programmed report-2
+`F0` bitfield until their respective empty/zero release boundary → ignore empty
 reports 1, 7, and 9 from the device's unrelated
 mouse/digitizer collections → classify every designated K as a modifier and
 require exactly one non-designated primary → route Tap/Hold/Double through the
@@ -94,21 +112,50 @@ destinations, and releases destinations before Fn. Report-6 nil/wheel releases
 never clear a separate report-2 held set. HID bindings come only from the active
 device-level hardware layout and remain unchanged across profile transitions.
 
-Guided Learn All → copy the active layout into session-only candidate state →
-capture K1–K10 in physical order with an explicit release between buttons →
-reject malformed, empty, duplicate, composite, mixed-encoding, masking, and
-rollover-invalid sets → commit all ten once. Wheel and center bindings remain
-untouched. Cancel, disconnect, profile/layout change, or validation failure
-discards the candidate. Layout switching cancels pending Standard gestures and
-learning, resets MIDI/Fn held state, closes the selector, then exposes the new
-binding set.
+Standard `Configure Standard K layers` → copy the active layout into session-only
+candidate state → capture K1–K10 in physical order with an explicit release
+between buttons → reject malformed, empty, duplicate, composite, mixed-encoding,
+masking, and rollover-invalid sets → retain the candidate without saving → require
+K10 held then K5 and K5 held then K10 as two live verification sequences. Each
+sequence must contain the expected first-control state, a uniquely parsed combined
+state, and the final collection release; either partial-release direction is valid.
+Only after both orders pass does one transaction replace the ten K bindings. Wheel
+and center bindings remain untouched.
 
-The owner currently sees K1→F13 through K10→F22 in XPPen's editor. The current
-raw encoding is not established without a new trace. Transport does not select
-the keyboard encoding, and editor labels do not prove it. Compatibility warnings
-analyze saved profile bindings only; current saved values were deliberately
+The preset is the fast path for a remote already emitting the distinct F13–F22
+report-6 usages. Manual/live verification remains the advanced fallback for an
+unknown or changed report contract. XP[d] does not program the remote; if the
+remote is not emitting F13–F22, a data-capable USB connection is needed only for
+the official XPPen wired Store/Save operation. XP[d] never transmits an
+undocumented programming report.
+
+The live-verification flag is session-only and connection-scoped. Disconnect,
+reload, cancellation, layout/profile replacement, active-layout mutation,
+per-control learning, or later contradictory K input clears it. Every failed or
+abandoned candidate preserves the prior hardware layout. In particular, if K10
+held causes the remote to emit no observable change when K5 is pressed, XP[d]
+reports `K10 held hides K5` and cannot infer the hidden input.
+
+The bulk configuration entry point exists only in the Standard inspector and is
+also guarded by `MappingStore.activeRealm`. A MIDI-realm invocation is rejected
+without clearing active MIDI notes or Fn state, and Standard configuration does
+not rewrite MIDI mappings or settings. Layout switching retains its separate,
+existing responsibility to reconcile both Standard and MIDI runtime state before
+exposing a different device-level binding set.
+
+The owner currently sees K1→F13 through K10→F22 in XPPen's editor and has reported
+live report-6 traffic, but the exact ten current payloads and both critical
+composites have not yet been captured in this acceptance cycle. Transport does
+not select the keyboard encoding, editor labels do not prove emitted reports,
+and saved signatures do not prove rollover. Current saved values were deliberately
 restored to factory report 6 before the later onboard Store and were never
-relearned afterward.
+relearned afterward. The Standard workflow above is the acceptance boundary.
+
+XP[d] currently has no verified HID output path for programming the remote. It
+must not guess vendor write reports. If live verification proves that the device
+hides a combination, permanent hardware correction remains the XPPen editor's
+data-capable wired Save/Store operation unless a proprietary protocol is captured,
+replayed safely, and independently verified later.
 
 Raw report callback → normalize a possible report-ID prefix → append the report
 to a 12-entry chronological in-memory trace before duplicate/empty semantic
@@ -215,6 +262,10 @@ The build script compiles `XPd`, assembles `dist/XP[d].app`, creates its Info.pl
   releases only on empty report 6; programmed report-2 input releases only on
   its verified `F0` zero mask.
 - Missing release or conflicting live-button reports: cancel the displaced/pending gesture rather than execute an ambiguous action.
+- Standard K configuration cannot observe K5 while K10 is held: reject the
+  candidate, retain the prior layout, leave live verification false, and direct
+  hardware correction to the verified vendor Store path. Never synthesize K5 or
+  transmit an undocumented programming report.
 - Missing/mismatched BLE identity or notification: retain an exact HID property if available; otherwise show battery unavailable rather than estimating.
 - Wheel-center report changes or loses its device-specific standalone empty report-6 distinction: selector confirmation may regress and requires controlled real-hardware recapture.
 - Action target unavailable or permission denied: report a structured action failure without corrupting mappings. Existing application targets are unhidden/restored where permitted, directly activated, and asynchronously verified as foreground; a failed or ineffective direct activation makes one same-path `NSWorkspace` reopen attempt without creating another instance.

@@ -40,7 +40,7 @@ final class DeviceHIDBindingTests: XCTestCase {
         XCTAssertEqual(reloaded.hidBinding(for: .k1), learned)
     }
 
-    func testLearnAllCommitsAtomicallyAndPreservesWheelBindings() {
+    func testConfigureStandardKLayersCommitsAtomicallyAndPreservesWheelBindings() {
         let store = makeStore()
         let oldBindings = store.hidBindings
         let newBindings = hardwareLearningSignatures()
@@ -60,6 +60,11 @@ final class DeviceHIDBindingTests: XCTestCase {
             if index < 9 { XCTAssertTrue(store.isLearningAll) }
         }
 
+        XCTAssertTrue(store.isLearningAll)
+        XCTAssertFalse(store.isStandardKLayerLiveVerified)
+        XCTAssertEqual(store.hidBindings, oldBindings)
+        completeStandardKLayerLiveVerification(store, with: newBindings)
+
         XCTAssertFalse(store.isLearningAll)
         XCTAssertNil(store.learningAllControl)
         XCTAssertEqual(store.learningAllProgress, 0)
@@ -71,6 +76,11 @@ final class DeviceHIDBindingTests: XCTestCase {
             Set(newBindings.values)
         )
         XCTAssertTrue(store.lastHIDLearningResult?.succeeded == true)
+        XCTAssertEqual(
+            store.lastHIDLearningResult?.message,
+            "Configured and live-verified Standard K1–K10 layers in the active hardware layout."
+        )
+        XCTAssertTrue(store.isStandardKLayerLiveVerified)
     }
 
     func testLearnAllCancelAndInvalidCaptureLeaveOldLayoutUntouched() {
@@ -100,7 +110,7 @@ final class DeviceHIDBindingTests: XCTestCase {
         XCTAssertEqual(store.lastHIDLearningResult?.succeeded, false)
     }
 
-    func testLearnAllRejectsMaskingReport6SetOnlyAfterFullAtomicValidation() {
+    func testConfigureStandardKLayersRejectsMaskingReport6SetWithActionableContext() {
         let store = makeStore()
         let oldBindings = store.hidBindings
 
@@ -114,6 +124,172 @@ final class DeviceHIDBindingTests: XCTestCase {
         XCTAssertFalse(store.isLearningAll)
         XCTAssertEqual(store.hidBindings, oldBindings)
         XCTAssertEqual(store.lastHIDLearningResult?.succeeded, false)
+        XCTAssertTrue(store.lastHIDLearningResult?.message.contains("K10 held hides K5") == true)
+        XCTAssertTrue(store.lastHIDLearningResult?.message.contains("prior hardware layout was preserved") == true)
+    }
+
+    func testConfigureStandardKLayersRejectsMissingLiveCompositeAndPreservesPriorLayout() {
+        let store = makeStore()
+        let oldBindings = store.hidBindings
+        let bindings = hardwareLearningSignatures()
+
+        store.beginLearningAllHIDControls()
+        captureStandardKLayerSingles(store, with: bindings)
+        XCTAssertTrue(store.isLearningAll)
+        XCTAssertFalse(store.isStandardKLayerLiveVerified)
+
+        store.simulateHIDInputForTesting(bindings[.k10])
+        store.simulateHIDInputForTesting(report2ReleaseSignature)
+
+        XCTAssertFalse(store.isLearningAll)
+        XCTAssertFalse(store.isStandardKLayerLiveVerified)
+        XCTAssertEqual(store.hidBindings, oldBindings)
+        XCTAssertTrue(store.lastHIDLearningResult?.message.contains("K10 held, then K5") == true)
+        XCTAssertTrue(store.lastHIDLearningResult?.message.contains("prior hardware layout was preserved") == true)
+    }
+
+    func testConfigureStandardKLayersRejectsWrongOrderAndWrongComposite() {
+        let wrongOrderStore = makeStore()
+        let wrongOrderBindings = hardwareLearningSignatures()
+        let wrongOrderOriginal = wrongOrderStore.hidBindings
+        wrongOrderStore.beginLearningAllHIDControls()
+        captureStandardKLayerSingles(wrongOrderStore, with: wrongOrderBindings)
+        wrongOrderStore.simulateHIDInputForTesting(wrongOrderBindings[.k5])
+        XCTAssertFalse(wrongOrderStore.isLearningAll)
+        XCTAssertEqual(wrongOrderStore.hidBindings, wrongOrderOriginal)
+        XCTAssertTrue(wrongOrderStore.lastHIDLearningResult?.message.contains("K10 held, then K5") == true)
+
+        let wrongCompositeStore = makeStore()
+        let wrongCompositeBindings = hardwareLearningSignatures()
+        let wrongCompositeOriginal = wrongCompositeStore.hidBindings
+        wrongCompositeStore.beginLearningAllHIDControls()
+        captureStandardKLayerSingles(wrongCompositeStore, with: wrongCompositeBindings)
+        wrongCompositeStore.simulateHIDInputForTesting(wrongCompositeBindings[.k10])
+        wrongCompositeStore.simulateHIDInputForTesting(
+            report2CompositeSignature(for: .k10, and: .k4, in: wrongCompositeBindings)
+        )
+        XCTAssertFalse(wrongCompositeStore.isLearningAll)
+        XCTAssertEqual(wrongCompositeStore.hidBindings, wrongCompositeOriginal)
+        XCTAssertTrue(wrongCompositeStore.lastHIDLearningResult?.message.contains("K10 held, then K5") == true)
+    }
+
+    func testConfigureStandardKLayersAcceptsReport6CombinedStatesAndNilReleases() {
+        let store = makeStore()
+        let bindings = uniqueReport6KBindings()
+
+        store.beginLearningAllHIDControls()
+        captureStandardKLayerSingles(store, with: bindings)
+        store.simulateHIDInputForTesting(bindings[.k10])
+        store.simulateHIDInputForTesting(report6CompositeSignature(for: .k10, and: .k5, in: bindings))
+        store.simulateHIDInputForTesting(nil)
+        store.simulateHIDInputForTesting(bindings[.k5])
+        store.simulateHIDInputForTesting(report6CompositeSignature(for: .k5, and: .k10, in: bindings))
+        store.simulateHIDInputForTesting(nil)
+
+        XCTAssertTrue(store.lastHIDLearningResult?.succeeded == true)
+        XCTAssertTrue(store.isStandardKLayerLiveVerified)
+    }
+
+    func testStandardKLayerLiveVerificationAcceptsBothReport2PartialReleaseDirectionsForBothOrders() {
+        for firstOrderPartial in [.k10, .k5] as [RemoteControl] {
+            for secondOrderPartial in [.k5, .k10] as [RemoteControl] {
+                let store = makeStore()
+                let bindings = hardwareLearningSignatures()
+                store.beginLearningAllHIDControls()
+                captureStandardKLayerSingles(store, with: bindings)
+                completeStandardKLayerVerificationOrder(
+                    store,
+                    first: .k10,
+                    second: .k5,
+                    bindings: bindings,
+                    partialReleaseState: firstOrderPartial
+                )
+                completeStandardKLayerVerificationOrder(
+                    store,
+                    first: .k5,
+                    second: .k10,
+                    bindings: bindings,
+                    partialReleaseState: secondOrderPartial
+                )
+                XCTAssertTrue(store.isStandardKLayerLiveVerified, "report-2 first partial=\(firstOrderPartial.rawValue), second partial=\(secondOrderPartial.rawValue), result=\(store.lastHIDLearningResult?.message ?? "none")")
+            }
+        }
+    }
+
+    func testStandardKLayerLiveVerificationAcceptsBothReport6PartialReleaseDirectionsForBothOrders() {
+        for firstOrderPartial in [.k10, .k5] as [RemoteControl] {
+            for secondOrderPartial in [.k5, .k10] as [RemoteControl] {
+                let store = makeStore()
+                let bindings = uniqueReport6KBindings()
+                store.beginLearningAllHIDControls()
+                captureStandardKLayerSingles(store, with: bindings)
+                completeReport6StandardKLayerVerificationOrder(
+                    store,
+                    first: .k10,
+                    second: .k5,
+                    bindings: bindings,
+                    partialReleaseState: firstOrderPartial
+                )
+                completeReport6StandardKLayerVerificationOrder(
+                    store,
+                    first: .k5,
+                    second: .k10,
+                    bindings: bindings,
+                    partialReleaseState: secondOrderPartial
+                )
+                XCTAssertTrue(store.isStandardKLayerLiveVerified, "report-6 first partial=\(firstOrderPartial.rawValue), second partial=\(secondOrderPartial.rawValue), result=\(store.lastHIDLearningResult?.message ?? "none")")
+            }
+        }
+    }
+
+    func testLiveVerifiedReport6KeepsValidStatesButInvalidatesUnknownKState() {
+        let store = makeStore()
+        let bindings = uniqueReport6KBindings()
+        configureStandardKLayers(store, with: bindings)
+        XCTAssertTrue(store.isStandardKLayerLiveVerified)
+
+        store.simulateHIDInputForTesting(bindings[.k10])
+        store.simulateHIDInputForTesting(report6CompositeSignature(for: .k10, and: .k5, in: bindings))
+        store.simulateHIDInputForTesting("r6:01 56 00 00 00 00 00")
+        XCTAssertTrue(store.isStandardKLayerLiveVerified)
+
+        store.simulateHIDInputForTesting("r6:03 1D 00 00 00 00 00")
+        XCTAssertFalse(store.isStandardKLayerLiveVerified)
+        XCTAssertTrue(store.lastHIDLearningResult?.message.contains("report-6 K input") == true)
+    }
+
+    func testStandardKLayerLiveVerificationBecomesTrueOnlyAfterBothOrdersAndInvalidates() {
+        let store = makeStore()
+        let bindings = hardwareLearningSignatures()
+        store.beginLearningAllHIDControls()
+        captureStandardKLayerSingles(store, with: bindings)
+
+        XCTAssertFalse(store.isStandardKLayerLiveVerified)
+        completeStandardKLayerVerificationOrder(store, first: .k10, second: .k5, bindings: bindings)
+        XCTAssertTrue(store.isLearningAll)
+        XCTAssertFalse(store.isStandardKLayerLiveVerified)
+        XCTAssertTrue(store.standardKLayerVerificationPrompt?.contains("K5") == true)
+
+        completeStandardKLayerVerificationOrder(store, first: .k5, second: .k10, bindings: bindings)
+        XCTAssertTrue(store.isStandardKLayerLiveVerified)
+
+        store.hid.simulateDisconnectForTesting()
+        XCTAssertFalse(store.isStandardKLayerLiveVerified)
+
+        let reloaded = makeStore()
+        XCTAssertFalse(reloaded.isStandardKLayerLiveVerified)
+
+        configureStandardKLayers(store, with: bindings)
+        XCTAssertTrue(store.isStandardKLayerLiveVerified)
+        store.selectedControl = .k1
+        store.learnSelectedControl()
+        XCTAssertFalse(store.isStandardKLayerLiveVerified)
+        store.cancelLearning()
+
+        configureStandardKLayers(store, with: bindings)
+        XCTAssertTrue(store.isStandardKLayerLiveVerified)
+        XCTAssertTrue(store.selectHardwareLayout(id: store.activeHardwareLayoutID))
+        XCTAssertFalse(store.isStandardKLayerLiveVerified)
     }
 
     func testDisconnectAndLayoutSwitchCancelLearnAllWithoutPartialWrites() throws {
@@ -247,7 +423,7 @@ final class DeviceHIDBindingTests: XCTestCase {
         XCTAssertTrue(store.lastHIDLearningResult?.succeeded == true)
     }
 
-    func testLearnAllResetsHeldMIDINoteAndFnBeforeConsumingRelease() async throws {
+    func testConfigureStandardKLayersDoesNotStartOrResetMIDISession() throws {
         let store = makeStore()
         _ = try store.addMIDIProfile(named: "MIDI")
         XCTAssertTrue(store.updateMIDIPracticeFnControl(.k10))
@@ -261,15 +437,39 @@ final class DeviceHIDBindingTests: XCTestCase {
         store.simulateMIDIControlPressForTesting(.k8)
         XCTAssertTrue(store.isFnLayerActive)
 
+        let midiProfileBefore = try midiProfilePayload(named: "MIDI", from: store)
         store.beginLearningAllHIDControls()
-        XCTAssertFalse(store.isFnLayerActive)
-        store.cancelLearning()
+        XCTAssertEqual(store.activeRealm, .midi)
+        XCTAssertFalse(store.isLearningAll)
+        XCTAssertNil(store.learningControl)
+        XCTAssertTrue(store.isFnLayerActive)
+        XCTAssertEqual(
+            store.lastHIDLearningResult?.message,
+            "Configure Standard K layers is available only in the Standard workspace. MIDI input, mappings, and settings were not changed."
+        )
+        XCTAssertEqual(try midiProfilePayload(named: "MIDI", from: store), midiProfileBefore)
+    }
 
-        await store.waitForMIDICommandsForTesting()
-        for _ in 0..<3 { await Task.yield() }
-        let summaries = store.midiMonitorEvents.map(\.summary)
-        XCTAssertTrue(summaries.contains("Note On 72 · Ch 1 · V110"))
-        XCTAssertTrue(summaries.contains("Note Off 72 · Ch 1"))
+    func testConfigureStandardKLayersPreservesMIDIProfileMappingsAndSettingsOnSuccessAndFailure() throws {
+        let store = makeStore()
+        _ = try store.addMIDIProfile(named: "MIDI")
+        XCTAssertTrue(store.updateMIDIPracticeFnControl(.k10))
+        store.updateMIDIButtonMapping(
+            MIDIButtonMapping(kind: .cc, controller: 74, pressValue: 96, releaseValue: 12),
+            for: .k8
+        )
+        let midiProfileBefore = try midiProfilePayload(named: "MIDI", from: store)
+
+        XCTAssertTrue(store.selectProfile("Global"))
+        configureStandardKLayers(store, with: hardwareLearningSignatures())
+        XCTAssertTrue(store.lastHIDLearningResult?.succeeded == true)
+        XCTAssertEqual(try midiProfilePayload(named: "MIDI", from: store), midiProfileBefore)
+
+        let bindingsBeforeFailure = store.hidBindings
+        configureStandardKLayers(store, with: factoryKBindings())
+        XCTAssertFalse(store.lastHIDLearningResult?.succeeded ?? true)
+        XCTAssertEqual(store.hidBindings, bindingsBeforeFailure)
+        XCTAssertEqual(try midiProfilePayload(named: "MIDI", from: store), midiProfileBefore)
     }
 
     func testMalformedV8MigrationDoesNotWriteV9OrChangeV8Payload() {
@@ -529,5 +729,129 @@ final class DeviceHIDBindingTests: XCTestCase {
 
     private var report2ReleaseSignature: String {
         "r2:F0 00 00 00 00 00 00 00"
+    }
+
+    private func configureStandardKLayers(
+        _ store: MappingStore,
+        with bindings: [RemoteControl: String]
+    ) {
+        store.beginLearningAllHIDControls()
+        captureStandardKLayerSingles(store, with: bindings)
+        guard store.isLearningAll else { return }
+        completeStandardKLayerLiveVerification(store, with: bindings)
+    }
+
+    private func captureStandardKLayerSingles(
+        _ store: MappingStore,
+        with bindings: [RemoteControl: String]
+    ) {
+        for control in RemoteControl.allCases.filter(\.isMIDIButton) {
+            store.simulateHIDInputForTesting(bindings[control])
+            store.simulateHIDInputForTesting(
+                bindings[control]?.hasPrefix("r2:") == true ? report2ReleaseSignature : nil
+            )
+        }
+    }
+
+    private func completeStandardKLayerLiveVerification(
+        _ store: MappingStore,
+        with bindings: [RemoteControl: String]
+    ) {
+        if bindings[.k10]?.hasPrefix("r6:") == true {
+            completeReport6StandardKLayerVerificationOrder(store, first: .k10, second: .k5, bindings: bindings)
+            completeReport6StandardKLayerVerificationOrder(store, first: .k5, second: .k10, bindings: bindings)
+        } else {
+            completeStandardKLayerVerificationOrder(store, first: .k10, second: .k5, bindings: bindings)
+            completeStandardKLayerVerificationOrder(store, first: .k5, second: .k10, bindings: bindings)
+        }
+    }
+
+    private func completeStandardKLayerVerificationOrder(
+        _ store: MappingStore,
+        first: RemoteControl,
+        second: RemoteControl,
+        bindings: [RemoteControl: String],
+        partialReleaseState: RemoteControl? = nil
+    ) {
+        store.simulateHIDInputForTesting(bindings[first])
+        store.simulateHIDInputForTesting(report2CompositeSignature(for: first, and: second, in: bindings))
+        if let partialReleaseState {
+            store.simulateHIDInputForTesting(bindings[partialReleaseState])
+        }
+        store.simulateHIDInputForTesting(report2ReleaseSignature)
+    }
+
+    private func completeReport6StandardKLayerVerificationOrder(
+        _ store: MappingStore,
+        first: RemoteControl,
+        second: RemoteControl,
+        bindings: [RemoteControl: String],
+        partialReleaseState: RemoteControl? = nil
+    ) {
+        store.simulateHIDInputForTesting(bindings[first])
+        store.simulateHIDInputForTesting(report6CompositeSignature(for: first, and: second, in: bindings))
+        if let partialReleaseState {
+            store.simulateHIDInputForTesting(bindings[partialReleaseState])
+        }
+        store.simulateHIDInputForTesting(nil)
+    }
+
+    private func report2CompositeSignature(
+        for first: RemoteControl,
+        and second: RemoteControl,
+        in bindings: [RemoteControl: String]
+    ) -> String {
+        let firstMask = HIDKeyboardReport.report2OneHotMask(from: bindings[first]!)!
+        let secondMask = HIDKeyboardReport.report2OneHotMask(from: bindings[second]!)!
+        let mask = firstMask | secondMask
+        return String(format: "r2:F0 %02X %02X 00 00 00 00 00", mask & 0xFF, mask >> 8)
+    }
+
+    private func uniqueReport6KBindings() -> [RemoteControl: String] {
+        Dictionary(uniqueKeysWithValues: RemoteControl.allCases.filter(\.isMIDIButton).enumerated().map {
+            ($0.element, String(format: "r6:00 %02X 00 00 00 00 00", 0x68 + $0.offset))
+        })
+    }
+
+    private func report6CompositeSignature(
+        for first: RemoteControl,
+        and second: RemoteControl,
+        in bindings: [RemoteControl: String]
+    ) -> String {
+        let firstReport = HIDKeyboardReport(signature: bindings[first]!)!
+        let secondReport = HIDKeyboardReport(signature: bindings[second]!)!
+        let combined = firstReport.merged(with: secondReport)!
+        let usages = combined.keyUsages.sorted()
+        let padded = usages + Array(repeating: 0, count: HIDKeyboardReport.bootKeyboardOrdinaryKeyCapacity - usages.count)
+        return String(
+            format: "r6:%02X %@",
+            combined.modifierByte,
+            padded.map { String(format: "%02X", $0) }.joined(separator: " ")
+        )
+    }
+
+    private func factoryKBindings() -> [RemoteControl: String] {
+        [
+            .k1: "r6:01 12 00 00 00 00 00",
+            .k2: "r6:01 11 00 00 00 00 00",
+            .k3: "r6:00 3E 00 00 00 00 00",
+            .k4: "r6:02 00 00 00 00 00 00",
+            .k5: "r6:01 00 00 00 00 00 00",
+            .k6: "r6:04 00 00 00 00 00 00",
+            .k7: "r6:01 16 00 00 00 00 00",
+            .k8: "r6:01 1D 00 00 00 00 00",
+            .k9: "r6:00 2C 00 00 00 00 00",
+            .k10: "r6:03 1D 00 00 00 00 00"
+        ]
+    }
+
+    private func midiProfilePayload(named name: String, from store: MappingStore) throws -> Data {
+        let configuration = try XCTUnwrap(store.exportConfiguration())
+        let root = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: configuration) as? [String: Any]
+        )
+        let profiles = try XCTUnwrap(root["profiles"] as? [[String: Any]])
+        let profile = try XCTUnwrap(profiles.first(where: { $0["name"] as? String == name }))
+        return try JSONSerialization.data(withJSONObject: profile, options: [.sortedKeys])
     }
 }

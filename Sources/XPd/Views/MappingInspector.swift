@@ -6,6 +6,7 @@ struct MappingInspector: View {
     @State private var activeStandardEditorLayer: Set<RemoteControl>?
     @State private var selectedModifierGesture: GestureKind = .tap
     @State private var showsStatusAndInput = false
+    @State private var showsAdvancedHardwareLayout = false
 
     var body: some View {
         Group {
@@ -58,7 +59,14 @@ struct MappingInspector: View {
                         )
                     }
 
-                    hardwareLayoutEditor
+                    standardInputPresetEditor
+
+                    DisclosureGroup(isExpanded: $showsAdvancedHardwareLayout) {
+                        hardwareLayoutEditor
+                    } label: {
+                        Label("Advanced manual/live verification", systemImage: "waveform.path.ecg")
+                            .font(.subheadline.weight(.medium))
+                    }
 
             GroupBox("Live HID") {
                 VStack(alignment: .leading, spacing: 10) {
@@ -98,7 +106,7 @@ struct MappingInspector: View {
                     }
 
                     if store.isLearningAll {
-                        Text("Learn all K buttons is active. Complete or cancel it before learning one control.")
+                        Text("Configure Standard K layers is active. Complete or cancel it before learning one control.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -279,6 +287,63 @@ struct MappingInspector: View {
             && store.hid.hasExclusiveControl
             && store.learningControl == nil
             && !store.isLearningAll
+            && !store.usesStandardF13F22Preset
+    }
+
+    private var standardInputPresetEditor: some View {
+        GroupBox("Standard input") {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Label("F13–F22 preset", systemImage: "keyboard")
+                        .font(.subheadline.weight(.medium))
+                    Spacer(minLength: 8)
+
+                    Button {
+                        store.setStandardF13F22PresetEnabled(!store.usesStandardF13F22Preset)
+                    } label: {
+                        Label(
+                            store.usesStandardF13F22Preset
+                                ? "Disable F13–F22 preset"
+                                : "Use F13–F22 preset",
+                            systemImage: store.usesStandardF13F22Preset ? "xmark.circle" : "checkmark.circle"
+                        )
+                    }
+                    .disabled(store.isLearningAll)
+                }
+
+                Text("Uses distinct report-6 keyboard usages F13–F22 (0x68–0x71) for K1–K10. The r6 prefix is expected; the usage bytes distinguish the controls.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if store.usesStandardF13F22Preset {
+                    if store.isStandardF13F22PresetLiveVerified {
+                        Label("Live report-6 F13–F22 input verified on this connection.", systemImage: "checkmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                    } else {
+                        Label("F13–F22 preset selected; hardware is not verified yet.", systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                        Text("XP[d] does not program the remote. The remote must already emit report-6 F13–F22. Press any K button once to verify a live input on this connection.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                } else {
+                    Text("No timing heuristic is used. The advanced manual/live verification workflow remains available below.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Text("This changes Standard K-input resolution only. MIDI mappings, routing, settings, and held MIDI/Fn state are not changed.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(4)
+        }
     }
 
     private var hardwareLayoutEditor: some View {
@@ -320,7 +385,7 @@ struct MappingInspector: View {
                         store.beginLearningAllHIDControls()
                     } label: {
                         Label(
-                            store.isLearningAll ? "Learning K buttons…" : "Learn all K buttons",
+                            store.isLearningAll ? "Configuring Standard K layers…" : "Configure Standard K layers",
                             systemImage: store.isLearningAll ? "dot.radiowaves.left.and.right" : "keyboard"
                         )
                     }
@@ -335,9 +400,18 @@ struct MappingInspector: View {
                     Spacer(minLength: 4)
                 }
 
+                if store.usesStandardF13F22Preset {
+                    Text("Disable the F13–F22 preset above before using manual/live verification.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
                 if store.isLearningAll {
                     Group {
-                        if let control = store.learningAllControl {
+                        if let prompt = store.standardKLayerVerificationPrompt {
+                            Text(prompt)
+                        } else if let control = store.learningAllControl {
                             let kControls = RemoteControl.allCases.filter(\.isMIDIButton)
                             let step = (kControls.firstIndex(of: control) ?? 0) + 1
                             if store.isLearningAllAwaitingRelease {
@@ -350,7 +424,7 @@ struct MappingInspector: View {
                                     }
                                 }
                             } else {
-                                Text("Step \(step) of \(kControls.count) · Press \(control.rawValue). Composite or duplicate inputs are rejected.")
+                                Text("Step \(step) of \(kControls.count) · Press \(control.rawValue). This verifies independent Standard K layers; composite or duplicate inputs are rejected.")
                             }
                         } else {
                             Text("Preparing the next K button…")
@@ -361,7 +435,11 @@ struct MappingInspector: View {
                     .fixedSize(horizontal: false, vertical: true)
                 }
 
-                DisclosureGroup("Saved K1–K10 signatures") {
+                DisclosureGroup(
+                    store.usesStandardF13F22Preset
+                        ? "Effective Standard K1–K10 signatures"
+                        : "Saved K1–K10 signatures"
+                ) {
                     VStack(alignment: .leading, spacing: 5) {
                         ForEach(RemoteControl.allCases.filter(\.isMIDIButton), id: \.self) { control in
                             HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -403,17 +481,35 @@ struct MappingInspector: View {
                 }
                 count += 1
             }
-            let collisions = store.standardHIDCollisions()
-            let rolloverCollisions = store.standardHIDRolloverCollisions()
+            let effectiveBindings = store.effectiveStandardHIDBindings
+            let collisions = HIDKeyboardReportCollisionAnalyzer.collisions(among: effectiveBindings)
+            let rolloverCollisions = HIDKeyboardReportCollisionAnalyzer.rolloverCollisions(among: effectiveBindings)
 
             GroupBox("K-input compatibility") {
                 VStack(alignment: .leading, spacing: 6) {
-                    if learnedCount == kControls.count && invalidCount == 0
-                        && collisions.isEmpty && rolloverCollisions.isEmpty {
-                        Label("All ten learned K inputs are independent.", systemImage: "checkmark.circle.fill")
+                    if store.usesStandardF13F22Preset {
+                        if store.isStandardF13F22PresetLiveVerified {
+                            Label("Live report-6 F13–F22 input verified on this connection.", systemImage: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                            Text("Standard resolves K1–K10 to distinct F13–F22 usages without timing-based inference.")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Label("F13–F22 preset selected; waiting for live hardware evidence.", systemImage: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.orange)
+                            Text("Preset selection alone does not program or verify the remote. XP[d] expects the remote to emit report-6 F13–F22; press any K button once after connecting to verify it.")
+                                .foregroundStyle(.secondary)
+                        }
+                    } else if learnedCount == kControls.count && invalidCount == 0
+                        && collisions.isEmpty && rolloverCollisions.isEmpty
+                        && store.isStandardKLayerLiveVerified {
+                        Label("Saved K inputs are independent and live K10↔K5 verification passed for this connection.", systemImage: "checkmark.circle.fill")
                             .foregroundStyle(.green)
+                    } else if learnedCount == kControls.count && invalidCount == 0
+                        && collisions.isEmpty && rolloverCollisions.isEmpty {
+                        Text("Saved K inputs are statically independent. Configure Standard K layers to live-verify K10→K5 and K5→K10 for this connection.")
+                            .foregroundStyle(.secondary)
                     } else if collisions.isEmpty && rolloverCollisions.isEmpty {
-                        Text("Learned \(learnedCount) of \(kControls.count) compatible individual K inputs. Learn all ten to verify compatibility.")
+                        Text("Learned \(learnedCount) of \(kControls.count) compatible individual K inputs. Configure Standard K layers to verify compatibility.")
                             .foregroundStyle(.secondary)
                         if invalidCount > 0 {
                             Text("\(invalidCount) saved input(s) are composite or empty report-2 states, not individual one-hot K bindings.")
@@ -481,8 +577,6 @@ struct MappingInspector: View {
                 : "Primary MIDI mappings are available without holding Fn.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-
-            hardwareLayoutEditor
 
             if store.selectedControl.isMIDIButton {
                 midiInputBindingEditor

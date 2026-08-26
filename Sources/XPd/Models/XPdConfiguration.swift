@@ -39,6 +39,10 @@ struct XPdConfiguration: Codable, Equatable {
     let workspaceLockControl: RemoteControl
     let hardwareLayouts: [HardwareLayout]
     let activeHardwareLayoutID: String
+    /// Optional Standard-only resolver selection. The key is omitted from
+    /// older documents (and from current exports when disabled); decoding a
+    /// missing value as `nil` keeps those documents safely disabled.
+    let standardF13F22PresetEnabled: Bool?
 
     /// A behavior profile. `hidBindings` is retained only to decode legacy schemas.
     struct Profile: Codable, Equatable, Identifiable {
@@ -433,7 +437,8 @@ struct XPdConfiguration: Codable, Equatable {
         midiLocked: Bool = false,
         workspaceLockControl: RemoteControl = XPdConfiguration.defaultWorkspaceLockControl,
         hardwareLayouts: [HardwareLayout]? = nil,
-        activeHardwareLayoutID: String? = nil
+        activeHardwareLayoutID: String? = nil,
+        standardF13F22PresetEnabled: Bool? = nil
     ) {
         self.version = version
         self.profiles = version == Self.currentVersion
@@ -457,6 +462,9 @@ struct XPdConfiguration: Codable, Equatable {
             self.hardwareLayouts = hardwareLayouts ?? []
             self.activeHardwareLayoutID = activeHardwareLayoutID ?? ""
         }
+        self.standardF13F22PresetEnabled = version == Self.currentVersion
+            ? standardF13F22PresetEnabled
+            : nil
     }
 
     init(
@@ -470,7 +478,8 @@ struct XPdConfiguration: Codable, Equatable {
         midiLocked: Bool = false,
         workspaceLockKey: RemoteControl = XPdConfiguration.defaultWorkspaceLockControl,
         hardwareLayouts: [HardwareLayout]? = nil,
-        activeHardwareLayoutID: String? = nil
+        activeHardwareLayoutID: String? = nil,
+        standardF13F22PresetEnabled: Bool? = nil
     ) {
         self.init(
             version: version,
@@ -483,7 +492,8 @@ struct XPdConfiguration: Codable, Equatable {
             midiLocked: midiLocked,
             workspaceLockControl: workspaceLockKey,
             hardwareLayouts: hardwareLayouts,
-            activeHardwareLayoutID: activeHardwareLayoutID
+            activeHardwareLayoutID: activeHardwareLayoutID,
+            standardF13F22PresetEnabled: standardF13F22PresetEnabled
         )
     }
 
@@ -512,6 +522,7 @@ struct XPdConfiguration: Codable, Equatable {
             ?? .k3
         let decodedHardwareLayouts = try container.decodeIfPresent([HardwareLayout].self, forKey: .hardwareLayouts) ?? []
         let decodedActiveHardwareLayoutID = try container.decodeIfPresent(String.self, forKey: .activeHardwareLayoutID) ?? ""
+        let decodedStandardF13F22PresetEnabled = try container.decodeIfPresent(Bool.self, forKey: .standardF13F22PresetEnabled)
         version = decodedVersion
         profiles = decodedProfiles
         profileName = decodedProfileName
@@ -523,6 +534,7 @@ struct XPdConfiguration: Codable, Equatable {
         workspaceLockControl = decodedLockControl
         hardwareLayouts = decodedHardwareLayouts
         activeHardwareLayoutID = decodedActiveHardwareLayoutID
+        standardF13F22PresetEnabled = decodedStandardF13F22PresetEnabled
     }
 
     func encode(to encoder: Encoder) throws {
@@ -542,6 +554,9 @@ struct XPdConfiguration: Codable, Equatable {
         try container.encodeIfPresent(lastMIDIProfileName, forKey: .lastMIDIProfileName)
         try container.encode(midiLocked, forKey: .midiLocked)
         try container.encode(workspaceLockControl, forKey: .workspaceLockControl)
+        if version == Self.currentVersion {
+            try container.encodeIfPresent(standardF13F22PresetEnabled, forKey: .standardF13F22PresetEnabled)
+        }
     }
 
     /// Decodes and validates the entire document before returning it. Versions
@@ -1327,6 +1342,9 @@ struct XPdConfiguration: Codable, Equatable {
                 : nil,
             activeHardwareLayoutID: version == Self.currentVersion
                 ? activeHardwareLayoutID
+                : nil,
+            standardF13F22PresetEnabled: version == Self.currentVersion
+                ? standardF13F22PresetEnabled
                 : nil
         )
 
@@ -1343,7 +1361,7 @@ struct XPdConfiguration: Codable, Equatable {
         case version, profiles, profileName, showsInputOverlay
         case activeRealm, lastStandardProfileName, lastMIDIProfileName
         case midiLocked, workspaceLockControl, workspaceLockKey
-        case hardwareLayouts, activeHardwareLayoutID
+        case hardwareLayouts, activeHardwareLayoutID, standardF13F22PresetEnabled
     }
 
     private static func sortedMIDISettings(_ settings: MIDIProfileSettings?) -> MIDIProfileSettings? {

@@ -286,10 +286,27 @@ final class MappingStore {
     private(set) var learningAllProgress: Int = 0
     private(set) var isLearningAll = false
     private(set) var isLearningAllAwaitingRelease = false
-    /// Session-only feedback for Learn All. This never enters a profile or
-    /// hardware-layout payload; it is visible only while the captured button
-    /// is awaiting its release boundary.
+    /// Session-only feedback for Standard K-layer configuration. This never
+    /// enters a profile or hardware-layout payload; it is visible only while
+    /// the captured button is awaiting its release boundary.
     private(set) var learningAllCapturedSignature: String?
+    /// Whether Standard input should resolve K1–K10 through the canonical
+    /// report-6 F13–F22 identities. This is a Standard-only resolver choice,
+    /// persisted independently of the shared device-level hardware layout so
+    /// enabling it cannot rewrite MIDI's physical input map.
+    private(set) var usesStandardF13F22Preset = false
+    /// Connection-scoped evidence that the connected remote has emitted one
+    /// exact report-6 F13–F22 preset identity while Standard is active. The
+    /// persisted selection is not evidence that the remote was programmed.
+    private(set) var isStandardF13F22PresetLiveVerified = false
+    /// Connection-scoped evidence that the active layout has passed the
+    /// Standard K10→K5 and K5→K10 live combined-state checks. It is never
+    /// persisted because saved signatures alone cannot establish rollover
+    /// behavior after reconnecting the remote.
+    private(set) var isStandardKLayerLiveVerified = false
+    /// Session-only instruction for the two live combined-state checks that
+    /// follow the ten individual K captures.
+    private(set) var standardKLayerVerificationPrompt: String?
     private(set) var lastHIDLearningResult: ActionExecutionResult?
     private(set) var liveControl: RemoteControl?
     private(set) var lastActionResult: ActionExecutionResult?
@@ -546,11 +563,24 @@ final class MappingStore {
     private let inputOverlayDurationDefaultsKey = "XPd.inputOverlayDuration.v1"
     private let wheelSensitivityDefaultsKey = "XPd.wheelSensitivity.v1"
     private let standardModifierHoldThresholdDefaultsKey = "XPd.standardModifierHoldThreshold.v1"
+    private let standardF13F22PresetDefaultsKey = "XPd.standardF13F22Preset.v1"
     private var profileStates: [String: ProfileState] = [:]
     private var learningAllCandidate: [RemoteControl: String] = [:]
     private var learningAllCaptured: [RemoteControl: String] = [:]
     private var learningAllEncoding: HIDKeyboardReport.Encoding?
     private var learningAllLayoutID: String?
+    private enum StandardKLayerVerificationStage {
+        case none
+        case awaitingFirst
+        case awaitingComposite
+        case awaitingFinalRelease
+    }
+    private var learningAllVerificationStage: StandardKLayerVerificationStage = .none
+    private var learningAllVerificationOrderIndex = 0
+    private var learningAllVerificationFirstSignature: String?
+    private var learningAllVerificationFirstReport: HIDKeyboardReport?
+    private var learningAllVerificationSecondReport: HIDKeyboardReport?
+    private var learningAllVerificationCompositeReport: HIDKeyboardReport?
     /// A selected hardware layout may not expose every persisted modifier.
     /// Keep that availability separate from the saved designation so merely
     /// switching layouts cannot erase the user's Standard-layer design.
@@ -690,6 +720,7 @@ final class MappingStore {
         let savedModifierHoldThreshold = defaults.object(forKey: standardModifierHoldThresholdDefaultsKey) as? Double
             ?? Self.defaultStandardModifierHoldThreshold
         standardModifierHoldThreshold = Self.normalizedStandardModifierHoldThreshold(savedModifierHoldThreshold)
+        usesStandardF13F22Preset = defaults.bool(forKey: standardF13F22PresetDefaultsKey)
 
         let migratedLegacyState = loadOrMigrateProfiles()
         let restoredProfile = migratedLegacyState
@@ -715,11 +746,15 @@ final class MappingStore {
             self?.handleHIDInput(signature)
         }
         hid.onDisconnect = { [weak self] in
-            if self?.learningControl != nil || self?.isLearningAll == true {
-                self?.lastHIDLearningResult = .failure(
-                    "Learning canceled because the remote disconnected."
+            if let self, self.isLearningAll {
+                self.failLearningAll(
+                    self.standardKLayerLearningCancellationMessage("the remote disconnected")
                 )
+            } else if self?.learningControl != nil {
+                self?.lastHIDLearningResult = .failure("Learning canceled because the remote disconnected.")
             }
+            self?.invalidateStandardKLayerLiveVerification()
+            self?.invalidateStandardF13F22PresetLiveVerification()
             self?.cancelLearning()
             self?.cancelPendingButtonGestures()
             self?.resetMIDIState(force: true)
@@ -1066,7 +1101,7 @@ final class MappingStore {
         guard remoteModifierControls.contains(control) != enabled else { return true }
         cancelPendingButtonGestures()
         if enabled {
-            guard let binding = hidBindings[control],
+            guard let binding = effectiveStandardHIDBindings[control],
                   !binding.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 lastActionResult = .failure(
                     "Learn \(control.rawValue)'s HID input in Status & Input before enabling it as a modifier."
@@ -2037,6 +2072,15 @@ final class MappingStore {
     }
 
     func learnSelectedControl() {
+        guard !(activeRealm == .standard && usesStandardF13F22Preset) else {
+            lastHIDLearningResult = .failure(
+                "Disable the F13–F22 preset before manually changing Standard hardware bindings."
+            )
+            return
+        }
+        if selectedControl.isMIDIButton {
+            invalidateStandardKLayerLiveVerification()
+        }
         cancelPendingButtonGestures()
         cancelLearningAllState()
         lastHIDLearningResult = nil
@@ -2056,23 +2100,33 @@ final class MappingStore {
     }
 
     func cancelLearning() {
-        let wasLearningAll = isLearningAll
+        if isLearningAll {
+            invalidateStandardKLayerLiveVerification()
+        }
         learningControl = nil
         cancelLearningAllState()
-        if wasLearningAll {
-            resetMIDIState(force: true)
-        }
     }
 
-    /// Starts an atomic K1…K10 capture. The existing layout is copied into a
-    /// session-only candidate so wheel/center bindings and all non-K inputs
-    /// remain untouched until the complete set validates.
+    /// Starts an atomic Standard-only K1…K10 configuration and verification
+    /// workflow. The existing layout is copied into a session-only candidate
+    /// so wheel/center bindings and all non-K inputs remain untouched until
+    /// the complete set validates. MIDI state is deliberately not reset or
+    /// changed: this workflow is unavailable in the MIDI workspace.
     func beginLearningAllHIDControls() {
+        guard activeRealm == .standard else {
+            lastHIDLearningResult = .failure(
+                "Configure Standard K layers is available only in the Standard workspace. MIDI input, mappings, and settings were not changed."
+            )
+            return
+        }
+        guard !usesStandardF13F22Preset else {
+            lastHIDLearningResult = .failure(
+                "Disable the F13–F22 preset before manually configuring Standard K layers."
+            )
+            return
+        }
+        invalidateStandardKLayerLiveVerification()
         cancelPendingButtonGestures()
-        // Learn All consumes the following HID reports, including the
-        // release that would normally end a MIDI note/Fn interaction. Reset
-        // before capture begins so a held control can never be stranded.
-        resetMIDIState(force: true)
         learningControl = nil
         lastHIDLearningResult = nil
         learningAllCandidate = hidBindings
@@ -2095,6 +2149,13 @@ final class MappingStore {
             lastActionResult = .failure("Hardware layout not found: \(id).")
             return false
         }
+        if isLearningAll {
+            failLearningAll(
+                standardKLayerLearningCancellationMessage("the hardware layout was selected")
+            )
+        } else {
+            invalidateStandardKLayerLiveVerification()
+        }
         guard activeHardwareLayoutID != id else { return true }
         cancelPendingButtonGestures()
         cancelLearning()
@@ -2107,6 +2168,12 @@ final class MappingStore {
     }
 
     func clearHIDBinding(for control: RemoteControl) {
+        guard !(activeRealm == .standard && usesStandardF13F22Preset) else {
+            lastHIDLearningResult = .failure(
+                "Disable the F13–F22 preset before manually changing Standard hardware bindings."
+            )
+            return
+        }
         if remoteModifierControls.contains(control) {
             cancelPendingButtonGestures()
         }
@@ -2123,18 +2190,80 @@ final class MappingStore {
     }
 
     func hidBinding(for control: RemoteControl) -> String? {
-        hidBindings[control]
+        effectiveStandardHIDBindings[control]
+    }
+
+    /// The bindings Standard currently uses for K-input resolution. The
+    /// optional F13–F22 preset overlays only K1–K10; wheel rotation, wheel
+    /// center, and every other physical binding continue to come from the
+    /// active device-level layout.
+    var effectiveStandardHIDBindings: [RemoteControl: String] {
+        guard activeRealm == .standard, usesStandardF13F22Preset else {
+            return hidBindings
+        }
+        var effective = hidBindings
+        effective.merge(Self.standardF13F22HIDBindings) { _, preset in preset }
+        return effective
+    }
+
+    /// Selects the deterministic Standard F13–F22 resolver. The selection is
+    /// stored in its own UserDefaults key, not in the shared hardware layout
+    /// or any profile payload. Calling this from MIDI is rejected before any
+    /// state, output, or persistence operation can occur.
+    @discardableResult
+    func setStandardF13F22PresetEnabled(_ enabled: Bool) -> Bool {
+        guard activeRealm == .standard else {
+            lastActionResult = .failure(
+                "The F13–F22 preset is available only in the Standard workspace. MIDI input, mappings, settings, and held state were not changed."
+            )
+            return false
+        }
+        guard !isLearningAll else {
+            lastActionResult = .failure(
+                "Finish or cancel Standard K-layer configuration before changing the F13–F22 preset."
+            )
+            return false
+        }
+        guard usesStandardF13F22Preset != enabled else { return true }
+
+        // Switching the resolver while a Standard cycle is active would leave
+        // the old physical identity in flight. Cancel only Standard gesture
+        // state; MIDI state is not touched by this Standard-only setting.
+        cancelPendingButtonGestures()
+        cancelLearning()
+        usesStandardF13F22Preset = enabled
+        defaults.set(enabled, forKey: standardF13F22PresetDefaultsKey)
+        invalidateStandardF13F22PresetLiveVerification()
+        invalidateStandardKLayerLiveVerification()
+        refreshModifierAvailability()
+        lastPersistenceResult = .saved
+        return true
     }
 
     private static let hardwareLearningControls: [RemoteControl] =
         RemoteControl.allCases.filter(\.isMIDIButton)
+
+    /// Canonical report-6 keyboard usages for the owner's Standard preset:
+    /// K1→F13 through K10→F22. The report-6 prefix is shared by all keys;
+    /// the usage byte is the physical identity.
+    static let standardF13F22HIDBindings: [RemoteControl: String] =
+        Dictionary(uniqueKeysWithValues: hardwareLearningControls.enumerated().map { index, control in
+            (control, String(format: "r6:00 %02X 00 00 00 00 00", 0x68 + index))
+        })
 
     private func cancelLearningAllState() {
         learningAllCandidate = [:]
         learningAllCaptured = [:]
         learningAllEncoding = nil
         learningAllLayoutID = nil
+        learningAllVerificationStage = .none
+        learningAllVerificationOrderIndex = 0
+        learningAllVerificationFirstSignature = nil
+        learningAllVerificationFirstReport = nil
+        learningAllVerificationSecondReport = nil
+        learningAllVerificationCompositeReport = nil
         learningAllCapturedSignature = nil
+        standardKLayerVerificationPrompt = nil
         isLearningAllAwaitingRelease = false
         learningAllControl = nil
         learningAllProgress = 0
@@ -2142,6 +2271,7 @@ final class MappingStore {
     }
 
     private func updateActiveHardwareLayoutBindings(_ bindings: [RemoteControl: String]) {
+        invalidateStandardKLayerLiveVerification()
         guard let index = hardwareLayouts.firstIndex(where: { $0.id == activeHardwareLayoutID }) else {
             hidBindings = bindings
             refreshModifierAvailability()
@@ -2168,22 +2298,27 @@ final class MappingStore {
     }
 
     private func refreshModifierAvailability() {
+        let bindings = effectiveStandardHIDBindings
         unavailableRemoteModifierControls = remoteModifierControls.filter { control in
-            guard let binding = hidBindings[control] else { return true }
+            guard let binding = bindings[control] else { return true }
             return binding.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
     }
 
     private func failLearningAll(_ message: String) {
+        invalidateStandardKLayerLiveVerification()
         cancelLearningAllState()
         lastHIDLearningResult = .failure(message)
     }
 
     private func captureLearningAllInput(_ signature: String) {
-        guard isLearningAll,
-              let control = learningAllControl else { return }
+        guard isLearningAll else { return }
         guard let report = HIDKeyboardReport(signature: signature) else {
-            failLearningAll("Learn All rejected a malformed HID report. Press one K button.")
+            if learningAllVerificationStage == .none {
+                failLearningAll("Configure Standard K layers rejected a malformed HID report. Press one K button.")
+            } else {
+                failStandardKLayerVerification("received a malformed HID report")
+            }
             return
         }
 
@@ -2192,6 +2327,15 @@ final class MappingStore {
             completeLearningAllRelease()
             return
         }
+        if learningAllVerificationStage != .none {
+            captureStandardKLayerVerificationInput(
+                report,
+                normalizedSignature: normalizedSignature
+            )
+            return
+        }
+
+        guard let control = learningAllControl else { return }
         if isLearningAllAwaitingRelease {
             if learningAllCaptured[control] == normalizedSignature {
                 return
@@ -2202,22 +2346,22 @@ final class MappingStore {
         switch report.encoding {
         case .report2OneHot:
             guard report.isCompatibleIndividualBinding else {
-                failLearningAll("Learn All rejected a report-2 release or composite. Press one K button.")
+                failLearningAll("Configure Standard K layers rejected a report-2 release or composite. Press one K button.")
                 return
             }
         case .report6BootKeyboard:
             guard report.modifierByte != 0 || !report.keyUsages.isEmpty else {
-                failLearningAll("Learn All rejected an empty report-6 input. Press one K button.")
+                failLearningAll("Configure Standard K layers rejected an empty report-6 input. Press one K button.")
                 return
             }
         }
 
         if let learningAllEncoding, learningAllEncoding != report.encoding {
-            failLearningAll("Learn All rejected mixed report encodings. Capture all K buttons from one HID collection.")
+            failLearningAll("Configure Standard K layers rejected mixed report encodings. Capture all K buttons from one HID collection.")
             return
         }
         if learningAllCaptured.values.contains(normalizedSignature) {
-            failLearningAll("Learn All rejected a duplicate HID input. Each K button must have a distinct report.")
+            failLearningAll("Configure Standard K layers rejected a duplicate HID input. Each K button must have a distinct report.")
             return
         }
 
@@ -2230,6 +2374,10 @@ final class MappingStore {
     }
 
     private func completeLearningAllRelease() {
+        if learningAllVerificationStage != .none {
+            completeStandardKLayerVerificationRelease()
+            return
+        }
         guard isLearningAll, isLearningAllAwaitingRelease else { return }
         isLearningAllAwaitingRelease = false
         learningAllCapturedSignature = nil
@@ -2239,30 +2387,202 @@ final class MappingStore {
             let captured = learningAllCandidate.filter { KControls.contains($0.key) }
             guard captured.count == KControls.count,
                   captured.values.count == Set(captured.values).count else {
-                failLearningAll("Learn All could not produce ten distinct K bindings.")
+                failLearningAll("Configure Standard K layers could not produce ten distinct K bindings. The prior hardware layout was preserved.")
                 return
             }
-            guard HIDKeyboardReportCollisionAnalyzer.collisions(among: captured).isEmpty else {
-                failLearningAll("Learn All rejected masking collisions among the captured K bindings.")
+            let maskingCollisions = HIDKeyboardReportCollisionAnalyzer.collisions(among: captured)
+            guard maskingCollisions.isEmpty else {
+                failLearningAll(standardKLayerMaskingFailureMessage(maskingCollisions))
                 return
             }
             guard HIDKeyboardReportCollisionAnalyzer.rolloverCollisions(among: captured).isEmpty else {
-                failLearningAll("Learn All rejected a keyboard rollover collision among the captured K bindings.")
+                failLearningAll("Configure Standard K layers rejected a keyboard rollover collision. The prior hardware layout was preserved.")
                 return
             }
-            guard learningAllLayoutID == activeHardwareLayoutID else {
-                failLearningAll("Learn All was canceled because the hardware layout changed.")
-                return
-            }
-
-            updateActiveHardwareLayoutBindings(learningAllCandidate)
-            saveHIDBindings()
-            cancelLearningAllState()
-            lastHIDLearningResult = .success("Learned K1–K10 into the active hardware layout.")
+            beginStandardKLayerLiveVerification()
             return
         }
 
         learningAllControl = Self.hardwareLearningControls[learningAllProgress]
+    }
+
+    private static let standardKLayerVerificationOrders: [[RemoteControl]] = [
+        [.k10, .k5],
+        [.k5, .k10]
+    ]
+
+    private var standardKLayerVerificationOrder: [RemoteControl]? {
+        Self.standardKLayerVerificationOrders.indices.contains(learningAllVerificationOrderIndex)
+            ? Self.standardKLayerVerificationOrders[learningAllVerificationOrderIndex]
+            : nil
+    }
+
+    private var standardKLayerVerificationOrderDescription: String {
+        guard let order = standardKLayerVerificationOrder else { return "K10 then K5" }
+        return "\(order[0].rawValue) held, then \(order[1].rawValue)"
+    }
+
+    private func beginStandardKLayerLiveVerification() {
+        guard learningAllLayoutID == activeHardwareLayoutID else {
+            failLearningAll("Configure Standard K layers was canceled because the hardware layout changed. The prior hardware layout was preserved.")
+            return
+        }
+        learningAllVerificationOrderIndex = 0
+        prepareStandardKLayerVerificationOrder()
+    }
+
+    private func prepareStandardKLayerVerificationOrder() {
+        guard let order = standardKLayerVerificationOrder,
+              let firstSignature = learningAllCandidate[order[0]],
+              let firstReport = HIDKeyboardReport(signature: firstSignature),
+              let secondSignature = learningAllCandidate[order[1]],
+              let secondReport = HIDKeyboardReport(signature: secondSignature),
+              let compositeReport = firstReport.merged(with: secondReport),
+              compositeReport != firstReport else {
+            failLearningAll("Configure Standard K layers could not prepare live verification for \(standardKLayerVerificationOrderDescription). The prior hardware layout was preserved.")
+            return
+        }
+
+        learningAllControl = nil
+        learningAllCapturedSignature = nil
+        isLearningAllAwaitingRelease = false
+        learningAllVerificationFirstSignature = Self.normalizedHIDSignature(firstSignature)
+        learningAllVerificationFirstReport = firstReport
+        learningAllVerificationSecondReport = secondReport
+        learningAllVerificationCompositeReport = compositeReport
+        learningAllVerificationStage = .awaitingFirst
+        standardKLayerVerificationPrompt = "Live verification \(learningAllVerificationOrderIndex + 1) of \(Self.standardKLayerVerificationOrders.count) · Hold \(order[0].rawValue), then press \(order[1].rawValue)."
+    }
+
+    private func captureStandardKLayerVerificationInput(
+        _ report: HIDKeyboardReport,
+        normalizedSignature: String
+    ) {
+        guard learningAllLayoutID == activeHardwareLayoutID else {
+            failStandardKLayerVerification("the hardware layout changed")
+            return
+        }
+        guard let expectedFirstSignature = learningAllVerificationFirstSignature,
+              let expectedFirstReport = learningAllVerificationFirstReport,
+              let expectedSecondReport = learningAllVerificationSecondReport,
+              let expectedCompositeReport = learningAllVerificationCompositeReport else {
+            failStandardKLayerVerification("the verification state was incomplete")
+            return
+        }
+        guard report.encoding == expectedFirstReport.encoding else {
+            failStandardKLayerVerification("received a mixed HID encoding")
+            return
+        }
+
+        switch learningAllVerificationStage {
+        case .awaitingFirst:
+            guard normalizedSignature == expectedFirstSignature else {
+                failStandardKLayerVerification("expected \(standardKLayerVerificationOrderDescription) to begin with the saved \(standardKLayerVerificationOrder?.first?.rawValue ?? "K button") input")
+                return
+            }
+            learningAllVerificationStage = .awaitingComposite
+            standardKLayerVerificationPrompt = "Live verification \(learningAllVerificationOrderIndex + 1) of \(Self.standardKLayerVerificationOrders.count) · Keep \(standardKLayerVerificationOrder?[0].rawValue ?? "K10") held and press \(standardKLayerVerificationOrder?[1].rawValue ?? "K5")."
+
+        case .awaitingComposite:
+            if normalizedSignature == expectedFirstSignature {
+                return
+            }
+            guard report == expectedCompositeReport, report != expectedFirstReport else {
+                failStandardKLayerVerification("did not receive the expected distinct combined state for \(standardKLayerVerificationOrderDescription)")
+                return
+            }
+            learningAllVerificationStage = .awaitingFinalRelease
+            standardKLayerVerificationPrompt = "Live verification \(learningAllVerificationOrderIndex + 1) of \(Self.standardKLayerVerificationOrders.count) · Release both \(standardKLayerVerificationOrder?[0].rawValue ?? "K10") and \(standardKLayerVerificationOrder?[1].rawValue ?? "K5")."
+
+        case .awaitingFinalRelease:
+            if normalizedSignature == expectedFirstSignature
+                || report == expectedSecondReport
+                || report == expectedCompositeReport {
+                return
+            }
+            failStandardKLayerVerification("received an unexpected partial state before both controls were released")
+
+        case .none:
+            return
+        }
+    }
+
+    private func completeStandardKLayerVerificationRelease() {
+        guard learningAllLayoutID == activeHardwareLayoutID else {
+            failStandardKLayerVerification("the hardware layout changed")
+            return
+        }
+        guard learningAllVerificationStage == .awaitingFinalRelease else {
+            failStandardKLayerVerification("was released before the expected combined state was observed")
+            return
+        }
+
+        learningAllVerificationOrderIndex += 1
+        guard learningAllVerificationOrderIndex < Self.standardKLayerVerificationOrders.count else {
+            guard learningAllLayoutID == activeHardwareLayoutID else {
+                failStandardKLayerVerification("the hardware layout changed")
+                return
+            }
+            updateActiveHardwareLayoutBindings(learningAllCandidate)
+            saveHIDBindings()
+            cancelLearningAllState()
+            isStandardKLayerLiveVerified = true
+            lastHIDLearningResult = .success("Configured and live-verified Standard K1–K10 layers in the active hardware layout.")
+            return
+        }
+
+        prepareStandardKLayerVerificationOrder()
+    }
+
+    private func failStandardKLayerVerification(_ reason: String) {
+        failLearningAll(
+            "Configure Standard K layers live verification failed for \(standardKLayerVerificationOrderDescription): \(reason). The prior hardware layout was preserved."
+        )
+    }
+
+    private func standardKLayerLearningCancellationMessage(_ reason: String) -> String {
+        if learningAllVerificationStage != .none {
+            return "Configure Standard K layers live verification failed for \(standardKLayerVerificationOrderDescription): \(reason). The prior hardware layout was preserved."
+        }
+        return "Configure Standard K layers was canceled because \(reason). The prior hardware layout was preserved."
+    }
+
+    private func invalidateStandardKLayerLiveVerification() {
+        isStandardKLayerLiveVerified = false
+    }
+
+    private func invalidateStandardF13F22PresetLiveVerification() {
+        isStandardF13F22PresetLiveVerified = false
+    }
+
+    private func observeStandardF13F22PresetInput(_ signature: String?) {
+        guard activeRealm == .standard,
+              usesStandardF13F22Preset,
+              let signature,
+              let report = HIDKeyboardReport(signature: signature),
+              report.encoding == .report6BootKeyboard,
+              report.isCompatibleIndividualBinding else {
+            return
+        }
+
+        let normalizedSignature = Self.normalizedHIDSignature(signature)
+        guard Self.standardF13F22HIDBindings.values.contains(normalizedSignature) else {
+            return
+        }
+
+        // HIDService delivers this callback only after a live device report.
+        // One exact preset identity proves the current connection emits the
+        // selected report-6 contract; it does not claim that every key ran.
+        isStandardF13F22PresetLiveVerified = true
+    }
+
+    private func standardKLayerMaskingFailureMessage(
+        _ collisions: [HIDKeyboardReportCollision]
+    ) -> String {
+        let details = collisions.map {
+            "\($0.firstControl.rawValue) held hides \($0.hiddenControl.rawValue)"
+        }.joined(separator: "; ")
+        return "Configure Standard K layers rejected masking collisions: \(details). The prior hardware layout was preserved. Configure unique inputs on the remote, then try again."
     }
 
     /// Reports order-specific Standard layer collisions for the selected
@@ -2276,7 +2596,7 @@ final class MappingStore {
         return HIDKeyboardReportCollisionAnalyzer.collisions(
             for: destination,
             modifierControls: modifierControls,
-            bindings: hidBindings
+            bindings: effectiveStandardHIDBindings
         )
     }
 
@@ -2285,7 +2605,7 @@ final class MappingStore {
     /// bindings and intentionally does not claim a live hardware observation.
     func standardHIDCollisions() -> [HIDKeyboardReportCollision] {
         guard activeRealm == .standard else { return [] }
-        return HIDKeyboardReportCollisionAnalyzer.collisions(among: hidBindings)
+        return HIDKeyboardReportCollisionAnalyzer.collisions(among: effectiveStandardHIDBindings)
     }
 
     /// Reports learned K pairs that exceed the six ordinary-key slots of the
@@ -2293,7 +2613,7 @@ final class MappingStore {
     /// bindings and does not claim a live hardware observation.
     func standardHIDRolloverCollisions() -> [HIDKeyboardReportRolloverCollision] {
         guard activeRealm == .standard else { return [] }
-        return HIDKeyboardReportCollisionAnalyzer.rolloverCollisions(among: hidBindings)
+        return HIDKeyboardReportCollisionAnalyzer.rolloverCollisions(among: effectiveStandardHIDBindings)
     }
 
     /// Internal test seam for exercising HID-driven state transitions without
@@ -2357,7 +2677,8 @@ final class MappingStore {
             midiLocked: midiLocked,
             workspaceLockControl: workspaceLockControl,
             hardwareLayouts: hardwareLayouts,
-            activeHardwareLayoutID: activeHardwareLayoutID
+            activeHardwareLayoutID: activeHardwareLayoutID,
+            standardF13F22PresetEnabled: usesStandardF13F22Preset ? true : nil
         )
 
         do {
@@ -2442,7 +2763,19 @@ final class MappingStore {
             return false
         }
 
-        cancelLearning()
+        // A portable document can carry the Standard resolver selection, but
+        // it cannot carry connection-scoped proof that this remote emitted
+        // the expected report-6 inputs. Missing (legacy) values are safely
+        // disabled and every import starts the new connection proof over.
+        let importedStandardF13F22Preset = configuration.standardF13F22PresetEnabled ?? false
+
+        if isLearningAll {
+            failLearningAll(
+                standardKLayerLearningCancellationMessage("the configuration was replaced")
+            )
+        } else {
+            cancelLearning()
+        }
         cancelPendingButtonGestures()
         resetMIDIState(force: true)
         isReplacingConfiguration = true
@@ -2453,6 +2786,9 @@ final class MappingStore {
             configuration.hardwareLayouts,
             activeID: configuration.activeHardwareLayoutID
         )
+        usesStandardF13F22Preset = importedStandardF13F22Preset
+        defaults.set(importedStandardF13F22Preset, forKey: standardF13F22PresetDefaultsKey)
+        invalidateStandardF13F22PresetLiveVerification()
         profileName = configuration.profileName
         activeRealm = configuration.activeRealm
         lastStandardProfileName = configuration.lastStandardProfileName
@@ -2597,6 +2933,7 @@ final class MappingStore {
     private func handleHIDInput(_ signature: String?) {
         liveInputGeneration += 1
         let generation = liveInputGeneration
+        observeStandardF13F22PresetInput(signature)
 
         if isRemoteTriggerCaptureActive {
             // The unified Standard chord editor records optional K-button
@@ -2604,7 +2941,7 @@ final class MappingStore {
             // in the inspector. All other HID input remains consumed while
             // the keyboard condition is being recorded.
             if let signature,
-               let matched = hidBindings.first(where: { $0.value == signature })?.key,
+               let matched = effectiveStandardHIDBindings.first(where: { $0.value == signature })?.key,
                activeRealm == .standard,
                matched.isMIDIButton {
                 remoteTriggerModifierCaptureHandler?(matched)
@@ -2721,6 +3058,22 @@ final class MappingStore {
             return
         }
 
+        let routingBindings = activeRealm == .standard
+            ? effectiveStandardHIDBindings
+            : hidBindings
+
+        if activeRealm == .standard,
+           isStandardKLayerLiveVerified,
+           let report = HIDKeyboardReport(signature: signature),
+           report.encoding == .report2OneHot,
+           report.isCompatibleIndividualBinding,
+           !routingBindings.values.contains(Self.normalizedHIDSignature(signature)) {
+            invalidateStandardKLayerLiveVerification()
+            lastHIDLearningResult = .failure(
+                "A live report-2 K input no longer matches the active layout. Standard K layers require live verification again."
+            )
+        }
+
         if activeRealm == .standard,
            let report = HIDKeyboardReport(signature: signature),
            report.isReport2OneHot {
@@ -2731,10 +3084,29 @@ final class MappingStore {
         if activeRealm == .standard,
            let report = HIDKeyboardReport(signature: signature),
            report.encoding == .report6BootKeyboard {
-            let exactControl = hidBindings.first(where: { $0.value == signature })?.key
+            let exactControl = routingBindings.first(where: { $0.value == signature })?.key
             let isRawWheelReport = report.modifierByte == 0x01
                 && (report.keyUsages == Set<UInt8>([0x56])
                     || report.keyUsages == Set<UInt8>([0x57]))
+            let isNonEmptyKState = report.modifierByte != 0 || !report.keyUsages.isEmpty
+            let exactKControl = routingBindings.first { control, binding in
+                control.isMIDIButton && HIDKeyboardReport(signature: binding) == report
+            }?.key
+            let hasUniqueKDecomposition = Self.decomposedKeyboardControls(
+                for: signature,
+                bindings: routingBindings
+            ) != nil
+            if isStandardKLayerLiveVerified,
+               isNonEmptyKState,
+               !isRawWheelReport,
+               exactKControl == nil,
+               !hasUniqueKDecomposition {
+                invalidateStandardKLayerLiveVerification()
+                lastHIDLearningResult = .failure(
+                    "A live report-6 K input no longer matches the active layout. Standard K layers require live verification again."
+                )
+                return
+            }
             if !isRawWheelReport,
                exactControl?.isWheelRotation != true,
                exactControl != .wheelCenter {
@@ -2771,7 +3143,7 @@ final class MappingStore {
         }
 
         let resolvedControls: [RemoteControl]
-        if let matched = hidBindings.first(where: { $0.value == signature })?.key {
+        if let matched = routingBindings.first(where: { $0.value == signature })?.key {
             // An exact learned binding is authoritative. In particular, a
             // report that is already bound to K10 must never be expanded into
             // K10 plus a hidden K8 merely because their keyboard states
@@ -2780,7 +3152,7 @@ final class MappingStore {
         } else if activeRealm == .standard,
                   let compositeControls = Self.decomposedStandardBitmaskControls(
                       for: signature,
-                      bindings: hidBindings
+                      bindings: routingBindings
                   ) {
             modifierArbitrationLogger.info(
                 "composite bitmask input controls=\(compositeControls.map(\.rawValue).joined(separator: ","), privacy: .public)"
@@ -2789,7 +3161,7 @@ final class MappingStore {
         } else if activeRealm == .standard,
                   let compositeControls = Self.decomposedKeyboardControls(
                       for: signature,
-                      bindings: hidBindings
+                      bindings: routingBindings
                   ) {
             modifierArbitrationLogger.info(
                 "composite keyboard input controls=\(compositeControls.map(\.rawValue).joined(separator: ","), privacy: .public)"
@@ -3142,14 +3514,14 @@ final class MappingStore {
             return
         }
 
-        let exactControl = hidBindings.first(where: { $0.value == signature })?.key
+        let exactControl = effectiveStandardHIDBindings.first(where: { $0.value == signature })?.key
         let desiredControls: Set<RemoteControl>
         if let exactControl {
             guard exactControl.isMIDIButton else { return }
             desiredControls = [exactControl]
         } else if let decomposed = Self.decomposedStandardBitmaskControls(
             for: signature,
-            bindings: hidBindings
+            bindings: effectiveStandardHIDBindings
         ) {
             desiredControls = Set(decomposed)
         } else {
@@ -3273,7 +3645,7 @@ final class MappingStore {
             }
         } else if let decomposed = Self.decomposedKeyboardControls(
             for: signature,
-            bindings: hidBindings
+            bindings: effectiveStandardHIDBindings
         ) {
             desiredControls = Set(decomposed)
         } else {
@@ -4183,6 +4555,9 @@ final class MappingStore {
             modifierColors = [:]
             selectedMappingModifiers = []
             activeRealm = .standard
+            if previousRealm != activeRealm {
+                invalidateStandardF13F22PresetLiveVerification()
+            }
             midiSettings = nil
             syncMIDIOverlay()
             return
@@ -4195,6 +4570,13 @@ final class MappingStore {
         modifierColors = state.modifierColors.filter { $0.key.isModifierEligible }
         selectedMappingModifiers = []
         activeRealm = state.realm
+        if previousRealm != activeRealm {
+            // The preset is Standard-only. Returning from MIDI must require
+            // fresh evidence in the Standard resolver, even on the same HID
+            // connection, so the UI never carries a stale cross-realm claim.
+            invalidateStandardF13F22PresetLiveVerification()
+        }
+        refreshModifierAvailability()
         midiSettings = state.midiSettings
         if !unavailableRemoteModifierControls.isEmpty {
             let controls = RemoteControl.allCases
@@ -4259,6 +4641,7 @@ final class MappingStore {
         _ layouts: [XPdConfiguration.HardwareLayout],
         activeID: String?
     ) {
+        invalidateStandardKLayerLiveVerification()
         let normalized = layouts.map { layout in
             Self.makeHardwareLayout(
                 id: layout.id,
