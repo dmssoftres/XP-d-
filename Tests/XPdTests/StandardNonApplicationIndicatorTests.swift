@@ -3,6 +3,41 @@ import XCTest
 
 @MainActor
 final class StandardNonApplicationIndicatorTests: XCTestCase {
+    func testSequenceRoutesCarrySequenceBadgeAndHoldRoutesCarryHoldBadge() {
+        let routes = [
+            StandardNonApplicationRoute(modifierControls: [.k10], isSequenceCombo: true),
+            StandardNonApplicationRoute(modifierControls: [.k7]),
+            StandardNonApplicationRoute(modifierControls: [])
+        ]
+
+        let selection = standardNonApplicationMarkerDisplaySelection(routes)
+
+        XCTAssertEqual(selection.visible.count, 3)
+        XCTAssertEqual(
+            selection.visible.first(where: { $0.modifierControls == [.k10] })?.badge,
+            .sequence
+        )
+        XCTAssertEqual(
+            selection.visible.first(where: { $0.modifierControls == [.k7] })?.badge,
+            .hold
+        )
+        XCTAssertTrue(selection.visible.first(where: { $0.isBase })?.badge == nil)
+    }
+
+    func testSequenceBadgeWidthFitsWithinRailBudget() {
+        let routes = [
+            StandardNonApplicationRoute(modifierControls: [.k10], isSequenceCombo: true)
+        ]
+
+        let selection = standardNonApplicationMarkerDisplaySelection(routes)
+
+        XCTAssertEqual(selection.visible.count, 1)
+        XCTAssertLessThanOrEqual(
+            standardNonApplicationMarkerDisplayWidth(for: selection),
+            standardNonApplicationMarkerRailWidth
+        )
+    }
+
     func testApplicationRouteSelectorRetainsFourRoutesWithoutMarkers() {
         let routes = [
             StandardApplicationRoute(target: "One", gesture: .tap),
@@ -59,8 +94,8 @@ final class StandardNonApplicationIndicatorTests: XCTestCase {
 
         let selection = standardNonApplicationMarkerDisplaySelection(routes)
 
-        XCTAssertEqual(selection.visible.count, 8)
-        XCTAssertEqual(selection.hiddenCount, 3)
+        XCTAssertEqual(selection.visible.count, 4)
+        XCTAssertEqual(selection.hiddenCount, 7)
     }
 
     func testMarkerSelectorKeepsCombinedLayerDotsTogetherWithinOverflowBudget() {
@@ -77,9 +112,9 @@ final class StandardNonApplicationIndicatorTests: XCTestCase {
 
         let selection = standardNonApplicationMarkerDisplaySelection(routes)
 
-        XCTAssertEqual(selection.visible.count, 1)
+        XCTAssertEqual(selection.visible.count, 2)
         XCTAssertEqual(selection.visible.first?.modifierControls.count, 9)
-        XCTAssertEqual(selection.hiddenCount, 1)
+        XCTAssertEqual(selection.hiddenCount, 0)
         XCTAssertLessThanOrEqual(
             standardNonApplicationMarkerDisplayWidth(for: selection),
             standardNonApplicationMarkerRailWidth
@@ -103,9 +138,9 @@ final class StandardNonApplicationIndicatorTests: XCTestCase {
             applicationHiddenCount: 2
         )
 
-        XCTAssertEqual(selection.visible.count, 1)
+        XCTAssertEqual(selection.visible.count, 2)
         XCTAssertEqual(selection.visible.first?.modifierControls.count, 7)
-        XCTAssertEqual(selection.hiddenCount, 1)
+        XCTAssertEqual(selection.hiddenCount, 0)
         XCTAssertEqual(selection.applicationHiddenCount, 2)
         XCTAssertLessThanOrEqual(
             standardNonApplicationMarkerDisplayWidth(for: selection),

@@ -48,6 +48,7 @@ struct StandardApplicationRoute: Equatable, Identifiable {
     let gesture: GestureKind
     let modifierControls: Set<RemoteControl>
     let targetIdentity: String
+    var isSequenceCombo: Bool = false
 
     var id: String {
         let modifiers = RemoteControl.allCases
@@ -63,12 +64,14 @@ struct StandardApplicationRoute: Equatable, Identifiable {
         target: String,
         gesture: GestureKind,
         modifierControls: Set<RemoteControl> = [],
-        targetIdentity: String? = nil
+        targetIdentity: String? = nil,
+        isSequenceCombo: Bool = false
     ) {
         self.target = target
         self.gesture = gesture
         self.modifierControls = modifierControls
         self.targetIdentity = targetIdentity ?? Self.normalizedTargetIdentity(target)
+        self.isSequenceCombo = isSequenceCombo
     }
 
     static func normalizedTargetIdentity(_ target: String) -> String {
@@ -88,6 +91,7 @@ struct StandardApplicationRoute: Equatable, Identifiable {
 /// deduplicated by `MappingStore.standardNonApplicationRoutes(for:)`.
 struct StandardNonApplicationRoute: Equatable, Identifiable {
     let modifierControls: Set<RemoteControl>
+    var isSequenceCombo: Bool = false
 
     var id: String {
         let modifiers = RemoteControl.allCases
@@ -917,10 +921,26 @@ final class MappingStore {
 
         for modifierControls in layerSets.sorted(by: orderedModifierSets)
             where hasConfiguredNonApplicationAction(for: control, modifierControls: modifierControls) {
-            routes.append(StandardNonApplicationRoute(modifierControls: modifierControls))
+            routes.append(
+                StandardNonApplicationRoute(
+                    modifierControls: modifierControls,
+                    isSequenceCombo: layerHasSequenceComboMapping(control, modifierControls: modifierControls)
+                )
+            )
         }
 
         return routes
+    }
+
+    private func layerHasSequenceComboMapping(
+        _ control: RemoteControl,
+        modifierControls: Set<RemoteControl>
+    ) -> Bool {
+        mappings.contains { key, mapping in
+            key.control == control
+                && key.modifierControls == modifierControls
+                && mapping.comboMode == .sequence
+        }
     }
 
     /// Saved non-Base layers for one Standard destination. Dormant layers are
@@ -983,7 +1003,9 @@ final class MappingStore {
         return StandardApplicationRoute(
             target: target,
             gesture: gesture,
-            modifierControls: modifierControls
+            modifierControls: modifierControls,
+            targetIdentity: nil,
+            isSequenceCombo: mapping.comboMode == .sequence
         )
     }
 

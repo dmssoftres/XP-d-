@@ -512,11 +512,37 @@ struct RemoteView: View {
             if group.isBase {
                 standardNonApplicationMarkerDot(.white.opacity(0.92))
             } else {
-                ForEach(group.modifierControls) { modifier in
-                    standardNonApplicationMarkerDot(store.modifierColor(for: modifier).swiftUIColor)
-                }
+                standardNonApplicationModeChip(
+                    modifiers: group.modifierControls,
+                    sequence: group.badge == .sequence
+                )
             }
         }
+    }
+
+    private func standardNonApplicationModeChip(
+        modifiers: [RemoteControl],
+        sequence: Bool
+    ) -> some View {
+        let colors = modifierRouteColors(Set(modifiers))
+        let fill = colors.count <= 1
+            ? AnyShapeStyle((colors.first ?? ModifierColor.orange.swiftUIColor).opacity(0.9))
+            : AnyShapeStyle(LinearGradient(colors: colors.map { $0.opacity(0.9) }, startPoint: .leading, endPoint: .trailing))
+        return Circle()
+            .fill(fill)
+            .frame(
+                width: standardNonApplicationMarkerModeChipWidth,
+                height: standardNonApplicationMarkerModeChipHeight
+            )
+            .overlay {
+                Text(sequence ? "S" : "H")
+                    .font(.system(size: 8, weight: .heavy, design: .rounded))
+                    .foregroundStyle(.black.opacity(0.82))
+            }
+            .overlay {
+                Circle()
+                    .stroke(.black.opacity(0.76), lineWidth: 0.55)
+            }
     }
 
     private func standardNonApplicationMarkerDot(_ color: Color) -> some View {
@@ -582,12 +608,13 @@ struct RemoteView: View {
 
     @ViewBuilder
     private func applicationRouteSlot(_ route: StandardApplicationRoute?) -> some View {
+        let width: CGFloat = (route?.isBase == false) ? 29 : 18
         if let route {
             applicationRouteIndicator(route)
-                .frame(width: 18, height: 18)
+                .frame(width: width, height: 18)
         } else {
             Color.clear
-                .frame(width: 18, height: 18)
+                .frame(width: width, height: 18)
         }
     }
 
@@ -597,20 +624,25 @@ struct RemoteView: View {
             applicationRouteIcon(for: route.target, size: 14)
                 .frame(maxWidth: .infinity)
         } else {
-            applicationRouteIcon(for: route.target, size: 14)
-                .padding(2)
-                .frame(width: 18, height: 18)
-                .background {
-                    modifierRouteFill(route.modifierControls)
-                        .clipShape(Capsule())
-                }
-                .overlay {
-                    Capsule()
-                        .strokeBorder(
-                            modifierRouteStroke(route.modifierControls),
-                            lineWidth: 0.75
-                        )
-                }
+            HStack(spacing: 2) {
+                applicationRouteIcon(for: route.target, size: 13)
+                Text(route.isSequenceCombo ? "S" : "H")
+                    .font(.system(size: 7.5, weight: .heavy, design: .rounded))
+                    .foregroundStyle(.black.opacity(0.82))
+            }
+            .padding(.horizontal, 3)
+            .frame(height: 18)
+            .background {
+                modifierRouteFill(route.modifierControls)
+                    .clipShape(Capsule())
+            }
+            .overlay {
+                Capsule()
+                    .strokeBorder(
+                        modifierRouteStroke(route.modifierControls),
+                        lineWidth: 0.75
+                    )
+            }
         }
     }
 
@@ -662,7 +694,8 @@ struct RemoteView: View {
                 .filter { route.modifierControls.contains($0) }
                 .map(\.rawValue)
                 .joined(separator: " + ")
-            return "\(modifiers) \(target)"
+            let mode = route.isSequenceCombo ? " sequence mode" : ""
+            return "\(modifiers) \(target)\(mode)"
         }
         if !routeSummary.isEmpty {
             parts.append(routeSummary.joined(separator: "; "))
@@ -742,9 +775,22 @@ struct RemoteView: View {
     }
 }
 
+enum StandardNonApplicationMarkerBadge: Equatable {
+    case hold
+    case sequence
+
+    var label: String {
+        switch self {
+        case .hold: return "H"
+        case .sequence: return "S"
+        }
+    }
+}
+
 struct StandardNonApplicationMarkerGroup: Equatable, Identifiable {
     let modifierControls: [RemoteControl]
     let isBase: Bool
+    var badge: StandardNonApplicationMarkerBadge? = nil
 
     var id: String {
         isBase ? "base" : modifierControls.map(\.rawValue).joined(separator: "+")
@@ -772,12 +818,16 @@ func standardNonApplicationMarkerDisplaySelection(
 ) -> StandardNonApplicationMarkerDisplaySelection {
     var containsBase = false
     var modifierSets = Set<Set<RemoteControl>>()
+    var sequenceSets = Set<Set<RemoteControl>>()
 
     for route in routes {
         if route.isBase {
             containsBase = true
         } else if !route.modifierControls.isEmpty {
             modifierSets.insert(route.modifierControls)
+            if route.isSequenceCombo {
+                sequenceSets.insert(route.modifierControls)
+            }
         }
     }
 
@@ -787,10 +837,11 @@ func standardNonApplicationMarkerDisplaySelection(
     }
     groups.append(contentsOf: modifierSets
         .sorted(by: standardNonApplicationModifierSetPrecedes)
-        .map {
+        .map { set in
             StandardNonApplicationMarkerGroup(
-                modifierControls: standardNonApplicationModifierOrder($0),
-                isBase: false
+                modifierControls: standardNonApplicationModifierOrder(set),
+                isBase: false,
+                badge: sequenceSets.contains(set) ? .sequence : .hold
             )
         })
 
@@ -864,13 +915,16 @@ private func standardNonApplicationMarkerGroupsWidth(
     }
 }
 
+private let standardNonApplicationMarkerModeChipWidth: CGFloat = 12
+private let standardNonApplicationMarkerModeChipHeight: CGFloat = 12
+
 private func standardNonApplicationMarkerGroupWidth(
     _ group: StandardNonApplicationMarkerGroup
 ) -> CGFloat {
-    let count = group.isBase ? 1 : group.modifierControls.count
-    guard count > 0 else { return 0 }
-    return (CGFloat(count) * standardNonApplicationMarkerDotDiameter)
-        + (CGFloat(count - 1) * standardNonApplicationMarkerDotSpacing)
+    guard !group.isBase else {
+        return standardNonApplicationMarkerDotDiameter
+    }
+    return standardNonApplicationMarkerModeChipWidth
 }
 
 func standardNonApplicationMarkerDisplayWidth(
