@@ -654,6 +654,28 @@ final class MappingStore {
     private var activeStandardModifierBaseSuppressed = false
     private var activeStandardModifierGeneration = 0
     private var ambiguousStandardCycles: Set<RemoteControl> = []
+    /// One pending per-combo sequential recognition window per source key.
+    /// A released lone Standard modifier defers its solo Base commit here
+    /// until the configured window expires without destination participation.
+    /// The timers are scheduled through the same injected `gestureSchedule`
+    /// as the standalone threshold, keeping tests deterministic.
+    private struct DeferredStandardSoloSequence {
+        let identity: ButtonGestureIdentity
+        let generation: Int
+        let task: GestureScheduledAction
+    }
+    private var activeStandardDeferredSoloSequences: [RemoteControl: DeferredStandardSoloSequence] = [:]
+    /// A freshly pressed lone Standard destination may be completed by a
+    /// designated modifier within this window (destination-first order).
+    private struct DestinationStandardSequenceWindow {
+        let generation: Int
+        let task: GestureScheduledAction
+    }
+    private var activeStandardDestinationSequenceWindows: [RemoteControl: DestinationStandardSequenceWindow] = [:]
+    /// Generation guard for both window kinds. Unlike the modifier-cycle
+    /// generation it is only bumped by explicit cancellation so a released
+    /// modifier's pending window can survive its own release boundary.
+    private var activeStandardSequenceGeneration = 0
     private var isRemoteTriggerCaptureActive = false
     private var remoteTriggerModifierCaptureHandler: ((RemoteControl) -> Void)?
     @ObservationIgnored private lazy var inputOverlay = InputOverlayController(displayDuration: inputOverlayDuration)
@@ -3812,6 +3834,28 @@ final class MappingStore {
 
         let modifiers = activeStandardControls.filter(isRemoteModifier)
         let primaries = activeStandardControls.filter { !isRemoteModifier($0) }
+
+        // Modifier-first sequence completion: a lone modifier released within
+        // its deferred-solo window is completed by this destination press.
+        if primaries.count == 1,
+           modifiers.isEmpty,
+           let primary = primaries.first,
+           case let matched? = matchedStandardDeferredSoloSequence(for: primary) {
+            modifierArbitrationLogger.info(
+                "sequence fired order=modifier-first control=\(primary.rawValue, privacy: .public) modifier=\(matched.modifier.rawValue, privacy: .public) gesture=\(matched.gesture.rawValue, privacy: .public)"
+            )
+            suppressActiveStandardCycleAfterSequenceFire()
+            let identity = ButtonGestureIdentity(
+                control: primary,
+                modifierControls: [matched.modifier],
+                keyboardModifiers: remoteModifierProvider(),
+                functionKeys: remoteFunctionKeyProvider(),
+                keyboardKeys: remoteKeyProvider(configuredRemoteTriggerKeyCodes)
+            )
+            recognizedButtonGesture(identity: identity, gesture: matched.gesture)
+            return
+        }
+
         if primaries.isEmpty {
             if modifiers.count == 1,
                let modifier = modifiers.first {
@@ -3839,6 +3883,36 @@ final class MappingStore {
             return
         }
         guard let primary = primaries.first else { return }
+
+        // Destination-first sequence completion: the modifier joining this
+        // lone still-held destination within its window fires once and
+        // consumes the rest of the physical cycle.
+        if activeRealm == .standard,
+           modifiers.count == 1,
+           let modifier = modifiers.first,
+           let pending = activeStandardDestinationSequenceWindows[primary],
+           pending.generation == activeStandardSequenceGeneration,
+           let gesture = standardSequenceLayerGesture(control: primary, modifier: modifier),
+           activeStandardDestinationSequenceWindows.removeValue(forKey: primary) != nil {
+            pending.task.cancel()
+            modifierArbitrationLogger.info(
+                "sequence fired order=destination-first control=\(primary.rawValue, privacy: .public) modifier=\(modifier.rawValue, privacy: .public) gesture=\(gesture.rawValue, privacy: .public)"
+            )
+            suppressActiveStandardCycleAfterSequenceFire()
+            let identity = ButtonGestureIdentity(
+                control: primary,
+                modifierControls: [modifier],
+                keyboardModifiers: remoteModifierProvider(),
+                functionKeys: remoteFunctionKeyProvider(),
+                keyboardKeys: remoteKeyProvider(configuredRemoteTriggerKeyCodes)
+            )
+            recognizedButtonGesture(identity: identity, gesture: gesture)
+            return
+        }
+
+        if modifiers.isEmpty {
+            armStandardDestinationSequenceWindowIfConfigured(for: primary)
+        }
 
         let identity = ButtonGestureIdentity(
             control: primary,
@@ -3926,9 +4000,21 @@ final class MappingStore {
               controls.count == 1,
               removedControls.map({ $0.contains(modifier) }) ?? true,
               isRemoteModifier(modifier),
-              activeStandardModifierThresholdReached.contains(modifier),
               activeStandardModifierBaseSuppressed == false,
               activeStandardGestureIdentity == nil else {
+            return
+        }
+
+        // A quick tap is still a press+release under the per-combo sequence
+        // contract, so any lone qualifying release arms the deferred-solo
+        // window — early or post-threshold alike. Without a sequence mapping
+        // the release falls through to the threshold-gated Base Tap commit.
+        if armStandardDeferredSoloSequence(for: modifier) { return }
+
+        guard activeStandardModifierThresholdReached.contains(modifier) else {
+            modifierArbitrationLogger.info(
+                "standalone release inert control=\(modifier.rawValue, privacy: .public) reason=sub-threshold"
+            )
             return
         }
 
@@ -3943,6 +4029,188 @@ final class MappingStore {
             "standalone Base Tap committed at release control=\(modifier.rawValue, privacy: .public)"
         )
         recognizedButtonGesture(identity: identity, gesture: .tap)
+    }
+
+    /// Returns the first gesture of a Standard sequence-mode layer mapping
+    /// for the exact one-modifier layer. Multi-modifier stacks, unavailable
+    /// modifiers, and non-K destinations fail closed here.
+    private func standardSequenceLayerGesture(
+        control: RemoteControl,
+        modifier: RemoteControl
+    ) -> GestureKind? {
+        guard activeRealm == .standard,
+              control.isMIDIButton,
+              isRemoteModifier(modifier),
+              control != modifier else {
+            return nil
+        }
+        for gesture in GestureKind.allCases {
+            if case let mapping? = mappings[MappingKey(
+                control: control,
+                gesture: gesture,
+                modifierControls: [modifier]
+            )], mapping.comboMode == .sequence {
+                return gesture
+            }
+        }
+        return nil
+    }
+
+    /// Arms the deferred solo window for a released lone Standard modifier
+    /// that owns at least one sequence-mode destination layer. Returns false
+    /// when no such mapping exists and the caller should commit solo Base
+    /// immediately as before.
+    private func armStandardDeferredSoloSequence(for modifier: RemoteControl) -> Bool {
+        guard activeRealm == .standard else { return false }
+
+        let windows = RemoteControl.allCases.compactMap { destination -> Int? in
+            guard standardSequenceLayerGesture(control: destination, modifier: modifier) != nil else {
+                return nil
+            }
+            return standardSequenceWindowMs(control: destination, modifier: modifier)
+        }
+        guard let shortestWindowMs = windows.min() else { return false }
+
+        activeStandardDeferredSoloSequences.removeValue(forKey: modifier)?.task.cancel()
+        activeStandardDestinationSequenceWindows.removeValue(forKey: modifier)?.task.cancel()
+        let generation = activeStandardSequenceGeneration
+        // Snapshots are taken before the release-boundary cleanup clears the
+        // press-time keyboard state dictionaries.
+        let identity = ButtonGestureIdentity(
+            control: modifier,
+            keyboardModifiers: activeStandardKeyboardModifiers[modifier] ?? [],
+            functionKeys: activeStandardFunctionKeys[modifier] ?? [],
+            keyboardKeys: activeStandardKeyboardKeys[modifier] ?? []
+        )
+        modifierArbitrationLogger.info(
+            "sequence window armed kind=solo control=\(modifier.rawValue, privacy: .public) window=\(shortestWindowMs, privacy: .public) generation=\(generation, privacy: .public)"
+        )
+        activeStandardDeferredSoloSequences[modifier] = DeferredStandardSoloSequence(
+            identity: identity,
+            generation: generation,
+            task: gestureSchedule(TimeInterval(shortestWindowMs) / 1000) { [weak self] in
+                self?.expireStandardDeferredSoloSequence(for: modifier, generation: generation)
+            }
+        )
+        return true
+    }
+
+    /// The shortest configured sequence window across one destination and
+    /// modifier pair's sequence-mode gestures.
+    private func standardSequenceWindowMs(
+        control: RemoteControl,
+        modifier: RemoteControl
+    ) -> Int? {
+        GestureKind.allCases.compactMap { gesture -> Int? in
+            guard case let mapping? = mappings[MappingKey(
+                control: control,
+                gesture: gesture,
+                modifierControls: [modifier]
+            )], mapping.comboMode == .sequence else {
+                return nil
+            }
+            return mapping.sequenceWindowMs
+        }.min()
+    }
+
+    private func expireStandardDeferredSoloSequence(
+        for modifier: RemoteControl,
+        generation: Int
+    ) {
+        guard let entry = activeStandardDeferredSoloSequences[modifier],
+              entry.generation == generation,
+              activeStandardDeferredSoloSequences.removeValue(forKey: modifier) != nil else {
+            return
+        }
+        entry.task.cancel()
+        // A different physical cycle in flight means the solo decision can no
+        // longer be attributed cleanly; fail closed instead of misfiring.
+        guard activeStandardControls.isEmpty,
+              activeStandardGestureIdentity == nil else {
+            modifierArbitrationLogger.info(
+                "sequence window skipped kind=solo control=\(modifier.rawValue, privacy: .public) reason=cycle-active"
+            )
+            return
+        }
+        modifierArbitrationLogger.info(
+            "sequence window expired kind=solo control=\(modifier.rawValue, privacy: .public) commit=base-tap"
+        )
+        recognizedButtonGesture(identity: entry.identity, gesture: .tap)
+    }
+
+    /// Returns the pending deferred-solo completion matching this freshly
+    /// pressed destination, consuming the window exactly once.
+    private func matchedStandardDeferredSoloSequence(
+        for destination: RemoteControl
+    ) -> (modifier: RemoteControl, gesture: GestureKind)? {
+        for modifier in RemoteControl.allCases {
+            guard let pending = activeStandardDeferredSoloSequences[modifier],
+                  pending.generation == activeStandardSequenceGeneration,
+                  let gesture = standardSequenceLayerGesture(control: destination, modifier: modifier) else {
+                continue
+            }
+            activeStandardDeferredSoloSequences.removeValue(forKey: modifier)?.task.cancel()
+            return (modifier, gesture)
+        }
+        return nil
+    }
+
+    private func armStandardDestinationSequenceWindowIfConfigured(for primary: RemoteControl) {
+        let windows = RemoteControl.allCases.compactMap { modifier -> Int? in
+            guard standardSequenceLayerGesture(control: primary, modifier: modifier) != nil else {
+                return nil
+            }
+            return standardSequenceWindowMs(control: primary, modifier: modifier)
+        }
+        guard let shortestWindowMs = windows.min() else { return }
+
+        activeStandardDestinationSequenceWindows.removeValue(forKey: primary)?.task.cancel()
+        let generation = activeStandardSequenceGeneration
+        modifierArbitrationLogger.info(
+            "sequence window armed kind=destination control=\(primary.rawValue, privacy: .public) window=\(shortestWindowMs, privacy: .public) generation=\(generation, privacy: .public)"
+        )
+        activeStandardDestinationSequenceWindows[primary] = DestinationStandardSequenceWindow(
+            generation: generation,
+            task: gestureSchedule(TimeInterval(shortestWindowMs) / 1000) { [weak self] in
+                guard let self,
+                      let window = self.activeStandardDestinationSequenceWindows[primary],
+                      window.generation == generation,
+                      self.activeStandardDestinationSequenceWindows.removeValue(forKey: primary) != nil else {
+                    return
+                }
+                window.task.cancel()
+                self.modifierArbitrationLogger.info(
+                    "sequence window expired kind=destination control=\(primary.rawValue, privacy: .public)"
+                )
+            }
+        )
+    }
+
+    /// Marks the current physical cycle consumed after a sequence fire so no
+    /// hold-path or standalone path can repeat the same action.
+    private func suppressActiveStandardCycleAfterSequenceFire() {
+        activeStandardModifierBaseSuppressed = true
+        let tasks = Array(activeStandardModifierHoldTasks.values)
+        activeStandardModifierHoldTasks.removeAll()
+        tasks.forEach { $0.cancel() }
+        activeStandardModifierThresholdReached.removeAll()
+        if let previousIdentity = activeStandardGestureIdentity {
+            buttonGestureRecognizer.cancel(previousIdentity)
+            activeStandardGestureIdentity = nil
+        }
+    }
+
+    private func cancelActiveStandardSequenceWindows(reason: String) {
+        let soloTasks = activeStandardDeferredSoloSequences.values.map(\.task)
+        let destinationTasks = activeStandardDestinationSequenceWindows.values.map(\.task)
+        guard !soloTasks.isEmpty || !destinationTasks.isEmpty else { return }
+        activeStandardDeferredSoloSequences.removeAll()
+        activeStandardDestinationSequenceWindows.removeAll()
+        activeStandardSequenceGeneration &+= 1
+        modifierArbitrationLogger.info(
+            "sequence windows cancelled reason=\(reason, privacy: .public) count=\(soloTasks.count + destinationTasks.count, privacy: .public)"
+        )
+        (soloTasks + destinationTasks).forEach { $0.cancel() }
     }
 
     private func releaseStandardCycle() {
@@ -3993,6 +4261,7 @@ final class MappingStore {
     private func cancelStandardCycle() {
         cancelActiveStandardPrimaryGestures()
         cancelActiveStandardModifierHoldTasks(reason: "cycle-cancelled")
+        cancelActiveStandardSequenceWindows(reason: "cycle-cancelled")
         activeStandardControls.removeAll()
         activeStandardReport6Controls.removeAll()
         activeStandardReport2Controls.removeAll()

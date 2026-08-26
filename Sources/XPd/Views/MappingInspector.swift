@@ -1796,6 +1796,10 @@ private struct StandardMappingActionEditor: View {
             }
 
             Group {
+                if comboModeEligible {
+                    comboModeSection
+                }
+
                 Picker("Action", selection: actionBinding) {
                     ForEach(ActionKind.allCases) { action in
                         Text(action.editorLabel).tag(action)
@@ -2228,6 +2232,101 @@ private struct StandardMappingActionEditor: View {
                 commandEditor
             }
         }
+    }
+
+    private var comboModeEligible: Bool {
+        store.activeRealm == .standard
+            && modifierControls.count == 1
+            && modifierControls.allSatisfy { store.isRemoteModifier($0) }
+    }
+
+    @ViewBuilder
+    private var comboModeSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text("Combo mode")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 6)
+                Picker("Combo mode", selection: isSequenceComboBinding) {
+                    Text("Hold").tag(false)
+                    Text("Sequence").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 168)
+                .labelsHidden()
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Combo mode")
+            .accessibilityValue(isSequenceComboBinding.wrappedValue ? "Sequence" : "Hold")
+
+            if isSequenceComboBinding.wrappedValue {
+                HStack(spacing: 8) {
+                    Text("Sequence window")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 6)
+                    Text("\(sequenceWindowBinding.wrappedValue) ms")
+                        .monospacedDigit()
+                    Stepper(
+                        value: sequenceWindowBinding,
+                        in: 200...2000,
+                        step: 100
+                    ) { Text("Adjust sequence window") }
+                    .labelsHidden()
+                }
+                .accessibilityElement(children: .combine)
+            }
+
+            if showsSequenceSuggestion {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text("These keys can't be read together over Bluetooth.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 6)
+                    Button("Use Sequence") {
+                        binding.wrappedValue.comboMode = .sequence
+                    }
+                    .font(.caption)
+                    .controlSize(.small)
+                    .help("Switch this combo to sequential recognition")
+                    .accessibilityLabel("Use Sequence")
+                }
+            }
+        }
+        .padding(.top, 2)
+
+        Divider()
+    }
+
+    private var isSequenceComboBinding: Binding<Bool> {
+        Binding(
+            get: { binding.wrappedValue.comboMode == .sequence },
+            set: { binding.wrappedValue.comboMode = $0 ? .sequence : .hold }
+        )
+    }
+
+    private var sequenceWindowBinding: Binding<Int> {
+        Binding(
+            get: {
+                min(max(binding.wrappedValue.sequenceWindowMs, 200), 2000)
+            },
+            set: { milliseconds in
+                binding.wrappedValue.sequenceWindowMs = min(max(milliseconds, 200), 2000)
+            }
+        )
+    }
+
+    private var showsSequenceSuggestion: Bool {
+        !isSequenceComboBinding.wrappedValue && !comboHIDCollisions.isEmpty
+    }
+
+    private var comboHIDCollisions: [HIDKeyboardReportCollision] {
+        store.standardModifierHIDCollisions(
+            for: store.selectedControl,
+            modifierControls: modifierControls
+        )
     }
 
     private var selectedAction: ActionKind {

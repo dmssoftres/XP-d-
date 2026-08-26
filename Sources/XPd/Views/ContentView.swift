@@ -153,8 +153,13 @@ struct ContentView: View {
     private var deviceStatus: String {
         if !store.hid.hasInputAccess { return "Input Monitoring permission required" }
         if !store.hid.hasExclusiveControl { return "Exclusive remote control unavailable" }
-        if !store.hid.isConnected { return "Waiting for Shortcut Remote" }
-        return "Shortcut Remote connected exclusively"
+        guard store.hid.isConnected else { return "Waiting for Shortcut Remote" }
+        switch store.hid.connectionTransport {
+        case .usb: return "Connected via USB cable"
+        case .bluetooth: return "Connected via Bluetooth"
+        case .other(let raw): return "Connected via \(raw)"
+        case nil: return "Connected"
+        }
     }
 
     private var connectionColor: Color {

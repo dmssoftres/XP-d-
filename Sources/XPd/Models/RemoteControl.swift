@@ -49,6 +49,16 @@ enum GestureKind: String, CaseIterable, Codable, Identifiable {
     var id: String { rawValue }
 }
 
+enum ComboMode: String, Codable {
+    /// Current behavior. Modifier-first and destination-first pairing rely
+    /// on physical simultaneity alone.
+    case hold
+    /// Opt-in per-mapping sequential recognition: modifier press+release
+    /// then destination press (or the reverse order) within the configured
+    /// window fires the exact layer once. Standard realm only.
+    case sequence
+}
+
 enum ActionKind: String, CaseIterable, Codable, Identifiable {
     case keyboardShortcut = "Keyboard shortcut"
     case openApplication = "Open application"
@@ -204,6 +214,25 @@ struct Mapping: Codable, Equatable {
     /// mappings source- and data-compatible by treating the missing key as
     /// false.
     var usesTapApplication: Bool = false
+    /// Standard-only per-mapping sequential recognition choice. The field is
+    /// omitted from the encoded form when it holds the default so legacy
+    /// payloads stay byte-stable and MIDI profiles never gain the key.
+    var comboMode: ComboMode = .hold
+    /// Sequence recognition window in milliseconds. Only meaningful when
+    /// `comboMode == .sequence`; always kept within the supported range.
+    var sequenceWindowMs: Int {
+        get { rawSequenceWindowMs }
+        set { rawSequenceWindowMs = Self.clampedSequenceWindowMs(newValue) }
+    }
+
+    static let defaultSequenceWindowMs = 500
+    static let sequenceWindowMsRange = 200...2000
+
+    private var rawSequenceWindowMs: Int = Mapping.defaultSequenceWindowMs
+
+    static func clampedSequenceWindowMs(_ value: Int) -> Int {
+        min(max(value, sequenceWindowMsRange.lowerBound), sequenceWindowMsRange.upperBound)
+    }
 
     private enum CodingKeys: String, CodingKey {
         case action
@@ -218,6 +247,8 @@ struct Mapping: Codable, Equatable {
         case remoteTriggerKeyCode
         case remoteTriggerKeyDisplay
         case usesTapApplication
+        case comboMode
+        case sequenceWindowMs
     }
 
     init(
@@ -232,7 +263,9 @@ struct Mapping: Codable, Equatable {
         remoteTriggerFunctionKey: UInt16? = nil,
         remoteTriggerKeyCode: UInt16? = nil,
         remoteTriggerKeyDisplay: String? = nil,
-        usesTapApplication: Bool = false
+        usesTapApplication: Bool = false,
+        comboMode: ComboMode = .hold,
+        sequenceWindowMs: Int = Mapping.defaultSequenceWindowMs
     ) {
         self.action = action
         self.command = command
@@ -246,6 +279,8 @@ struct Mapping: Codable, Equatable {
         self.remoteTriggerKeyCode = remoteTriggerKeyCode
         self.remoteTriggerKeyDisplay = remoteTriggerKeyDisplay
         self.usesTapApplication = usesTapApplication
+        self.comboMode = comboMode
+        self.sequenceWindowMs = sequenceWindowMs
     }
 
     init(from decoder: Decoder) throws {
@@ -265,6 +300,11 @@ struct Mapping: Codable, Equatable {
         remoteTriggerKeyCode = try container.decodeIfPresent(UInt16.self, forKey: .remoteTriggerKeyCode)
         remoteTriggerKeyDisplay = try container.decodeIfPresent(String.self, forKey: .remoteTriggerKeyDisplay)
         usesTapApplication = try container.decodeIfPresent(Bool.self, forKey: .usesTapApplication) ?? false
+        comboMode = try container.decodeIfPresent(ComboMode.self, forKey: .comboMode) ?? .hold
+        sequenceWindowMs = try container.decodeIfPresent(
+            Int.self,
+            forKey: .sequenceWindowMs
+        ) ?? Mapping.defaultSequenceWindowMs
     }
 
     func encode(to encoder: Encoder) throws {
@@ -284,6 +324,12 @@ struct Mapping: Codable, Equatable {
         try container.encodeIfPresent(remoteTriggerKeyCode, forKey: .remoteTriggerKeyCode)
         try container.encodeIfPresent(remoteTriggerKeyDisplay, forKey: .remoteTriggerKeyDisplay)
         try container.encode(usesTapApplication, forKey: .usesTapApplication)
+        if comboMode != .hold {
+            try container.encode(comboMode, forKey: .comboMode)
+        }
+        if comboMode == .sequence {
+            try container.encode(sequenceWindowMs, forKey: .sequenceWindowMs)
+        }
     }
 
     /// Returns a copy suitable for an explicit action-picker transition.

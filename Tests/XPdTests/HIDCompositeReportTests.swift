@@ -975,6 +975,145 @@ final class HIDCompositeReportTests: XCTestCase {
         XCTAssertFalse(executed.contains("K9 Base"))
     }
 
+    func testFactoryStyleReport6SequenceFiresLayerOnDestinationPress() {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeReport2Store(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+        clearAllKBindings(in: store)
+        learnReport6("r6:00 71 00 00 00 00 00", for: .k10, in: store)
+        learnReport6("r6:00 6D 00 00 00 00 00", for: .k6, in: store)
+        XCTAssertTrue(store.setRemoteModifier(.k10, enabled: true))
+        store.standardModifierHoldThreshold = 0.5
+        store.update(
+            Mapping(action: .openApplication, command: "K10 Base"),
+            for: .k10,
+            gesture: .tap
+        )
+        store.update(
+            Mapping(action: .openApplication, command: "sequence layer", comboMode: .sequence),
+            for: .k6,
+            gesture: .tap,
+            modifierControls: [.k10]
+        )
+
+        let k10Only = [UInt8](arrayLiteral: 0x00, 0x71, 0, 0, 0, 0, 0)
+        let k6Only = [UInt8](arrayLiteral: 0x00, 0x6D, 0, 0, 0, 0, 0)
+        let empty = [UInt8](repeating: 0, count: 7)
+
+        // M solo down/up arms the deferred window anchored at its release.
+        store.hid.simulateInputReportForTesting(reportID: 6, bytes: k10Only)
+        scheduler.advance(by: 0.5)
+        store.hid.simulateInputReportForTesting(reportID: 6, bytes: empty)
+        XCTAssertTrue(executed.isEmpty)
+
+        // D press within the window fires once and consumes the cycle.
+        store.hid.simulateInputReportForTesting(reportID: 6, bytes: k6Only)
+        XCTAssertEqual(executed, ["sequence layer"])
+
+        store.hid.simulateInputReportForTesting(reportID: 6, bytes: empty)
+        scheduler.advance(by: 1)
+        XCTAssertEqual(executed, ["sequence layer"])
+        XCTAssertFalse(executed.contains("K10 Base"))
+    }
+
+    func testReport2SequenceWindowExpiryCommitsSoloOnceThenDestinationActsSolo() {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeReport2Store(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+
+        learnReport2(report2ButtonBit(.k8), for: .k8, in: store)
+        learnReport2(report2ButtonBit(.k10), for: .k10, in: store)
+        XCTAssertTrue(store.setRemoteModifier(.k10, enabled: true))
+        store.standardModifierHoldThreshold = 0.5
+        store.update(
+            Mapping(action: .openApplication, command: "K10 Base"),
+            for: .k10,
+            gesture: .tap
+        )
+        store.update(Mapping(action: .openApplication, command: "K8 Base"), for: .k8, gesture: .tap)
+        store.update(
+            Mapping(action: .openApplication, command: "sequence", comboMode: .sequence),
+            for: .k8,
+            gesture: .tap,
+            modifierControls: [.k10]
+        )
+
+        let k10 = report2ButtonBit(.k10)
+        let k8 = report2ButtonBit(.k8)
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: k10)
+        )
+        scheduler.advance(by: 0.5)
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: 0)
+        )
+
+        scheduler.advance(by: 0.499)
+        XCTAssertTrue(executed.isEmpty)
+        scheduler.advance(by: 0.001)
+        XCTAssertEqual(executed, ["K10 Base"])
+
+        // A separate destination press after expiry acts fully solo.
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: k8)
+        )
+        store.hid.simulateInputReportForTesting(
+            reportID: 2,
+            bytes: report2Bytes(buttons: 0)
+        )
+        scheduler.advance(by: 0.30)
+
+        XCTAssertEqual(executed, ["K10 Base", "K8 Base"])
+    }
+
+    func testStandardSequenceMappingsStayInertInMIDIRealm() throws {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeReport2Store(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+
+        learnReport2(report2ButtonBit(.k8), for: .k8, in: store)
+        learnReport2(report2ButtonBit(.k10), for: .k10, in: store)
+        XCTAssertTrue(store.setRemoteModifier(.k10, enabled: true))
+        store.standardModifierHoldThreshold = 0.5
+        store.update(
+            Mapping(action: .openApplication, command: "K10 Base"),
+            for: .k10,
+            gesture: .tap
+        )
+        store.update(
+            Mapping(action: .openApplication, command: "sequence", comboMode: .sequence),
+            for: .k8,
+            gesture: .tap,
+            modifierControls: [.k10]
+        )
+        _ = try store.addMIDIProfile(named: "MIDI Realm")
+        store.profileName = "MIDI Realm"
+
+        let k10 = report2Bytes(buttons: report2ButtonBit(.k10))
+        let k8AndK10 = report2Bytes(buttons: report2ButtonBit(.k8) | report2ButtonBit(.k10))
+        let neutral = report2Bytes(buttons: 0)
+        store.hid.simulateInputReportForTesting(reportID: 2, bytes: k10)
+        scheduler.advance(by: 0.5)
+        store.hid.simulateInputReportForTesting(reportID: 2, bytes: neutral)
+        store.hid.simulateInputReportForTesting(reportID: 2, bytes: k8AndK10)
+        store.hid.simulateInputReportForTesting(reportID: 2, bytes: neutral)
+        scheduler.advance(by: 1)
+
+        XCTAssertTrue(executed.isEmpty)
+    }
+
     func testRelearnedMIDIReport2FnHeldDestinationAndReleaseUseFunctionLayer() async throws {
         let store = makeReport2Store()
         _ = try store.addMIDIProfile(named: "Report 2 MIDI")

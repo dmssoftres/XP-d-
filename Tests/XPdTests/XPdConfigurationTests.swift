@@ -838,4 +838,139 @@ final class XPdConfigurationTests: XCTestCase {
         invalidThreshold.fnHoldThreshold = .nan
         XCTAssertThrowsError(try invalidThreshold.validate())
     }
+
+    func testComboModeAbsentFromLegacyPayloadDecodesAsHold() throws {
+        let configuration = XPdConfiguration(
+            profiles: [
+                .init(
+                    name: "Global",
+                    mappings: [
+                        .init(
+                            control: .k8,
+                            gesture: .tap,
+                            mapping: Mapping(action: .openApplication, command: "layer")
+                        )
+                    ],
+                    hidBindings: []
+                ),
+                .init(name: "Finder", mappings: [], hidBindings: []),
+                .init(name: "Logic Pro", mappings: [], hidBindings: [])
+            ],
+            profileName: "Global",
+            showsInputOverlay: true
+        )
+
+        let encoded = try configuration.encodedData()
+        let root = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+        let profiles = try XCTUnwrap(root["profiles"] as? [[String: Any]])
+        let entries = try XCTUnwrap(profiles[0]["mappings"] as? [[String: Any]])
+        let payload = try XCTUnwrap(entries[0]["mapping"] as? [String: Any])
+        XCTAssertNil(payload["comboMode"])
+        XCTAssertNil(payload["sequenceWindowMs"])
+
+        let decoded = try XPdConfiguration.decode(encoded)
+        XCTAssertEqual(decoded.profiles[0].mappings[0].mapping.comboMode, .hold)
+        XCTAssertEqual(decoded.profiles[0].mappings[0].mapping.sequenceWindowMs, 500)
+    }
+
+    func testComboModeSequenceRoundTripsAndClampsWindow() throws {
+        var sequenceMapping = Mapping(action: .openApplication, command: "sequence")
+        sequenceMapping.comboMode = .sequence
+        sequenceMapping.sequenceWindowMs = 750
+        let configuration = XPdConfiguration(
+            profiles: [
+                .init(
+                    name: "Global",
+                    mappings: [
+                        .init(control: .k8, gesture: .tap, mapping: sequenceMapping)
+                    ],
+                    hidBindings: []
+                ),
+                .init(name: "Finder", mappings: [], hidBindings: []),
+                .init(name: "Logic Pro", mappings: [], hidBindings: [])
+            ],
+            profileName: "Global",
+            showsInputOverlay: true
+        )
+
+        let encoded = try configuration.encodedData()
+        let root = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+        let entries = try XCTUnwrap(
+            (root["profiles"] as? [[String: Any]])?[0]["mappings"] as? [[String: Any]]
+        )
+        let payload = try XCTUnwrap(entries[0]["mapping"] as? [String: Any])
+        XCTAssertEqual(payload["comboMode"] as? String, "sequence")
+        XCTAssertEqual(payload["sequenceWindowMs"] as? Int, 750)
+
+        XCTAssertEqual(encoded, try XPdConfiguration.decode(encoded).encodedData())
+        let decoded = try XPdConfiguration.decode(encoded)
+        XCTAssertEqual(decoded.profiles[0].mappings[0].mapping.comboMode, .sequence)
+        XCTAssertEqual(decoded.profiles[0].mappings[0].mapping.sequenceWindowMs, 750)
+
+        for (raw, clamped) in [(100, 200), (199, 200), (2001, 2000), (5000, 2000)] {
+            var adjusted = decoded
+            let entry = adjusted.profiles[0].mappings[0]
+            var mapping = entry.mapping
+            mapping.sequenceWindowMs = raw
+            let normalized = XPdConfiguration(
+                profiles: [
+                    .init(
+                        name: "Global",
+                        mappings: [.init(
+                            control: entry.control,
+                            gesture: entry.gesture,
+                            mapping: mapping,
+                            modifierControls: entry.modifierControls
+                        )],
+                        hidBindings: []
+                    ),
+                    .init(name: "Finder", mappings: [], hidBindings: []),
+                    .init(name: "Logic Pro", mappings: [], hidBindings: [])
+                ],
+                profileName: "Global",
+                showsInputOverlay: true
+            )
+            let normalizedDecoded = try XPdConfiguration.decode(normalized.encodedData())
+            XCTAssertEqual(normalizedDecoded.profiles[0].mappings[0].mapping.sequenceWindowMs, clamped)
+        }
+    }
+
+    func testComboModeSequenceNeverAppearsInMIDIProfilePayloads() throws {
+        var sequenceMapping = Mapping(action: .openApplication, command: "sequence")
+        sequenceMapping.comboMode = .sequence
+        let configuration = XPdConfiguration(
+            profiles: [
+                .init(
+                    name: "Global",
+                    mappings: [
+                        .init(control: .k8, gesture: .tap, mapping: sequenceMapping)
+                    ],
+                    hidBindings: []
+                ),
+                .init(name: "Finder", mappings: [], hidBindings: []),
+                .init(
+                    name: "MIDI Remote",
+                    mappings: [],
+                    hidBindings: [],
+                    realm: .midi
+                )
+            ],
+            profileName: "MIDI Remote",
+            showsInputOverlay: true,
+            activeRealm: .midi
+        )
+
+        let encoded = try configuration.encodedData()
+        let decoded = try XPdConfiguration.decode(encoded)
+        let standardEntry = try XCTUnwrap(decoded.profiles[0].mappings.first)
+        XCTAssertEqual(standardEntry.mapping.comboMode, .sequence)
+        XCTAssertEqual(encoded, try decoded.encodedData())
+
+        let midiProfile = try XCTUnwrap(decoded.profiles.last { $0.realm == .midi })
+        XCTAssertTrue(midiProfile.mappings.allSatisfy { $0.mapping.comboMode == .hold })
+    }
 }

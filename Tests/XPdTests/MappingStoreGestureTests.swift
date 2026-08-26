@@ -1024,6 +1024,255 @@ final class MappingStoreGestureTests: XCTestCase {
         XCTAssertTrue(executed.isEmpty)
     }
 
+    func testModifierFirstSequenceFiresLayerWithinWindow() {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeStore(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+        store.standardModifierHoldThreshold = 0.5
+        store.setRemoteModifier(.k10, enabled: true)
+        store.update(Mapping(action: .openApplication, command: "K10 tap"), for: .k10, gesture: .tap)
+        store.update(Mapping(action: .openApplication, command: "K8 base"), for: .k8, gesture: .tap)
+        store.update(
+            Mapping(action: .openApplication, command: "sequence", comboMode: .sequence),
+            for: .k8,
+            gesture: .tap,
+            modifierControls: [.k10]
+        )
+
+        // M down past the threshold, M release arms the deferred solo window,
+        // then D press within the window fires the sequence layer once.
+        store.simulateHIDInputForTesting(k10Signature)
+        scheduler.advance(by: 0.5)
+        store.simulateHIDInputForTesting(nil)
+        XCTAssertTrue(executed.isEmpty)
+
+        scheduler.advance(by: 0.1)
+        store.simulateHIDInputForTesting(k8Signature)
+        XCTAssertEqual(executed, ["sequence"])
+
+        store.simulateHIDInputForTesting(nil)
+        scheduler.advance(by: 1)
+        XCTAssertEqual(executed, ["sequence"])
+    }
+
+    func testDestinationFirstSequenceFiresLayerWithinWindow() {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeStore(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+        store.standardModifierHoldThreshold = 0.5
+        store.setRemoteModifier(.k10, enabled: true)
+        store.update(Mapping(action: .openApplication, command: "K8 base"), for: .k8, gesture: .tap)
+        store.update(Mapping(action: .openApplication, command: "K10 tap"), for: .k10, gesture: .tap)
+        store.update(
+            Mapping(action: .openApplication, command: "sequence", comboMode: .sequence),
+            for: .k8,
+            gesture: .tap,
+            modifierControls: [.k10]
+        )
+
+        store.simulateHIDInputForTesting(k8Signature)
+        scheduler.advance(by: 0.1)
+        XCTAssertTrue(executed.isEmpty)
+
+        store.simulateHIDInputForTesting(k10Signature)
+        XCTAssertEqual(executed, ["sequence"])
+
+        store.simulateHIDInputForTesting(nil)
+        scheduler.advance(by: 1)
+        XCTAssertEqual(executed, ["sequence"])
+    }
+
+    func testSequenceWindowExpiryCommitsSoloOnceAndLaterDestinationActsSolo() {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeStore(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+        store.standardModifierHoldThreshold = 0.5
+        store.setRemoteModifier(.k10, enabled: true)
+        store.update(Mapping(action: .openApplication, command: "K10 tap"), for: .k10, gesture: .tap)
+        store.update(Mapping(action: .openApplication, command: "K8 base"), for: .k8, gesture: .tap)
+        store.update(
+            Mapping(action: .openApplication, command: "sequence", comboMode: .sequence),
+            for: .k8,
+            gesture: .tap,
+            modifierControls: [.k10]
+        )
+
+        store.simulateHIDInputForTesting(k10Signature)
+        scheduler.advance(by: 0.5)
+        store.simulateHIDInputForTesting(nil)
+
+        // The solo Base commit is delayed to the window boundary and commits
+        // exactly once.
+        scheduler.advance(by: 0.499)
+        XCTAssertTrue(executed.isEmpty)
+        scheduler.advance(by: 0.001)
+        XCTAssertEqual(executed, ["K10 tap"])
+        scheduler.advance(by: 1)
+        XCTAssertEqual(executed, ["K10 tap"])
+
+        store.simulateHIDInputForTesting(k8Signature)
+        store.simulateHIDInputForTesting(nil)
+        scheduler.advance(by: 0.30)
+
+        XCTAssertEqual(executed, ["K10 tap", "K8 base"])
+    }
+
+    func testDestinationWithinWindowSuppressesSoloCommit() {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeStore(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+        store.standardModifierHoldThreshold = 0.5
+        store.setRemoteModifier(.k10, enabled: true)
+        store.update(Mapping(action: .openApplication, command: "K10 tap"), for: .k10, gesture: .tap)
+        store.update(
+            Mapping(action: .openApplication, command: "sequence", comboMode: .sequence),
+            for: .k8,
+            gesture: .tap,
+            modifierControls: [.k10]
+        )
+
+        store.simulateHIDInputForTesting(k10Signature)
+        scheduler.advance(by: 0.5)
+        store.simulateHIDInputForTesting(nil)
+
+        scheduler.advance(by: 0.2)
+        store.simulateHIDInputForTesting(k8Signature)
+        XCTAssertEqual(executed, ["sequence"])
+
+        // The expired-window commit must not repeat the modifier's solo Base.
+        scheduler.advance(by: 1)
+        XCTAssertEqual(executed, ["sequence"])
+    }
+
+    func testCovisibleHoldPathFiresLayerOnceWithoutSequenceDuplication() {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeStore(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+        store.standardModifierHoldThreshold = 0.5
+        store.setRemoteModifier(.k10, enabled: true)
+        store.update(Mapping(action: .openApplication, command: "K10 tap"), for: .k10, gesture: .tap)
+        store.update(Mapping(action: .openApplication, command: "K8 base"), for: .k8, gesture: .tap)
+        store.update(
+            Mapping(action: .openApplication, command: "sequence", comboMode: .sequence),
+            for: .k8,
+            gesture: .tap,
+            modifierControls: [.k10]
+        )
+
+        // The destination joins while the modifier is still physically held,
+        // so the existing hold routing owns the cycle and the sequence path
+        // never arms a duplicate window.
+        store.simulateHIDInputForTesting(k10Signature)
+        scheduler.advance(by: 0.15)
+        store.simulateHIDInputForTesting(k8Signature)
+        scheduler.advance(by: 0.20)
+        store.simulateHIDInputForTesting(nil)
+        scheduler.advance(by: 0.30)
+
+        XCTAssertEqual(executed, ["sequence"])
+        XCTAssertFalse(executed.contains("K10 tap"))
+        XCTAssertFalse(executed.contains("K8 base"))
+
+        // No deferred window remains to fire anything else afterwards.
+        scheduler.advance(by: 1)
+        XCTAssertEqual(executed, ["sequence"])
+    }
+
+    func testStackedModifiersWithSequenceLayerBehaveAsHold() {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeStore(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+        store.standardModifierHoldThreshold = 0.5
+        store.setRemoteModifier(.k10, enabled: true)
+        store.setRemoteModifier(.k4, enabled: true)
+        store.update(Mapping(action: .openApplication, command: "stacked"), for: .k8, gesture: .tap, modifierControls: [.k10, .k4])
+
+        store.simulateHIDInputForTesting(k10Signature)
+        store.simulateHIDInputForTesting(k4Signature)
+        store.simulateHIDInputForTesting(k8Signature)
+        store.simulateHIDInputForTesting(nil)
+        scheduler.advance(by: 0.30)
+
+        // A two-modifier stack is fail-closed for sequences and keeps the
+        // existing single layered Tap at the release boundary.
+        XCTAssertEqual(executed, ["stacked"])
+
+        scheduler.advance(by: 1)
+        XCTAssertEqual(executed, ["stacked"])
+    }
+
+    func testSubThresholdModifierReleaseStillArmsSequenceWindow() {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeStore(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+        store.standardModifierHoldThreshold = 0.5
+        store.setRemoteModifier(.k10, enabled: true)
+        store.update(Mapping(action: .openApplication, command: "K10 tap"), for: .k10, gesture: .tap)
+        store.update(Mapping(action: .openApplication, command: "sequence", comboMode: .sequence), for: .k8, gesture: .tap, modifierControls: [.k10])
+
+        // A quick K10 tap releases well before the hold threshold, yet it is
+        // still a press+release and must arm the sequence window.
+        store.simulateHIDInputForTesting(k10Signature)
+        scheduler.advance(by: 0.1)
+        store.simulateHIDInputForTesting(nil)
+        XCTAssertTrue(executed.isEmpty)
+
+        scheduler.advance(by: 0.1)
+        store.simulateHIDInputForTesting(k8Signature)
+        XCTAssertEqual(executed, ["sequence"])
+
+        store.simulateHIDInputForTesting(nil)
+        scheduler.advance(by: 1)
+        XCTAssertEqual(executed, ["sequence"])
+    }
+
+    func testSubThresholdSoloReleaseDefersBaseTapToWindowExpiryOnce() {
+        let scheduler = TestScheduler()
+        var executed: [String] = []
+        let store = makeStore(scheduler: scheduler) { mapping, completion in
+            executed.append(mapping.command)
+            completion(.success(mapping.command))
+        }
+        store.standardModifierHoldThreshold = 0.5
+        store.setRemoteModifier(.k10, enabled: true)
+        store.update(Mapping(action: .openApplication, command: "K10 tap"), for: .k10, gesture: .tap)
+        store.update(Mapping(action: .openApplication, command: "sequence", comboMode: .sequence), for: .k8, gesture: .tap, modifierControls: [.k10])
+
+        store.simulateHIDInputForTesting(k10Signature)
+        scheduler.advance(by: 0.1)
+        store.simulateHIDInputForTesting(nil)
+
+        // The deferred solo Base Tap commits exactly once at the window
+        // boundary even though the release was sub-threshold.
+        scheduler.advance(by: 0.499)
+        XCTAssertTrue(executed.isEmpty)
+        scheduler.advance(by: 0.001)
+        XCTAssertEqual(executed, ["K10 tap"])
+        scheduler.advance(by: 1)
+        XCTAssertEqual(executed, ["K10 tap"])
+    }
+
     private let k1Signature = "r6:01 12 00 00 00 00 00"
     private let k3Signature = "r6:00 3E 00 00 00 00 00"
     private let k4Signature = "r6:02 00 00 00 00 00 00"

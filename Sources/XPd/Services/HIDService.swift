@@ -23,6 +23,13 @@ final class HIDService {
     static let productID = 514
     static let exclusiveManagerOpenOptions = IOOptionBits(kIOHIDOptionsTypeSeizeDevice)
 
+    enum ConnectionTransport: Equatable {
+        case usb
+        case bluetooth
+        case other(String)
+    }
+
+    private(set) var connectionTransport: ConnectionTransport?
     private(set) var isConnected = false
     private(set) var hasInputAccess = false
     private(set) var hasExclusiveControl = false
@@ -101,6 +108,9 @@ final class HIDService {
                 service.wheelCenterIsHeld = false
                 service.rawReportTrace.removeAll()
                 service.connectedDevice = device
+                service.connectionTransport = HIDService.transport(
+                    fromTransportProperty: IOHIDDeviceGetProperty(device, kIOHIDTransportKey as CFString)
+                )
                 service.isConnected = true
                 service.refreshBattery(force: true)
                 service.bluetoothBatteryMonitor.startMonitoring()
@@ -319,6 +329,7 @@ final class HIDService {
     private func handleDeviceRemoval() {
         isConnected = false
         connectedDevice = nil
+        connectionTransport = nil
         report6ControlIsActive = false
         wheelCenterIsHeld = false
         rawReportTrace.removeAll()
@@ -332,6 +343,12 @@ final class HIDService {
 
     func simulateDisconnectForTesting() {
         handleDeviceRemoval()
+    }
+
+    /// Internal test seam for exercising transport capture and removal clearing
+    /// without a real HID device.
+    func simulateDeviceMatchForTesting(transportProperty: Any?) {
+        connectionTransport = Self.transport(fromTransportProperty: transportProperty)
     }
 
     /// Internal test seam for exercising report-6 center and wheel-release
@@ -400,5 +417,18 @@ final class HIDService {
         }
 
         return Int(doubleValue)
+    }
+
+    /// Maps the IOKit `kIOHIDTransportKey` property of the matched device to a
+    /// transport. Non-string or empty values stay unknown; any unrecognized
+    /// string is preserved so an unexpected transport is visible, never
+    /// mislabeled.
+    static func transport(fromTransportProperty value: Any?) -> ConnectionTransport? {
+        guard let raw = value as? String, !raw.isEmpty else { return nil }
+        switch raw {
+        case "USB": return .usb
+        case "Bluetooth Low Energy", "Bluetooth": return .bluetooth
+        default: return .other(raw)
+        }
     }
 }
