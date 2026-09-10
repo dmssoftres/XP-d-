@@ -1,4 +1,5 @@
 import AppKit
+import Carbon
 import SwiftUI
 
 enum KeyboardShortcutCaptureFormatter {
@@ -95,6 +96,9 @@ enum KeyboardShortcutCaptureFormatter {
         }
     }
 
+    /// The label shown for the captured key. Explicit labels win, then the
+    /// active layout's unshifted character, and only then AppKit's
+    /// Shift-preserving `charactersIgnoringModifiers` text.
     static func keyLabel(
         for event: NSEvent,
         isFunctionModifierPressed: Bool? = nil,
@@ -106,11 +110,63 @@ enum KeyboardShortcutCaptureFormatter {
         )
         let knownLabel = keyLabel(for: keyCode)
         guard knownLabel.isEmpty == false else {
-            return event.charactersIgnoringModifiers?
-                .uppercased()
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            // AppKit keeps Shift applied in `charactersIgnoringModifiers`, so a
+            // recorded ⇧4 event reports "$". Resolve the physical key's
+            // unshifted character from the active layout first.
+            return unshiftedLayoutLabel(for: keyCode)
+                ?? event.charactersIgnoringModifiers?
+                    .uppercased()
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                ?? ""
         }
         return knownLabel
+    }
+
+    /// The character the active keyboard layout prints for `keyCode` with no
+    /// modifiers held. This names the physical key behind a shifted chord
+    /// (⇧4 rather than $) while still following the user's own layout.
+    private static func unshiftedLayoutLabel(for keyCode: UInt16) -> String? {
+        guard let layout = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue(),
+              let dataPointer = TISGetInputSourceProperty(
+                layout,
+                kTISPropertyUnicodeKeyLayoutData
+              ) else {
+            return nil
+        }
+
+        let layoutData = Unmanaged<CFData>
+            .fromOpaque(dataPointer)
+            .takeUnretainedValue() as Data
+        var deadKeyState: UInt32 = 0
+        var length = 0
+        var characters = [UniChar](repeating: 0, count: 4)
+
+        let status = layoutData.withUnsafeBytes { raw -> OSStatus in
+            guard let layoutPointer = raw.bindMemory(to: UCKeyboardLayout.self).baseAddress else {
+                return OSStatus(paramErr)
+            }
+            return UCKeyTranslate(
+                layoutPointer,
+                keyCode,
+                UInt16(kUCKeyActionDisplay),
+                0,
+                UInt32(LMGetKbdType()),
+                OptionBits(kUCKeyTranslateNoDeadKeysBit),
+                &deadKeyState,
+                characters.count,
+                &length,
+                &characters
+            )
+        }
+        guard status == noErr, length > 0 else { return nil }
+
+        let label = String(utf16CodeUnits: characters, count: length)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let scalar = label.unicodeScalars.first,
+              !(scalar.value < 0x20 || scalar.value == 0x7F) else {
+            return nil
+        }
+        return label.uppercased()
     }
 
     static func keyLabel(for keyCode: UInt16) -> String {

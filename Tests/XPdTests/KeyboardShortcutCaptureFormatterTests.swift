@@ -353,6 +353,57 @@ final class KeyboardShortcutCaptureFormatterTests: XCTestCase {
         XCTAssertEqual(KeyboardShortcutCaptureFormatter.displayString(key: "P", modifiers: editedModifiers), "P")
     }
 
+    func testShiftedDigitAndPunctuationCaptureThePhysicalKeyNotTheShiftedCharacter() throws {
+        // keyCodes for the digit row and the shifted punctuation keys.
+        let keyCodes: [UInt16] = [18, 19, 20, 21, 23, 22, 26, 28, 25, 29, 27, 24, 33, 30, 41, 39, 42, 43, 47, 44]
+
+        for keyCode in keyCodes {
+            let plain = try makeKeyEvent(keyCode: keyCode, modifierFlags: [])
+            let shifted = try makeKeyEvent(
+                keyCode: keyCode,
+                modifierFlags: [.command, .shift],
+                characters: "$",
+                charactersIgnoringModifiers: "$"
+            )
+
+            let plainLabel = KeyboardShortcutCaptureFormatter.keyLabel(for: plain)
+            let shiftedLabel = KeyboardShortcutCaptureFormatter.keyLabel(for: shifted)
+            let shortcut = try XCTUnwrap(
+                KeyboardShortcutCaptureFormatter.shortcut(for: shifted)
+            )
+
+            XCTAssertFalse(plainLabel.isEmpty, "keyCode \(keyCode) resolved no unshifted label")
+            XCTAssertEqual(
+                shiftedLabel,
+                plainLabel,
+                "keyCode \(keyCode) was labelled by its shifted character"
+            )
+            XCTAssertFalse(shiftedLabel.contains("$"), "keyCode \(keyCode) kept the shifted character")
+            XCTAssertEqual(shortcut.modifiers, [.command, .shift])
+            XCTAssertEqual(shortcut.displayString, "⌘⇧\(plainLabel)")
+        }
+    }
+
+    func testShiftedDigitOnAnASCIICapableLayoutRecordsTheDigitItself() throws {
+        let plainFour = try makeKeyEvent(keyCode: 21, modifierFlags: [])
+        guard KeyboardShortcutCaptureFormatter.keyLabel(for: plainFour) == "4" else {
+            throw XCTSkip("The active keyboard layout is not ASCII-capable for the digit row")
+        }
+
+        let event = try makeKeyEvent(
+            keyCode: 21,
+            modifierFlags: [.command, .shift],
+            characters: "$",
+            charactersIgnoringModifiers: "$"
+        )
+
+        XCTAssertEqual(KeyboardShortcutCaptureFormatter.keyLabel(for: event), "4")
+        XCTAssertEqual(
+            KeyboardShortcutCaptureFormatter.shortcut(for: event)?.displayString,
+            "⌘⇧4"
+        )
+    }
+
     func testMappingDecodesLegacyCommandOnlyShortcutWithoutExecutableModel() throws {
         let data = #"{"action":"Keyboard shortcut","command":"⌘P","usesTapApplication":false}"#.data(using: .utf8)!
         let mapping = try JSONDecoder().decode(Mapping.self, from: data)
@@ -390,7 +441,9 @@ final class KeyboardShortcutCaptureFormatterTests: XCTestCase {
 
     private func makeKeyEvent(
         keyCode: UInt16,
-        modifierFlags: NSEvent.ModifierFlags
+        modifierFlags: NSEvent.ModifierFlags,
+        characters: String = "",
+        charactersIgnoringModifiers: String = ""
     ) throws -> NSEvent {
         try XCTUnwrap(NSEvent.keyEvent(
             with: .keyDown,
@@ -399,8 +452,8 @@ final class KeyboardShortcutCaptureFormatterTests: XCTestCase {
             timestamp: 0,
             windowNumber: 0,
             context: nil,
-            characters: "",
-            charactersIgnoringModifiers: "",
+            characters: characters,
+            charactersIgnoringModifiers: charactersIgnoringModifiers,
             isARepeat: false,
             keyCode: keyCode
         ))
