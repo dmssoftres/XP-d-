@@ -2087,6 +2087,29 @@ private struct StandardMappingActionEditor: View {
             Text(commandFieldLabel)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                singleLineCommandField
+                if !binding.wrappedValue.command.isEmpty {
+                    Button(action: clearCommand) {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Clear \(commandFieldLabel.lowercased())")
+                    .help("Clear \(commandFieldLabel.lowercased())")
+                }
+            }
+        }
+    }
+
+    private func clearCommand() {
+        commandBinding.wrappedValue = ""
+        isEditingCommand = false
+    }
+
+    @ViewBuilder
+    private var singleLineCommandField: some View {
+        Group {
             if isEditingCommand {
                 TextField(commandPlaceholder, text: commandBinding)
                     .focused($isCommandFieldFocused)
