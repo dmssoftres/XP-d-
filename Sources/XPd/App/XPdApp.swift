@@ -19,6 +19,20 @@ struct XPdApp: App {
         }))
     }
 
+    /// While a text field has its own typing to undo, ⌘Z undoes that text;
+    /// otherwise it undoes the last key-layout change.
+    @MainActor
+    private static func undoOrForward(store: MappingStore, redo: Bool) {
+        if let textView = NSApp.keyWindow?.firstResponder as? NSTextView,
+           let textUndo = textView.undoManager,
+           redo ? textUndo.canRedo : textUndo.canUndo {
+            _ = redo ? textUndo.redo() : textUndo.undo()
+            return
+        }
+        let didChange = redo ? store.redo() : store.undo()
+        if !didChange { NSSound.beep() }
+    }
+
     var body: some Scene {
         WindowGroup("XP[d]", id: "main") {
             ContentView(store: store)
@@ -26,6 +40,14 @@ struct XPdApp: App {
                 .background(MainWindowRegistrationView(controller: mainWindowController))
         }
         .defaultSize(width: 964, height: 709)
+        .commands {
+            CommandGroup(replacing: .undoRedo) {
+                Button("Undo") { Self.undoOrForward(store: store, redo: false) }
+                    .keyboardShortcut("z")
+                Button("Redo") { Self.undoOrForward(store: store, redo: true) }
+                    .keyboardShortcut("z", modifiers: [.command, .shift])
+            }
+        }
 
         MenuBarExtra {
             MenuBarView(store: store)

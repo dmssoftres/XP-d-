@@ -375,6 +375,20 @@ final class MappingStore {
     /// persisted profile payload or the macOS general pasteboard.
     private(set) var mappingClipboard: MappingClipboardState?
     private(set) var mappingDrag: MappingDragState?
+    /// Session-only undo/redo history of the key layout (never persisted).
+    private var undoStack: [MappingUndoSnapshot] = []
+    private var redoStack: [MappingUndoSnapshot] = []
+    private var undoBaseline: MappingUndoSnapshot?
+    private var isRestoringUndo = false
+    /// Rapid edits to the same field (typing, steppers) within this interval
+    /// collapse into one undo step.
+    var undoCoalescingInterval: TimeInterval = 1.0
+    private var pendingUndoCoalescingKey: String?
+    /// Set for saves caused by hardware changes: re-baseline without a step.
+    private var skipsNextUndoStep = false
+    private var lastUndoCoalescingKey: String?
+    private var lastUndoRecordTime = Date.distantPast
+    static let undoLimit = 50
     var showsInputOverlay: Bool {
         didSet {
             defaults.set(showsInputOverlay, forKey: inputOverlayDefaultsKey)
@@ -472,6 +486,32 @@ final class MappingStore {
 
     static let inputOverlayDurationOptions: [Double] = [2, 4, 6, 8]
     static let defaultStandardModifierHoldThreshold: TimeInterval = 0.5
+
+    /// One undo step: the owner's key layout across every profile, plus which
+    /// profile was active when it was taken. Hardware layouts, device state and
+    /// app settings are deliberately excluded.
+    private struct MappingUndoSnapshot: Equatable {
+        let profileStates: [String: ProfileState]
+        let availableProfiles: [String]
+        let profileName: String
+        let lastStandardProfileName: String?
+        let lastMIDIProfileName: String?
+
+        /// The legacy `hidBindings` slot is ignored: it is migration-only and
+        /// is cleared whenever a profile is saved, which is not an edit.
+        func hasSameLayout(as other: MappingUndoSnapshot) -> Bool {
+            availableProfiles == other.availableProfiles
+                && Self.layout(profileStates) == Self.layout(other.profileStates)
+        }
+
+        private static func layout(_ states: [String: ProfileState]) -> [String: ProfileState] {
+            states.mapValues { state in
+                var state = state
+                state.hidBindings = [:]
+                return state
+            }
+        }
+    }
 
     private struct ProfileState: Codable, Equatable {
         var mappings: [MappingKey: Mapping]
@@ -818,6 +858,7 @@ final class MappingStore {
         if shouldPersistProfilesAfterLoad {
             saveAllProfiles()
         }
+        undoBaseline = makeUndoSnapshot()
 
         hid.onInput = { [weak self] signature in
             self?.handleHIDInput(signature)
@@ -1173,6 +1214,7 @@ final class MappingStore {
         guard activeRealm == .standard, control.isModifierEligible else { return false }
         guard modifierColors[control] != color else { return true }
         modifierColors[control] = color
+        pendingUndoCoalescingKey = "color|\(profileName)|\(control.rawValue)"
         save()
         return true
     }
@@ -1274,6 +1316,7 @@ final class MappingStore {
         } else {
             standardButtonTitles[control] = bounded
         }
+        pendingUndoCoalescingKey = "title|\(profileName)|\(control.rawValue)"
         save()
     }
 
@@ -1324,6 +1367,7 @@ final class MappingStore {
             settings.functionButtons.append(.init(control: control, mapping: mapping))
         }
         midiSettings = settings
+        pendingUndoCoalescingKey = "midiButton|\(profileName)|\(control.rawValue)|\(layer)"
         saveMIDIState()
     }
 
@@ -1357,6 +1401,7 @@ final class MappingStore {
         var settings = midiSettings ?? MIDIProfileSettings()
         if layer == .primary { settings.primaryWheel = mapping } else { settings.functionWheel = mapping }
         midiSettings = settings
+        pendingUndoCoalescingKey = "midiWheel|\(profileName)|\(layer)"
         saveMIDIState()
     }
 
@@ -1376,6 +1421,7 @@ final class MappingStore {
         resetMIDIState(force: true)
         settings.fnControl = control
         midiSettings = settings
+        pendingUndoCoalescingKey = "midiFn|\(profileName)"
         saveMIDIState()
         return true
     }
@@ -1403,6 +1449,7 @@ final class MappingStore {
             return false
         }
         midiSettings = settings
+        pendingUndoCoalescingKey = "midiHold|\(profileName)"
         saveMIDIState()
         return true
     }
@@ -2031,6 +2078,109 @@ final class MappingStore {
         return true
     }
 
+    // MARK: Undo / redo
+
+    var canUndo: Bool { !undoStack.isEmpty }
+    var canRedo: Bool { !redoStack.isEmpty }
+
+    @discardableResult
+    func undo() -> Bool {
+        guard let previous = undoStack.popLast() else { return false }
+        saveActiveProfile()
+        redoStack.append(makeUndoSnapshot())
+        restoreUndoSnapshot(previous)
+        lastActionResult = .success("Undone")
+        return true
+    }
+
+    @discardableResult
+    func redo() -> Bool {
+        guard let next = redoStack.popLast() else { return false }
+        saveActiveProfile()
+        undoStack.append(makeUndoSnapshot())
+        restoreUndoSnapshot(next)
+        lastActionResult = .success("Redone")
+        return true
+    }
+
+    private func makeUndoSnapshot() -> MappingUndoSnapshot {
+        MappingUndoSnapshot(
+            profileStates: profileStates,
+            availableProfiles: availableProfiles,
+            profileName: profileName,
+            lastStandardProfileName: lastStandardProfileName,
+            lastMIDIProfileName: lastMIDIProfileName
+        )
+    }
+
+    /// Called from the single persistence write. Pushes the previous layout
+    /// when it differs from the current one; profile switches alone, device
+    /// state and settings never create a step.
+    private func recordUndoStepIfNeeded() {
+        let coalescingKey = pendingUndoCoalescingKey
+        pendingUndoCoalescingKey = nil
+        let skipsStep = skipsNextUndoStep
+        skipsNextUndoStep = false
+        guard !isRestoringUndo else { return }
+        guard !skipsStep else {
+            undoBaseline = makeUndoSnapshot()
+            return
+        }
+        let current = makeUndoSnapshot()
+        defer { undoBaseline = current }
+        guard let baseline = undoBaseline, !baseline.hasSameLayout(as: current) else { return }
+
+        let now = Date()
+        redoStack.removeAll()
+        if let coalescingKey,
+           coalescingKey == lastUndoCoalescingKey,
+           now.timeIntervalSince(lastUndoRecordTime) < undoCoalescingInterval,
+           !undoStack.isEmpty {
+            lastUndoRecordTime = now
+            return
+        }
+        undoStack.append(baseline)
+        if undoStack.count > Self.undoLimit {
+            undoStack.removeFirst(undoStack.count - Self.undoLimit)
+        }
+        lastUndoCoalescingKey = coalescingKey
+        lastUndoRecordTime = now
+    }
+
+    private func restoreUndoSnapshot(_ snapshot: MappingUndoSnapshot) {
+        cancelLearning()
+        cancelPendingButtonGestures()
+        closeProfileSelector()
+        resetMIDIState(force: true)
+        mappingDrag = nil
+        if let clipboard = mappingClipboard,
+           !snapshot.availableProfiles.contains(clipboard.source.profileName) {
+            mappingClipboard = nil
+        }
+
+        isRestoringUndo = true
+        defer { isRestoringUndo = false }
+        let target = snapshot.availableProfiles.contains(snapshot.profileName) ? snapshot.profileName : "Global"
+        let keptLayer = target == profileName ? selectedMappingModifiers : []
+        profileStates = snapshot.profileStates
+        availableProfiles = snapshot.availableProfiles
+        isReplacingConfiguration = true
+        profileName = target
+        isReplacingConfiguration = false
+        activateProfile(named: target)
+        // Stay on the MOD layer being edited so the reverted change is visible.
+        selectedMappingModifiers = keptLayer
+        lastStandardProfileName = snapshot.lastStandardProfileName.flatMap { availableProfiles.contains($0) ? $0 : nil }
+            ?? lastStandardProfileName.flatMap { availableProfiles.contains($0) ? $0 : nil }
+        lastMIDIProfileName = snapshot.lastMIDIProfileName.flatMap { availableProfiles.contains($0) ? $0 : nil }
+            ?? lastMIDIProfileName.flatMap { availableProfiles.contains($0) ? $0 : nil }
+        if activeRealm == .midi { lastMIDIProfileName = target } else { lastStandardProfileName = target }
+        defaults.set(profileName, forKey: profileNameDefaultsKey)
+        saveAllProfiles()
+        undoBaseline = makeUndoSnapshot()
+        lastUndoCoalescingKey = nil
+    }
+
     private func makeMappingLocation(
         profileName: String?,
         control: RemoteControl,
@@ -2142,7 +2292,10 @@ final class MappingStore {
         modifierControls: Set<RemoteControl> = []
     ) {
         let sanitizedModifiers = sanitizedMappingModifiers(modifierControls, for: control)
-        mappings[MappingKey(control: control, gesture: gesture, modifierControls: sanitizedModifiers)] = mapping
+        let key = MappingKey(control: control, gesture: gesture, modifierControls: sanitizedModifiers)
+        mappings[key] = mapping
+        pendingUndoCoalescingKey = "mapping|\(profileName)|\(control.rawValue)|\(gesture.rawValue)|"
+            + RemoteControl.allCases.filter { sanitizedModifiers.contains($0) }.map(\.rawValue).joined(separator: "+")
         save()
     }
 
@@ -2512,6 +2665,7 @@ final class MappingStore {
         if remoteModifierControls.remove(control) != nil {
             unavailableRemoteModifierControls.remove(control)
             sanitizeSelectedMappingModifier()
+            skipsNextUndoStep = true
             save()
         } else {
             saveHIDBindings()
@@ -5271,6 +5425,7 @@ final class MappingStore {
     }
 
     private func saveAllProfiles() {
+        recordUndoStepIfNeeded()
         guard shouldPersistProfilesAfterLoad else { return }
         do {
             let persisted = PersistedProfiles(
