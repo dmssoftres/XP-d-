@@ -6,7 +6,8 @@ import Foundation
 /// Verified packet: `02 F0 <lo> <hi> 00 00 00 <wheel> 00 00`. `lo` holds
 /// K1…K8 (bit 0 = K1) and the low two bits of `hi` hold K9 and K10, the same
 /// ten-bit order as the wired report-2 `F0` collection. Bit 0x04 of `hi` is
-/// the wheel center; `<wheel>` is `01` or `02` for one detent. A held key
+/// the wheel center; `<wheel>` is `01` for one clockwise detent and `02` for
+/// one counter-clockwise detent (owner-verified 2026-10-21). A held key
 /// repeats its packet about every 45 ms, so unchanged states are dropped.
 /// Battery (`02 F2 …`) and any packet outside this shape produce no events.
 struct ShortcutRemoteDriverModeDecoder {
