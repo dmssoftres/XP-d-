@@ -25,7 +25,7 @@ struct XPdApp: App {
                 .frame(minWidth: 860, minHeight: 640)
                 .background(MainWindowRegistrationView(controller: mainWindowController))
         }
-        .defaultSize(width: 980, height: 650)
+        .defaultSize(width: 964, height: 709)
 
         MenuBarExtra {
             MenuBarView(store: store)
