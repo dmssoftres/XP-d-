@@ -6,6 +6,37 @@ XP[d] can also host typed MIDI profiles and publishes two virtual MIDI sources:
 `XP[d] Control` for DAW Remote mappings and `XP[d] Performance` for notes,
 drums, and chords.
 
+> **Unofficial project.** XP[d] is not made, endorsed or supported by XPPen
+> or Hanvon Ugee. XPPen is a trademark of its owner, used here only to name
+> the hardware this app works with. No XPPen software, firmware or code is
+> included or distributed.
+
+## Requirements and building
+
+- macOS 14 or later, Swift 6 toolchain (Xcode command-line tools).
+- An XPPen ACK05 "Shortcut Remote" (tested: model ACK05-B over Bluetooth and
+  USB). XPPen's own driver is **not** needed; quit or remove it, because it
+  competes with XP[d] for the remote.
+- Build, sign (ad hoc) and launch: `./script/build_and_run.sh`
+- Run the tests: `swift test`
+- On first launch, allow XP[d] in **System Settings › Privacy & Security ›
+  Input Monitoring**, and in **Accessibility** for actions that control other
+  apps. Bluetooth access is requested by macOS.
+
+## Bluetooth driver mode (distinct keys over Bluetooth)
+
+Over Bluetooth the remote normally sends factory keyboard shortcuts in which
+some keys hide others (for example K5 is lost while K10 is held). XP[d]
+therefore switches a connected remote into the remote's own **driver mode**,
+using the same command XPPen's driver sends. In driver mode every K key, the
+wheel and the wheel center arrive as separate signals, so any combination
+works. XP[d] recognises the keys automatically; nothing needs to be learned.
+
+- Happens automatically over Bluetooth; USB behaviour is unchanged.
+- XP[d] switches the remote back to normal when it quits. If XP[d] crashes,
+  switch the remote off and on to restore its normal keys.
+- Protocol details: [docs/ACK05_BLUETOOTH_PROTOCOL.md](docs/ACK05_BLUETOOTH_PROTOCOL.md).
+
 Initial target device:
 - Vendor ID: `10429`
 - Product ID: `514`
@@ -64,7 +95,9 @@ check; the app does not require a ten-key relearn.
 XP[d] does not program the remote. USB is needed only when the remote is not
 already emitting F13–F22 and the official XPPen wired **Store/Save** operation
 must be used; a data-capable cable is required for that vendor operation. No
-undocumented HID programming reports are sent by XP[d].
+undocumented HID programming reports are sent by XP[d]. Over Bluetooth XP[d]
+sends only the remote's driver-mode on/off commands (see
+[Bluetooth driver mode](#bluetooth-driver-mode-distinct-keys-over-bluetooth)).
 
 ## Button gestures
 
@@ -271,7 +304,7 @@ before the current setup is replaced.
 
 ## Remote battery
 
-When the matching Shortcut Remote exposes the verified vendor notification, XP[d] shows its exact battery percentage in the window header and menu-bar submenu. The BLE path is notify-only, requires the target's exact PnP identity, and never sends undocumented commands. If exact telemetry is absent or invalid, the app shows `Battery unavailable` rather than estimating.
+When the matching Shortcut Remote exposes the verified vendor notification, XP[d] shows its exact battery percentage in the window header and menu-bar submenu. The BLE path requires the target's exact PnP identity; apart from the driver-mode on/off commands it only listens. If exact telemetry is absent or invalid, the app shows `Battery unavailable` rather than estimating.
 
 ## Development permissions and relaunches
 
@@ -282,3 +315,11 @@ Accessibility and Input Monitoring approval are tied to the app's code signature
 ```
 
 This stops XP[d], resets its Accessibility and Input Monitoring records, opens the Accessibility settings page, and launches the already-built bundle so it can be approved. Approve XP[d] in Accessibility, then use `./script/build_and_run.sh --relaunch` to restart the same bundle without rebuilding or changing its signature. The older `--reset-input-monitoring` mode remains available when only Input Monitoring needs to be reset.
+
+## Licence
+
+XP[d] is source-available under the
+[PolyForm Noncommercial License 1.0.0](LICENSE): anyone may use, study, change
+and share it for any non-commercial purpose. Selling it, or using it in a
+commercial product or service, is not allowed without separate permission.
+
