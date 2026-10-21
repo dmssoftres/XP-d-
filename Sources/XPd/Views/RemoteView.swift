@@ -6,14 +6,24 @@ struct RemoteView: View {
 
     @State private var dropTargetControl: RemoteControl?
     @State private var pendingDrop: MappingDropProposal?
+    @State private var chipDrag: ChipDrag?
+    @State private var keyFrames: [RemoteControl: CGRect] = [:]
+
+    /// A chip being dragged inside the remote picture. This is an in-view
+    /// drag (not a macOS drag session) so the pointer can show a hand for
+    /// move and the copy pointer while Command is held.
+    private struct ChipDrag {
+        let token: String
+        let preview: AnyView
+        var location: CGPoint
+        var isCopy: Bool
+    }
 
     var body: some View {
         device
             .padding(.top, 18)
             .confirmationDialog(
-                pendingDrop.map {
-                    "\($0.destination.location.control.rawValue) already has a \($0.destination.location.gesture.rawValue) action"
-                } ?? "This key already has an action",
+                pendingDrop.map(dropChoiceTitle) ?? "This key already has an action",
                 isPresented: dropChoiceIsPresented,
                 titleVisibility: .visible,
                 presenting: pendingDrop
@@ -27,8 +37,10 @@ struct RemoteView: View {
                     store.cancelMappingDrag()
                 }
             } message: { proposal in
-                Text(proposal.canSwap
-                    ? "Swap exchanges the two actions. Replace moves this action and erases the one on \(proposal.destination.location.control.rawValue)."
+                Text(proposal.isCopy
+                    ? "Replace erases the action on \(proposal.destinationControl.rawValue) and puts a copy there."
+                    : proposal.canSwap
+                    ? "Swap exchanges the actions. Replace moves this action and erases the one on \(proposal.destinationControl.rawValue)."
                     : "The other action has an incomplete application target, so it cannot be swapped. Replace erases it.")
             }
     }
@@ -54,6 +66,25 @@ struct RemoteView: View {
                 .position(x: 127, y: 326)
         }
         .frame(width: 260, height: 491)
+        .coordinateSpace(name: remoteSpace)
+        .onPreferenceChange(KeyFramePreferenceKey.self) { keyFrames = $0 }
+        .overlay(alignment: .topLeading) {
+            if let chipDrag {
+                chipDrag.preview
+                    .overlay(alignment: .topTrailing) {
+                        if chipDrag.isCopy {
+                            Image(systemName: "plus.circle.fill")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(.white, .green)
+                                .offset(x: 6, y: -6)
+                        }
+                    }
+                    .scaleEffect(1.25)
+                    .shadow(color: .black.opacity(0.6), radius: 4, y: 2)
+                    .position(chipDrag.location)
+                    .allowsHitTesting(false)
+            }
+        }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Shortcut Remote")
     }
@@ -416,15 +447,6 @@ struct RemoteView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 }
 
-                if !routes.isEmpty {
-                    applicationRouteStrip(
-                        routeSelection.visible,
-                        hiddenCount: routeSelection.hiddenCount,
-                        height: height,
-                        reservesBottomRow: !nonApplicationRoutes.isEmpty
-                    )
-                }
-
             }
             .frame(maxWidth: .infinity, minHeight: height, maxHeight: height)
             .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
@@ -433,9 +455,23 @@ struct RemoteView: View {
             selected: store.selectedControl == control,
             live: store.liveControl == control
         ))
+        // Chips sit above the button (matching HardwareKeyStyle's 5 pt label
+        // inset) so each one can be dragged onto another key.
+        .overlay {
+            if !routes.isEmpty {
+                applicationRouteStrip(
+                    control,
+                    routeSelection.visible,
+                    hiddenCount: routeSelection.hiddenCount,
+                    height: height,
+                    reservesBottomRow: !nonApplicationRoutes.isEmpty
+                )
+                .padding(.horizontal, 5)
+            }
+        }
         .overlay(alignment: .bottomTrailing) {
             if !nonApplicationRoutes.isEmpty {
-                standardNonApplicationMarkerStrip(nonApplicationMarkerSelection)
+                standardNonApplicationMarkerStrip(control, nonApplicationMarkerSelection)
             }
         }
         .overlay(alignment: .topLeading) {
@@ -487,13 +523,22 @@ struct RemoteView: View {
         .overlay {
             if dropTargetControl == control {
                 RoundedRectangle(cornerRadius: 13, style: .continuous)
-                    .strokeBorder(Color.accentColor, lineWidth: 2.5)
+                    .strokeBorder(chipDrag?.isCopy == true ? Color.green : Color.accentColor, lineWidth: 2.5)
                     .allowsHitTesting(false)
             }
         }
+        .background {
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: KeyFramePreferenceKey.self,
+                    value: [control: proxy.frame(in: .named(remoteSpace))]
+                )
+            }
+        }
+        // Inspector action cards still use a macOS drag session.
         .dropDestination(for: String.self) { tokens, _ in
             guard let token = tokens.first else { return false }
-            switch store.dropMapping(token: token, onto: control) {
+            switch store.dropMapping(token: token, onto: control, copy: NSEvent.modifierFlags.contains(.command)) {
             case .moved:
                 store.selectedControl = control
                 return true
@@ -528,16 +573,90 @@ struct RemoteView: View {
         guard let proposal = pendingDrop else { return }
         pendingDrop = nil
         if store.resolveMappingDrop(proposal, swap: swap) {
-            store.selectedControl = proposal.destination.location.control
+            store.selectedControl = proposal.destinationControl
+        }
+    }
+
+    private func dropChoiceTitle(_ proposal: MappingDropProposal) -> String {
+        let gestures = proposal.occupiedGestures.map(\.rawValue).joined(separator: " and ")
+        let layer = proposal.drag.modifierControls.isEmpty
+            ? ""
+            : RemoteControl.allCases.filter { proposal.drag.modifierControls.contains($0) }
+                .map(\.rawValue).joined(separator: "+") + " "
+        return "\(proposal.destinationControl.rawValue) already has a \(layer)\(gestures) action"
+    }
+
+    /// Lets a chip on a key be dragged onto another key. A plain click still
+    /// selects the key underneath.
+    private func draggableChip<Content: View>(
+        _ control: RemoteControl,
+        @ViewBuilder content: () -> Content,
+        begin: @escaping () -> String?
+    ) -> some View {
+        let chip = content()
+        return chip
+            .contentShape(Rectangle())
+            .onTapGesture { store.selectedControl = control }
+            .gesture(
+                DragGesture(minimumDistance: 3, coordinateSpace: .named(remoteSpace))
+                    .onChanged { value in
+                        let isCopy = NSEvent.modifierFlags.contains(.command)
+                        if chipDrag == nil {
+                            guard let token = begin() else { return }
+                            chipDrag = ChipDrag(token: token, preview: AnyView(chip), location: value.location, isCopy: isCopy)
+                        }
+                        chipDrag?.location = value.location
+                        chipDrag?.isCopy = isCopy
+                        dropTargetControl = keyFrames.first { $0.value.contains(value.location) }?.key
+                        (isCopy ? NSCursor.dragCopy : NSCursor.closedHand).set()
+                    }
+                    .onEnded { value in
+                        finishChipDrag(at: value.location)
+                    }
+            )
+            .onHover { inside in
+                guard chipDrag == nil else { return }
+                (inside ? NSCursor.openHand : NSCursor.arrow).set()
+            }
+            .help("Drag onto another K button to move this action. Hold ⌘ to copy it.")
+    }
+
+    private func finishChipDrag(at location: CGPoint) {
+        defer {
+            chipDrag = nil
+            dropTargetControl = nil
+            NSCursor.arrow.set()
+        }
+        guard let drag = chipDrag,
+              let target = keyFrames.first(where: { $0.value.contains(location) })?.key else {
+            store.cancelMappingDrag()
+            return
+        }
+        let isCopy = NSEvent.modifierFlags.contains(.command)
+        switch store.dropMapping(token: drag.token, onto: target, copy: isCopy) {
+        case .moved:
+            store.selectedControl = target
+        case .needsChoice(let proposal):
+            pendingDrop = proposal
+        case .rejected:
+            store.cancelMappingDrag()
         }
     }
 
     private func standardNonApplicationMarkerStrip(
+        _ control: RemoteControl,
         _ selection: StandardNonApplicationMarkerDisplaySelection
     ) -> some View {
         HStack(spacing: standardNonApplicationMarkerGroupSpacing) {
             ForEach(selection.visible) { group in
-                standardNonApplicationMarkerGroup(group)
+                draggableChip(control) {
+                    standardNonApplicationMarkerGroup(group)
+                } begin: {
+                    store.beginNonApplicationMarkerDrag(
+                        from: control,
+                        modifierControls: Set(group.modifierControls)
+                    )
+                }
             }
 
             if selection.hiddenCount > 0 {
@@ -566,12 +685,14 @@ struct RemoteView: View {
         .overlay {
             Capsule()
                 .stroke(.white.opacity(0.16), lineWidth: 0.5)
+                .allowsHitTesting(false)
         }
+        // Clicks on the rail outside a chip still select the key.
+        .onTapGesture { store.selectedControl = control }
         .frame(width: standardNonApplicationMarkerRailWidth, height: 18, alignment: .bottomTrailing)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
         .padding(.bottom, 3)
         .padding(.trailing, standardNonApplicationMarkerTrailingInset)
-        .allowsHitTesting(false)
         .accessibilityHidden(true)
     }
 
@@ -629,6 +750,7 @@ struct RemoteView: View {
     }
 
     private func applicationRouteStrip(
+        _ control: RemoteControl,
         _ routes: [StandardApplicationRoute],
         hiddenCount: Int,
         height: CGFloat,
@@ -637,17 +759,17 @@ struct RemoteView: View {
         ZStack {
             VStack(spacing: 0) {
                 HStack(spacing: 0) {
-                    applicationRouteSlot(route(at: 0, in: routes))
+                    applicationRouteSlot(control, route(at: 0, in: routes))
                     Spacer(minLength: 0)
-                    applicationRouteSlot(route(at: 1, in: routes))
+                    applicationRouteSlot(control, route(at: 1, in: routes))
                 }
 
                 Spacer(minLength: 0)
 
                 HStack(spacing: 0) {
-                    applicationRouteSlot(route(at: 2, in: routes))
+                    applicationRouteSlot(control, route(at: 2, in: routes))
                     Spacer(minLength: 0)
-                    applicationRouteSlot(route(at: 3, in: routes))
+                    applicationRouteSlot(control, route(at: 3, in: routes))
                 }
             }
             .padding(.horizontal, 3)
@@ -667,7 +789,6 @@ struct RemoteView: View {
             }
         }
         .frame(maxWidth: .infinity, minHeight: height, maxHeight: height)
-        .allowsHitTesting(false)
         .accessibilityHidden(true)
     }
 
@@ -677,14 +798,19 @@ struct RemoteView: View {
     }
 
     @ViewBuilder
-    private func applicationRouteSlot(_ route: StandardApplicationRoute?) -> some View {
+    private func applicationRouteSlot(_ control: RemoteControl, _ route: StandardApplicationRoute?) -> some View {
         let width: CGFloat = (route?.isBase == false) ? 29 : 18
         if let route {
-            applicationRouteIndicator(route)
-                .frame(width: width, height: 18)
+            draggableChip(control) {
+                applicationRouteIndicator(route)
+                    .frame(width: width, height: 18)
+            } begin: {
+                store.beginApplicationRouteDrag(from: control, route: route)
+            }
         } else {
             Color.clear
                 .frame(width: width, height: 18)
+                .allowsHitTesting(false)
         }
     }
 
@@ -854,6 +980,16 @@ enum StandardNonApplicationMarkerBadge: Equatable {
         case .hold: return "H"
         case .sequence: return "S"
         }
+    }
+}
+
+private let remoteSpace = "XPd.remote"
+
+private struct KeyFramePreferenceKey: PreferenceKey {
+    static let defaultValue: [RemoteControl: CGRect] = [:]
+
+    static func reduce(value: inout [RemoteControl: CGRect], nextValue: () -> [RemoteControl: CGRect]) {
+        value.merge(nextValue()) { $1 }
     }
 }
 
