@@ -344,6 +344,18 @@ final class MappingStore {
     /// persisted independently of the shared device-level hardware layout so
     /// enabling it cannot rewrite MIDI's physical input map.
     private(set) var usesStandardF13F22Preset = false
+    /// Owner option, off by default: switch Standard profiles when an app
+    /// assigned to one comes to the front. Local setting; not exported.
+    var autoSwitchProfilesEnabled = false {
+        didSet {
+            guard autoSwitchProfilesEnabled != oldValue else { return }
+            defaults.set(autoSwitchProfilesEnabled, forKey: autoSwitchProfilesDefaultsKey)
+        }
+    }
+    @ObservationIgnored private let workspaceActivationObserver = MIDIShutdownObserver()
+    /// An app activation that arrived while a remote button was held; it is
+    /// applied after release so the held gesture is not cancelled mid-press.
+    @ObservationIgnored private var pendingAutoSwitchBundleID: String?
     /// Mirrors `HIDService`: true only after the remote acknowledged driver
     /// mode. While true, K1–K10 resolve through the verified driver-mode bit
     /// order in both realms instead of the learned layout.
@@ -521,6 +533,8 @@ final class MappingStore {
         var modifierColors: [RemoteControl: ModifierColor]
         var realm: ProfileRealm
         var midiSettings: MIDIProfileSettings?
+        /// Bundle IDs that activate this Standard profile (auto-switch).
+        var autoSwitchApplications: [String]
 
         init(
             mappings: [MappingKey: Mapping],
@@ -529,7 +543,8 @@ final class MappingStore {
             remoteModifierControls: Set<RemoteControl> = [],
             modifierColors: [RemoteControl: ModifierColor] = [:],
             realm: ProfileRealm = .standard,
-            midiSettings: MIDIProfileSettings? = nil
+            midiSettings: MIDIProfileSettings? = nil,
+            autoSwitchApplications: [String] = []
         ) {
             self.mappings = mappings
             self.hidBindings = hidBindings
@@ -538,6 +553,7 @@ final class MappingStore {
             self.modifierColors = modifierColors
             self.realm = realm
             self.midiSettings = midiSettings
+            self.autoSwitchApplications = autoSwitchApplications
         }
 
         init(from decoder: Decoder) throws {
@@ -549,10 +565,12 @@ final class MappingStore {
             modifierColors = try container.decodeIfPresent([RemoteControl: ModifierColor].self, forKey: .modifierColors) ?? [:]
             realm = try container.decodeIfPresent(ProfileRealm.self, forKey: .realm) ?? .standard
             midiSettings = try container.decodeIfPresent(MIDIProfileSettings.self, forKey: .midiSettings)
+            autoSwitchApplications = try container.decodeIfPresent([String].self, forKey: .autoSwitchApplications) ?? []
         }
 
         private enum CodingKeys: String, CodingKey {
             case mappings, hidBindings, standardButtonTitles, remoteModifierControls, modifierColors, realm, midiSettings
+            case autoSwitchApplications
         }
 
         /// Current persisted profile payloads deliberately omit the legacy
@@ -566,6 +584,9 @@ final class MappingStore {
             try container.encode(modifierColors, forKey: .modifierColors)
             try container.encode(realm, forKey: .realm)
             try container.encodeIfPresent(midiSettings, forKey: .midiSettings)
+            if !autoSwitchApplications.isEmpty {
+                try container.encode(autoSwitchApplications, forKey: .autoSwitchApplications)
+            }
         }
     }
 
@@ -658,6 +679,7 @@ final class MappingStore {
     private let wheelSensitivityDefaultsKey = "XPd.wheelSensitivity.v1"
     private let standardModifierHoldThresholdDefaultsKey = "XPd.standardModifierHoldThreshold.v1"
     private let standardF13F22PresetDefaultsKey = "XPd.standardF13F22Preset.v1"
+    private let autoSwitchProfilesDefaultsKey = "XPd.autoSwitchProfiles.v1"
     private var profileStates: [String: ProfileState] = [:]
     private var learningAllCandidate: [RemoteControl: String] = [:]
     private var learningAllCaptured: [RemoteControl: String] = [:]
@@ -732,7 +754,13 @@ final class MappingStore {
     /// generic release boundary arrives. Report 2 is a complete state
     /// snapshot and keeps its active set until the next snapshot or
     /// F0/all-zero boundary.
-    private var activeStandardControls: Set<RemoteControl> = []
+    private var activeStandardControls: Set<RemoteControl> = [] {
+        didSet {
+            guard activeStandardControls.isEmpty, pendingAutoSwitchBundleID != nil else { return }
+            // Deferred so the released gesture is dispatched first.
+            Task { @MainActor [weak self] in self?.applyPendingAutoSwitch() }
+        }
+    }
     private var activeStandardReport6Controls: Set<RemoteControl> = []
     private var activeStandardReport2Controls: Set<RemoteControl> = []
     private var activeStandardKeyboardModifiers: [RemoteControl: Set<KeyboardShortcut.Modifier>] = [:]
@@ -827,6 +855,7 @@ final class MappingStore {
         self.remoteFunctionKeyProvider = remoteFunctionKeyProvider
         self.remoteKeyProvider = remoteKeyProvider
 
+        autoSwitchProfilesEnabled = defaults.bool(forKey: autoSwitchProfilesDefaultsKey)
         let savedProfile = defaults.string(forKey: profileNameDefaultsKey)
         showsInputOverlay = defaults.object(forKey: inputOverlayDefaultsKey) as? Bool ?? true
         let savedDuration = defaults.object(forKey: inputOverlayDurationDefaultsKey) as? Double ?? 4
@@ -859,6 +888,19 @@ final class MappingStore {
             saveAllProfiles()
         }
         undoBaseline = makeUndoSnapshot()
+        if startHardware {
+            workspaceActivationObserver.token = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.didActivateApplicationNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] notification in
+                let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+                let bundleID = app?.bundleIdentifier
+                MainActor.assumeIsolated {
+                    self?.frontmostApplicationChanged(bundleIdentifier: bundleID)
+                }
+            }
+        }
 
         hid.onInput = { [weak self] signature in
             self?.handleHIDInput(signature)
@@ -909,6 +951,9 @@ final class MappingStore {
     deinit {
         if let token = terminationObserver.token {
             NotificationCenter.default.removeObserver(token)
+        }
+        if let token = workspaceActivationObserver.token {
+            NSWorkspace.shared.notificationCenter.removeObserver(token)
         }
         guard midiShutdownGate.request() else { return }
         let previous = midiCommandTail.task
@@ -2078,6 +2123,88 @@ final class MappingStore {
         return true
     }
 
+    // MARK: Auto-switch profile by app
+
+    enum AutoSwitchAssignmentResult: Equatable {
+        case added
+        case alreadyAssigned(profile: String)
+        case invalid
+    }
+
+    func autoSwitchApplications(for profile: String) -> [String] {
+        profileStates[profile]?.autoSwitchApplications ?? []
+    }
+
+    /// The Standard profile an app is assigned to, if any (case-insensitive).
+    func autoSwitchProfile(forApplication bundleID: String) -> String? {
+        let key = bundleID.lowercased()
+        return availableProfiles.first { name in
+            guard let state = profileStates[name], state.realm == .standard else { return false }
+            return state.autoSwitchApplications.contains { $0.lowercased() == key }
+        }
+    }
+
+    @discardableResult
+    func addAutoSwitchApplication(_ rawBundleID: String, to profile: String) -> AutoSwitchAssignmentResult {
+        let bundleID = rawBundleID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !bundleID.isEmpty,
+              bundleID.count <= XPdConfiguration.maximumBundleIdentifierLength,
+              bundleID.lowercased() != Bundle.main.bundleIdentifier?.lowercased(),
+              profileStates[profile]?.realm == .standard else {
+            return .invalid
+        }
+        if let owner = autoSwitchProfile(forApplication: bundleID) {
+            return .alreadyAssigned(profile: owner)
+        }
+        saveActiveProfile()
+        guard var state = profileStates[profile] else { return .invalid }
+        state.autoSwitchApplications.append(bundleID)
+        profileStates[profile] = state
+        saveAllProfiles()
+        return .added
+    }
+
+    func removeAutoSwitchApplication(_ bundleID: String, from profile: String) {
+        let key = bundleID.lowercased()
+        guard profileStates[profile]?.autoSwitchApplications.contains(where: { $0.lowercased() == key }) == true else {
+            return
+        }
+        saveActiveProfile()
+        guard var state = profileStates[profile] else { return }
+        state.autoSwitchApplications.removeAll { $0.lowercased() == key }
+        profileStates[profile] = state
+        saveAllProfiles()
+    }
+
+    /// Called when another app comes to the front. Switches only when the
+    /// option is on, the app belongs to a Standard profile, and XP[d] is not
+    /// MIDI-locked, learning, or showing the wheel profile selector. Apps in
+    /// no list leave the current profile unchanged (owner decision).
+    func frontmostApplicationChanged(bundleIdentifier: String?) {
+        guard autoSwitchProfilesEnabled, let bundleIdentifier else { return }
+        guard activeStandardControls.isEmpty else {
+            pendingAutoSwitchBundleID = bundleIdentifier
+            return
+        }
+        pendingAutoSwitchBundleID = nil
+        guard bundleIdentifier.lowercased() != Bundle.main.bundleIdentifier?.lowercased(),
+              activeRealm == .standard, !midiLocked,
+              learningControl == nil, !isLearningAll, !isProfileSelectorVisible,
+              let target = autoSwitchProfile(forApplication: bundleIdentifier),
+              target != profileName else { return }
+        guard selectProfile(target) else { return }
+        inputOverlay.showStatusNotice(
+            title: "PROFILE",
+            message: target,
+            systemImage: "arrow.triangle.2.circlepath"
+        )
+    }
+
+    private func applyPendingAutoSwitch() {
+        guard let bundleID = pendingAutoSwitchBundleID, activeStandardControls.isEmpty else { return }
+        frontmostApplicationChanged(bundleIdentifier: bundleID)
+    }
+
     // MARK: Undo / redo
 
     var canUndo: Bool { !undoStack.isEmpty }
@@ -2405,6 +2532,34 @@ final class MappingStore {
         activateProfile(named: name)
         activeRealm = realm
         midiLocked = realm == .midi
+        defaults.set(profileName, forKey: profileNameDefaultsKey)
+        saveAllProfiles()
+        return name
+    }
+
+    /// Creates a new profile as a full copy of an existing one (keys, MOD
+    /// layers, titles, colours, MIDI settings) and activates it. The app list
+    /// is not copied, because one app may switch to only one profile.
+    @discardableResult
+    func duplicateProfile(named sourceName: String, as rawName: String) throws -> String {
+        guard availableProfiles.contains(sourceName), profileStates[sourceName] != nil else {
+            throw ProfileError.profileNotFound(sourceName)
+        }
+        let name = try validatedNewProfileName(rawName)
+        cancelLearning()
+        cancelPendingButtonGestures()
+        closeProfileSelector()
+        resetMIDIState(force: true)
+        saveActiveProfile()
+        guard var copy = profileStates[sourceName] else { throw ProfileError.profileNotFound(sourceName) }
+        copy.hidBindings = [:]
+        copy.autoSwitchApplications = []
+        profileStates[name] = copy
+        availableProfiles.append(name)
+        isReplacingConfiguration = true
+        profileName = name
+        isReplacingConfiguration = false
+        activateProfile(named: name)
         defaults.set(profileName, forKey: profileNameDefaultsKey)
         saveAllProfiles()
         return name
@@ -3190,7 +3345,8 @@ final class MappingStore {
                 midiSettings: state.midiSettings,
                 standardButtonTitles: Self.standardButtonTitleEntries(from: state.standardButtonTitles),
                 remoteModifierControls: state.remoteModifierControls,
-                modifierColors: Self.modifierColorEntries(from: state.modifierColors)
+                modifierColors: Self.modifierColorEntries(from: state.modifierColors),
+                autoSwitchApplications: state.autoSwitchApplications
             )
         }
         let configuration = XPdConfiguration(
@@ -3272,7 +3428,8 @@ final class MappingStore {
                 remoteModifierControls: profile.remoteModifierControls,
                 modifierColors: importedModifierColors,
                 realm: profile.realm,
-                midiSettings: profile.midiSettings
+                midiSettings: profile.midiSettings,
+                autoSwitchApplications: profile.autoSwitchApplications
             )
         }
 
@@ -5360,7 +5517,11 @@ final class MappingStore {
             remoteModifierControls: activeRealm == .standard ? remoteModifierControls : [],
             modifierColors: activeRealm == .standard ? modifierColors : [:],
             realm: activeRealm,
-            midiSettings: activeRealm == .midi ? midiSettings : nil
+            midiSettings: activeRealm == .midi ? midiSettings : nil,
+            // Not live-edited state: kept from the stored profile.
+            autoSwitchApplications: activeRealm == .standard
+                ? profileStates[name]?.autoSwitchApplications ?? []
+                : []
         )
     }
 
@@ -5968,7 +6129,8 @@ final class MappingStore {
                         XPdConfiguration.StandardButtonTitleEntry(control: $0.key, title: $0.value)
                     },
                     remoteModifierControls: profile.state.remoteModifierControls,
-                    modifierColors: Self.modifierColorEntries(from: profile.state.modifierColors)
+                    modifierColors: Self.modifierColorEntries(from: profile.state.modifierColors),
+                    autoSwitchApplications: profile.state.autoSwitchApplications
                 )
             },
             profileName: persisted.activeProfileName,

@@ -1,4 +1,6 @@
+import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     let store: MappingStore
@@ -121,6 +123,17 @@ struct ContentView: View {
                 .background(.quaternary, in: Capsule())
                 .frame(height: 24)
                 .accessibilityLabel("Active workspace: \(store.activeRealm == .midi ? "MIDI Lock" : "Standard")")
+
+            if store.autoSwitchProfilesEnabled, store.activeRealm == .standard {
+                Label("Auto", systemImage: "arrow.triangle.2.circlepath")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 4)
+                    .background(.quaternary, in: Capsule())
+                    .frame(height: 24)
+                    .help("Profiles switch automatically by app (Manage profiles to change)")
+            }
 
             Button {
                 _ = store.toggleWorkspace()
@@ -309,6 +322,7 @@ private struct ProfileManagementView: View {
     @State private var profileBeingRenamed: String?
     @State private var renamedProfileName = ""
     @State private var profileToDelete: String?
+    @State private var duplicateSource: String?
     @State private var errorMessage: String?
 
     var body: some View {
@@ -323,6 +337,17 @@ private struct ProfileManagementView: View {
                 }
                 Spacer()
                 Button("Done") { dismiss() }
+            }
+
+            VStack(alignment: .leading, spacing: 3) {
+                Toggle("Switch profiles automatically by app", isOn: Binding(
+                    get: { store.autoSwitchProfilesEnabled },
+                    set: { store.autoSwitchProfilesEnabled = $0 }
+                ))
+                Text("Give a Standard profile its apps with the app button. Apps in no list keep the current profile; MIDI Lock is never left.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             List {
@@ -346,6 +371,19 @@ private struct ProfileManagementView: View {
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
+                        if store.profileRealm(for: profile) == .standard, profileBeingRenamed != profile {
+                            AutoSwitchAppsButton(store: store, profile: profile)
+                        }
+                        if profileBeingRenamed != profile {
+                            Button {
+                                beginDuplicating(profile)
+                            } label: {
+                                Image(systemName: "plus.square.on.square")
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Duplicate \(profile) as a new profile")
+                            .accessibilityLabel("Duplicate \(profile)")
+                        }
                         if profile == "Global" {
                             Text("Required")
                                 .font(.caption2)
@@ -390,22 +428,40 @@ private struct ProfileManagementView: View {
             .listStyle(.inset)
             .frame(minHeight: 150)
 
+            if let duplicateSource {
+                HStack(spacing: 6) {
+                    Label("Copy of \(duplicateSource) — all its keys, without its apps", systemImage: "plus.square.on.square")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button {
+                        self.duplicateSource = nil
+                        newProfileName = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Cancel duplicating")
+                }
+            }
+
             HStack(spacing: 8) {
                 TextField("New profile name", text: $newProfileName)
                     .textFieldStyle(.roundedBorder)
                     .onSubmit(addProfile)
-                Picker("Realm", selection: $newProfileRealm) {
-                    ForEach(ProfileRealm.allCases) { realm in
-                        Text(realm == .midi ? "MIDI" : "Standard").tag(realm)
+                if duplicateSource == nil {
+                    Picker("Realm", selection: $newProfileRealm) {
+                        ForEach(ProfileRealm.allCases) { realm in
+                            Text(realm == .midi ? "MIDI" : "Standard").tag(realm)
+                        }
                     }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
                 }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                Button("Add", action: addProfile)
+                Button(duplicateSource == nil ? "Add" : "Duplicate", action: addProfile)
                     .disabled(newProfileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
 
-            if newProfileRealm == .midi {
+            if newProfileRealm == .midi, duplicateSource == nil {
                 Picker("MIDI template", selection: $midiProfileTemplate) {
                     ForEach(MIDIProfileTemplate.allCases) { template in
                         Text(template.displayName).tag(template)
@@ -422,7 +478,7 @@ private struct ProfileManagementView: View {
             }
         }
         .padding(20)
-        .frame(width: 420, height: 430)
+        .frame(width: 460, height: 500)
         .confirmationDialog(
             "Delete \(profileToDelete ?? "profile")?",
             isPresented: Binding(
@@ -444,9 +500,19 @@ private struct ProfileManagementView: View {
         }
     }
 
+    private func beginDuplicating(_ profile: String) {
+        cancelRenaming()
+        duplicateSource = profile
+        newProfileName = String("\(profile) copy".prefix(40))
+        errorMessage = nil
+    }
+
     private func addProfile() {
         do {
-            if newProfileRealm == .midi {
+            if let duplicateSource {
+                _ = try store.duplicateProfile(named: duplicateSource, as: newProfileName)
+                self.duplicateSource = nil
+            } else if newProfileRealm == .midi {
                 _ = try store.addMIDIProfile(named: newProfileName, template: midiProfileTemplate)
             } else {
                 _ = try store.addProfile(named: newProfileName)
@@ -478,5 +544,148 @@ private struct ProfileManagementView: View {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+}
+
+/// Small per-profile control: icons of the assigned apps plus a popover to
+/// add (running app or Choose…) and remove them.
+private struct AutoSwitchAppsButton: View {
+    let store: MappingStore
+    let profile: String
+    @State private var isEditing = false
+    @State private var message: String?
+
+    private var apps: [String] { store.autoSwitchApplications(for: profile) }
+
+    var body: some View {
+        Button {
+            message = nil
+            isEditing = true
+        } label: {
+            HStack(spacing: 2) {
+                ForEach(apps.prefix(3), id: \.self) { bundleID in
+                    Image(nsImage: AppIdentity.icon(for: bundleID))
+                        .resizable()
+                        .frame(width: 14, height: 14)
+                }
+                if apps.count > 3 {
+                    Text("+\(apps.count - 3)").font(.caption2)
+                }
+                Image(systemName: "app.badge")
+            }
+        }
+        .buttonStyle(.borderless)
+        .help("Apps that switch to \(profile)")
+        .accessibilityLabel("Apps for \(profile)")
+        .popover(isPresented: $isEditing, arrowEdge: .bottom) {
+            editor
+        }
+    }
+
+    private var editor: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Apps that switch to \(profile)")
+                .font(.headline)
+            if apps.isEmpty {
+                Text("No apps yet.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(apps, id: \.self) { bundleID in
+                HStack(spacing: 6) {
+                    Image(nsImage: AppIdentity.icon(for: bundleID))
+                        .resizable()
+                        .frame(width: 18, height: 18)
+                    Text(AppIdentity.name(for: bundleID))
+                    Spacer()
+                    Button {
+                        store.removeAutoSwitchApplication(bundleID, from: profile)
+                    } label: {
+                        Image(systemName: "minus.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Remove \(AppIdentity.name(for: bundleID))")
+                }
+            }
+            HStack {
+                Menu("Add running app") {
+                    ForEach(AppIdentity.runningApplications(), id: \.bundleID) { app in
+                        Button(app.name) { add(app.bundleID) }
+                    }
+                }
+                .fixedSize()
+                Button("Choose…", action: chooseApplication)
+            }
+            if let message {
+                Label(message, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(14)
+        .frame(width: 300)
+    }
+
+    private func add(_ bundleID: String) {
+        switch store.addAutoSwitchApplication(bundleID, to: profile) {
+        case .added:
+            message = nil
+        case let .alreadyAssigned(owner):
+            message = "\(AppIdentity.name(for: bundleID)) already switches to \(owner). Remove it there first."
+        case .invalid:
+            message = "That app cannot be used for switching."
+        }
+    }
+
+    private func chooseApplication() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.application]
+        panel.directoryURL = URL(fileURLWithPath: "/Applications")
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        // The popover closes while the panel is open; reopen it so the
+        // result (or an error) is visible.
+        isEditing = true
+        guard let bundleID = Bundle(url: url)?.bundleIdentifier else {
+            message = "That app has no bundle identifier."
+            return
+        }
+        add(bundleID)
+    }
+}
+
+/// Name and icon for a bundle ID, falling back to the ID itself when the
+/// app is not installed.
+enum AppIdentity {
+    struct RunningApp {
+        let bundleID: String
+        let name: String
+    }
+
+    static func name(for bundleID: String) -> String {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
+            return bundleID
+        }
+        return url.deletingPathExtension().lastPathComponent
+    }
+
+    static func icon(for bundleID: String) -> NSImage {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
+            return NSWorkspace.shared.icon(for: .application)
+        }
+        return NSWorkspace.shared.icon(forFile: url.path)
+    }
+
+    static func runningApplications() -> [RunningApp] {
+        let own = Bundle.main.bundleIdentifier
+        var seen = Set<String>()
+        return NSWorkspace.shared.runningApplications
+            .filter { $0.activationPolicy == .regular }
+            .compactMap { app -> RunningApp? in
+                guard let id = app.bundleIdentifier, id != own, seen.insert(id).inserted else { return nil }
+                return RunningApp(bundleID: id, name: app.localizedName ?? id)
+            }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 }

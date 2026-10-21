@@ -54,6 +54,9 @@ struct XPdConfiguration: Codable, Equatable {
         let standardButtonTitles: [StandardButtonTitleEntry]
         let remoteModifierControls: Set<RemoteControl>
         let modifierColors: [ModifierColorEntry]
+        /// Bundle IDs of apps that activate this Standard profile when
+        /// automatic switching is on. Omitted from JSON when empty.
+        let autoSwitchApplications: [String]
 
         var id: String { name }
 
@@ -69,7 +72,8 @@ struct XPdConfiguration: Codable, Equatable {
             midiSettings: MIDIProfileSettings? = nil,
             standardButtonTitles: [StandardButtonTitleEntry] = [],
             remoteModifierControls: Set<RemoteControl> = [],
-            modifierColors: [ModifierColorEntry] = []
+            modifierColors: [ModifierColorEntry] = [],
+            autoSwitchApplications: [String] = []
         ) {
             self.name = name
             self.mappings = mappings
@@ -79,6 +83,7 @@ struct XPdConfiguration: Codable, Equatable {
             self.standardButtonTitles = standardButtonTitles
             self.remoteModifierControls = remoteModifierControls
             self.modifierColors = modifierColors
+            self.autoSwitchApplications = autoSwitchApplications
         }
 
         init(
@@ -113,6 +118,7 @@ struct XPdConfiguration: Codable, Equatable {
             standardButtonTitles = try container.decodeIfPresent([StandardButtonTitleEntry].self, forKey: .standardButtonTitles) ?? []
             remoteModifierControls = try container.decodeIfPresent(Set<RemoteControl>.self, forKey: .remoteModifierControls) ?? []
             modifierColors = try container.decodeIfPresent([ModifierColorEntry].self, forKey: .modifierColors) ?? []
+            autoSwitchApplications = try container.decodeIfPresent([String].self, forKey: .autoSwitchApplications) ?? []
         }
 
         func encode(to encoder: Encoder) throws {
@@ -128,10 +134,14 @@ struct XPdConfiguration: Codable, Equatable {
                 forKey: .remoteModifierControls
             )
             try container.encode(modifierColors, forKey: .modifierColors)
+            if !autoSwitchApplications.isEmpty {
+                try container.encode(autoSwitchApplications, forKey: .autoSwitchApplications)
+            }
         }
 
         private enum CodingKeys: String, CodingKey {
             case name, mappings, hidBindings, realm, midiSettings, standardButtonTitles, remoteModifierControls, modifierColors
+            case autoSwitchApplications
         }
     }
 
@@ -221,6 +231,7 @@ struct XPdConfiguration: Codable, Equatable {
         let standardButtonTitles: [StandardButtonTitleEntry]
         let remoteModifierControls: Set<RemoteControl>
         let modifierColors: [ModifierColorEntry]
+        let autoSwitchApplications: [String]
 
         init(profile: Profile) {
             name = profile.name
@@ -230,6 +241,7 @@ struct XPdConfiguration: Codable, Equatable {
             standardButtonTitles = profile.standardButtonTitles
             remoteModifierControls = profile.remoteModifierControls
             modifierColors = profile.modifierColors
+            autoSwitchApplications = profile.autoSwitchApplications
         }
 
         init(from decoder: Decoder) throws {
@@ -241,6 +253,7 @@ struct XPdConfiguration: Codable, Equatable {
             standardButtonTitles = try container.decodeIfPresent([StandardButtonTitleEntry].self, forKey: .standardButtonTitles) ?? []
             remoteModifierControls = try container.decodeIfPresent(Set<RemoteControl>.self, forKey: .remoteModifierControls) ?? []
             modifierColors = try container.decodeIfPresent([ModifierColorEntry].self, forKey: .modifierColors) ?? []
+            autoSwitchApplications = try container.decodeIfPresent([String].self, forKey: .autoSwitchApplications) ?? []
         }
 
         func encode(to encoder: Encoder) throws {
@@ -255,10 +268,14 @@ struct XPdConfiguration: Codable, Equatable {
                 forKey: .remoteModifierControls
             )
             try container.encode(modifierColors, forKey: .modifierColors)
+            if !autoSwitchApplications.isEmpty {
+                try container.encode(autoSwitchApplications, forKey: .autoSwitchApplications)
+            }
         }
 
         private enum CodingKeys: String, CodingKey {
             case name, mappings, realm, midiSettings, standardButtonTitles, remoteModifierControls, modifierColors
+            case autoSwitchApplications
         }
 
         var profile: Profile {
@@ -270,7 +287,8 @@ struct XPdConfiguration: Codable, Equatable {
                 midiSettings: midiSettings,
                 standardButtonTitles: standardButtonTitles,
                 remoteModifierControls: remoteModifierControls,
-                modifierColors: modifierColors
+                modifierColors: modifierColors,
+                autoSwitchApplications: autoSwitchApplications
             )
         }
     }
@@ -341,11 +359,20 @@ struct XPdConfiguration: Codable, Equatable {
         case modifierColorsOnMIDIProfile(String)
         case invalidModifierColorControl(profile: String, control: RemoteControl)
         case duplicateModifierColor(profile: String, control: RemoteControl)
+        case autoSwitchApplicationsOnMIDIProfile(String)
+        case invalidAutoSwitchApplication(profile: String, bundleID: String)
+        case duplicateAutoSwitchApplication(bundleID: String)
 
         var errorDescription: String? {
             switch self {
             case let .unsupportedVersion(version):
                 return "Unsupported configuration version: \(version)."
+            case let .autoSwitchApplicationsOnMIDIProfile(profile):
+                return "MIDI profile \(profile) cannot switch automatically by app."
+            case let .invalidAutoSwitchApplication(profile, bundleID):
+                return "Invalid app for automatic switching in \(profile): \(bundleID)."
+            case let .duplicateAutoSwitchApplication(bundleID):
+                return "The app \(bundleID) is assigned to more than one profile."
             case let .duplicateProfileName(name):
                 return "Duplicate profile: \(name)."
             case let .unknownProfileName(name):
@@ -766,6 +793,29 @@ struct XPdConfiguration: Codable, Equatable {
         return migrated
     }
 
+    static let maximumBundleIdentifierLength = 255
+
+    /// One app may activate only one profile, and only Standard profiles
+    /// switch automatically. Bundle IDs compare case-insensitively.
+    static func validateAutoSwitchApplications(_ profiles: [Profile]) throws {
+        var seen = Set<String>()
+        for profile in profiles where !profile.autoSwitchApplications.isEmpty {
+            guard profile.realm == .standard else {
+                throw ValidationError.autoSwitchApplicationsOnMIDIProfile(profile.name)
+            }
+            for bundleID in profile.autoSwitchApplications {
+                let trimmed = bundleID.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty, trimmed == bundleID,
+                      bundleID.count <= maximumBundleIdentifierLength else {
+                    throw ValidationError.invalidAutoSwitchApplication(profile: profile.name, bundleID: bundleID)
+                }
+                guard seen.insert(bundleID.lowercased()).inserted else {
+                    throw ValidationError.duplicateAutoSwitchApplication(bundleID: bundleID)
+                }
+            }
+        }
+    }
+
     private static func profileWithoutHIDBindings(_ profile: Profile) -> Profile {
         Profile(
             name: profile.name,
@@ -775,7 +825,8 @@ struct XPdConfiguration: Codable, Equatable {
             midiSettings: profile.midiSettings,
             standardButtonTitles: profile.standardButtonTitles,
             remoteModifierControls: profile.remoteModifierControls,
-            modifierColors: profile.modifierColors
+            modifierColors: profile.modifierColors,
+            autoSwitchApplications: profile.autoSwitchApplications
         )
     }
 
@@ -841,6 +892,7 @@ struct XPdConfiguration: Codable, Equatable {
         guard profiles.contains(where: { $0.name == "Global" }) else {
             throw ValidationError.missingProfileName("Global")
         }
+        try Self.validateAutoSwitchApplications(profiles)
         guard profiles.contains(where: { $0.name == profileName }) else {
             throw ValidationError.invalidActiveProfile(profileName)
         }
@@ -1321,7 +1373,8 @@ struct XPdConfiguration: Codable, Equatable {
                     }),
                     modifierColors: profile.modifierColors.sorted {
                         Self.controlIndex($0.control) < Self.controlIndex($1.control)
-                    }
+                    },
+                    autoSwitchApplications: profile.autoSwitchApplications
                 )
             },
             profileName: profileName,
