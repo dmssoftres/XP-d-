@@ -4,9 +4,33 @@ import SwiftUI
 struct RemoteView: View {
     let store: MappingStore
 
+    @State private var dropTargetControl: RemoteControl?
+    @State private var pendingDrop: MappingDropProposal?
+
     var body: some View {
         device
             .padding(.top, 18)
+            .confirmationDialog(
+                pendingDrop.map {
+                    "\($0.destination.location.control.rawValue) already has a \($0.destination.location.gesture.rawValue) action"
+                } ?? "This key already has an action",
+                isPresented: dropChoiceIsPresented,
+                titleVisibility: .visible,
+                presenting: pendingDrop
+            ) { proposal in
+                if proposal.canSwap {
+                    Button("Swap") { resolvePendingDrop(swap: true) }
+                }
+                Button("Replace", role: .destructive) { resolvePendingDrop(swap: false) }
+                Button("Cancel", role: .cancel) {
+                    pendingDrop = nil
+                    store.cancelMappingDrag()
+                }
+            } message: { proposal in
+                Text(proposal.canSwap
+                    ? "Swap exchanges the two actions. Replace moves this action and erases the one on \(proposal.destination.location.control.rawValue)."
+                    : "The other action has an incomplete application target, so it cannot be swapped. Replace erases it.")
+            }
     }
 
     private var device: some View {
@@ -460,6 +484,52 @@ struct RemoteView: View {
                 nonApplicationMarkers: nonApplicationMarkerSelection
             )
         )
+        .overlay {
+            if dropTargetControl == control {
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .strokeBorder(Color.accentColor, lineWidth: 2.5)
+                    .allowsHitTesting(false)
+            }
+        }
+        .dropDestination(for: String.self) { tokens, _ in
+            guard let token = tokens.first else { return false }
+            switch store.dropMapping(token: token, onto: control) {
+            case .moved:
+                store.selectedControl = control
+                return true
+            case .needsChoice(let proposal):
+                pendingDrop = proposal
+                return true
+            case .rejected:
+                return false
+            }
+        } isTargeted: { isTargeted in
+            if isTargeted {
+                dropTargetControl = control
+            } else if dropTargetControl == control {
+                dropTargetControl = nil
+            }
+        }
+    }
+
+    private var dropChoiceIsPresented: Binding<Bool> {
+        Binding(
+            get: { pendingDrop != nil },
+            set: { isPresented in
+                if !isPresented, pendingDrop != nil {
+                    pendingDrop = nil
+                    store.cancelMappingDrag()
+                }
+            }
+        )
+    }
+
+    private func resolvePendingDrop(swap: Bool) {
+        guard let proposal = pendingDrop else { return }
+        pendingDrop = nil
+        if store.resolveMappingDrop(proposal, swap: swap) {
+            store.selectedControl = proposal.destination.location.control
+        }
     }
 
     private func standardNonApplicationMarkerStrip(

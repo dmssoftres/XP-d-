@@ -1792,6 +1792,10 @@ private struct StandardMappingActionEditor: View {
                         .accessibilityLabel("Marked to move")
                 }
 
+                if canDragMapping {
+                    dragHandle
+                }
+
                 mappingClipboardControls
             }
 
@@ -1908,6 +1912,35 @@ private struct StandardMappingActionEditor: View {
             gesture: gesture,
             modifierControls: modifierControls
         ) == .cut
+    }
+
+    private var canDragMapping: Bool {
+        isEditable && store.canCopyMapping(
+            for: store.selectedControl,
+            gesture: gesture,
+            modifierControls: modifierControls
+        )
+    }
+
+    /// Drag this onto a K button on the remote to move the action there,
+    /// keeping its gesture and MOD layer.
+    private var dragHandle: some View {
+        Image(systemName: "hand.draw")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .frame(width: 18, height: 18)
+            .contentShape(Rectangle())
+            .help("Drag onto another K button to move this action")
+            .accessibilityLabel("Drag to move action")
+            .onDrag {
+                cancelEditing()
+                let token = store.beginMappingDrag(
+                    from: store.selectedControl,
+                    gesture: gesture,
+                    modifierControls: modifierControls
+                ) ?? ""
+                return NSItemProvider(object: token as NSString)
+            }
     }
 
     private var mappingClipboardControls: some View {

@@ -155,6 +155,29 @@ enum MappingClipboardResult: Equatable {
     case invalidSource
 }
 
+/// A session-only drag of one action card. The drag pasteboard carries only
+/// the opaque token; the mapping itself never leaves the store.
+struct MappingDragState: Equatable {
+    let token: String
+    let source: MappingClipboardLocation
+    let rawSourceMapping: Mapping
+}
+
+/// An occupied drop target waiting for the owner to choose Swap or Replace.
+struct MappingDropProposal: Equatable, Identifiable {
+    let drag: MappingDragState
+    let destination: MappingDestinationSnapshot
+    let canSwap: Bool
+
+    var id: String { drag.token }
+}
+
+enum MappingDropResult: Equatable {
+    case moved
+    case needsChoice(MappingDropProposal)
+    case rejected
+}
+
 @Observable
 @MainActor
 final class MappingStore {
@@ -329,6 +352,7 @@ final class MappingStore {
     /// A session-only action-card clipboard. It deliberately never enters the
     /// persisted profile payload or the macOS general pasteboard.
     private(set) var mappingClipboard: MappingClipboardState?
+    private(set) var mappingDrag: MappingDragState?
     var showsInputOverlay: Bool {
         didSet {
             defaults.set(showsInputOverlay, forKey: inputOverlayDefaultsKey)
@@ -1772,6 +1796,138 @@ final class MappingStore {
         }
         save()
         lastActionResult = .success("Action deleted")
+        return true
+    }
+
+    // MARK: Action-card drag and drop
+
+    /// Starts dragging one action card. Returns the opaque pasteboard token,
+    /// or nil when the action cannot move (empty, MIDI, incomplete target).
+    func beginMappingDrag(
+        from control: RemoteControl,
+        gesture: GestureKind,
+        modifierControls: Set<RemoteControl> = []
+    ) -> String? {
+        let source = makeMappingLocation(
+            profileName: nil,
+            control: control,
+            gesture: gesture,
+            modifierControls: modifierControls
+        )
+        guard portableMapping(at: source) != nil else {
+            mappingDrag = nil
+            return nil
+        }
+        let drag = MappingDragState(
+            token: "xpd-action-drag:\(UUID().uuidString)",
+            source: source,
+            rawSourceMapping: mapping(at: source)
+        )
+        mappingDrag = drag
+        return drag.token
+    }
+
+    /// Drops the dragged action onto a key. The action keeps its gesture and
+    /// its MOD layer; only the triggering key changes. An empty destination
+    /// moves at once; an occupied one asks for Swap or Replace.
+    func dropMapping(token: String, onto control: RemoteControl) -> MappingDropResult {
+        guard let drag = mappingDrag, drag.token == token else { return .rejected }
+        let source = drag.source
+        guard source.profileName == profileName, isStandardProfile(profileName) else {
+            mappingDrag = nil
+            lastActionResult = .failure("Choose a Standard profile before moving an action.")
+            return .rejected
+        }
+        guard control != source.control else { return .rejected }
+        if !source.modifierControls.isEmpty {
+            guard control.isModifierEligible else {
+                lastActionResult = .failure("MOD actions can only move to K buttons.")
+                return .rejected
+            }
+            guard !source.modifierControls.contains(control) else {
+                lastActionResult = .failure("\(control.rawValue) is the MOD button of this action, so it cannot also trigger it.")
+                return .rejected
+            }
+        }
+        guard mapping(at: source) == drag.rawSourceMapping else {
+            mappingDrag = nil
+            lastActionResult = .failure("The dragged action changed, so the move was canceled.")
+            return .rejected
+        }
+
+        let destination = mappingDestinationSnapshot(
+            for: control,
+            gesture: source.gesture,
+            modifierControls: source.modifierControls
+        )
+        if destination.expectedMapping == Mapping() {
+            return completeMappingDrop(drag, to: destination, swap: false) ? .moved : .rejected
+        }
+        return .needsChoice(MappingDropProposal(
+            drag: drag,
+            destination: destination,
+            canSwap: portableMapping(at: destination.location) != nil
+        ))
+    }
+
+    @discardableResult
+    func resolveMappingDrop(_ proposal: MappingDropProposal, swap: Bool) -> Bool {
+        guard mappingDrag == proposal.drag else {
+            lastActionResult = .failure("The drag is no longer current, so nothing was moved.")
+            return false
+        }
+        guard !swap || proposal.canSwap else { return false }
+        return completeMappingDrop(proposal.drag, to: proposal.destination, swap: swap)
+    }
+
+    func cancelMappingDrag() {
+        mappingDrag = nil
+    }
+
+    private func completeMappingDrop(
+        _ drag: MappingDragState,
+        to destination: MappingDestinationSnapshot,
+        swap: Bool
+    ) -> Bool {
+        mappingDrag = nil
+        let source = drag.source
+        guard mapping(at: source) == drag.rawSourceMapping else {
+            lastActionResult = .failure("The dragged action changed, so the move was canceled.")
+            return false
+        }
+        guard mapping(at: destination.location) == destination.expectedMapping else {
+            lastActionResult = .failure("The destination changed, so nothing was moved.")
+            return false
+        }
+        guard let moving = portableMapping(at: source) else {
+            lastActionResult = .failure("This action cannot be moved until its application target is complete.")
+            return false
+        }
+        let returning: Mapping?
+        if swap {
+            guard let resolved = portableMapping(at: destination.location) else {
+                lastActionResult = .failure("The other action cannot be swapped until its application target is complete.")
+                return false
+            }
+            returning = resolved
+        } else {
+            returning = nil
+        }
+
+        cancelPendingButtonGestures()
+        guard writeMapping(moving, at: destination.location) else {
+            lastActionResult = .failure("The destination is no longer available.")
+            return false
+        }
+        let sourceWritten = returning.map { writeMapping($0, at: source) } ?? clearMapping(at: source)
+        guard sourceWritten else {
+            restoreMapping(destination.expectedMapping, at: destination.location)
+            restoreMapping(drag.rawSourceMapping, at: source)
+            lastActionResult = .failure("The moved action source is no longer available.")
+            return false
+        }
+        save()
+        lastActionResult = .success(swap ? "Actions swapped" : "Action moved")
         return true
     }
 
