@@ -209,6 +209,9 @@ final class ActionRunner {
         case .keyboardShortcut:
             executeKeyboardShortcut(mapping, completion: completion)
             return
+        case .typeText:
+            executeTypeText(mapping, completion: completion)
+            return
         case .macOSShortcut:
             executeMacOSShortcut(mapping, completion: completion)
             return
@@ -835,6 +838,89 @@ final class ActionRunner {
         eventPoster(keyDown)
         eventPoster(keyUp)
         completion(.success("Sent " + shortcut.displayString))
+    }
+
+    enum TypingStep: Equatable {
+        case text(String)
+        case key(CGKeyCode)
+    }
+
+    /// Splits text into keyboard steps: Unicode chunks of whole characters
+    /// (never splitting an emoji or accent), with Return and Tab sent as
+    /// real keys so apps treat them as line breaks and field moves.
+    static func typingSteps(for text: String) -> [TypingStep] {
+        var steps: [TypingStep] = []
+        var chunk = ""
+        func flush() {
+            if !chunk.isEmpty { steps.append(.text(chunk)) }
+            chunk = ""
+        }
+        for character in text {
+            switch character {
+            case "\n", "\r\n", "\r":
+                flush()
+                steps.append(.key(36)) // Return
+            case "\t":
+                flush()
+                steps.append(.key(48)) // Tab
+            default:
+                if chunk.utf16.count + String(character).utf16.count > TypeTextLimits.chunkLength {
+                    flush()
+                }
+                chunk.append(character)
+            }
+        }
+        flush()
+        return steps
+    }
+
+    private func executeTypeText(
+        _ mapping: Mapping,
+        completion: @escaping @MainActor (ActionExecutionResult) -> Void
+    ) {
+        let text = String(mapping.command.prefix(TypeTextLimits.maximumLength))
+        guard !text.isEmpty else {
+            completion(.failure("Enter the text to type first"))
+            return
+        }
+        // Same rule as keyboard shortcuts: a button press never prompts.
+        guard hasPostEventAccess else {
+            completion(.failure("Allow XP[d] in Accessibility, then press again"))
+            return
+        }
+
+        // A private event source keeps typed text independent of keys or
+        // modifiers that are physically held at the same moment.
+        let source = CGEventSource(stateID: .privateState)
+        for step in Self.typingSteps(for: text) {
+            let virtualKey: CGKeyCode
+            let unicode: [UniChar]
+            switch step {
+            case let .text(chunk):
+                virtualKey = 0
+                unicode = Array(chunk.utf16)
+            case let .key(keyCode):
+                virtualKey = keyCode
+                unicode = []
+            }
+            guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: true),
+                  let keyUp = CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: false) else {
+                completion(.failure("Could not create typing events"))
+                return
+            }
+            // Explicitly no modifiers, so a held key on the Mac keyboard
+            // cannot turn typed text into shortcuts.
+            keyDown.flags = []
+            keyUp.flags = []
+            if !unicode.isEmpty {
+                keyDown.keyboardSetUnicodeString(stringLength: unicode.count, unicodeString: unicode)
+                keyUp.keyboardSetUnicodeString(stringLength: unicode.count, unicodeString: unicode)
+            }
+            eventPoster(keyDown)
+            eventPoster(keyUp)
+        }
+        let firstLine = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+        completion(.success("Typed " + (firstLine.count > 24 ? String(firstLine.prefix(24)) + "…" : firstLine)))
     }
 
     static func cgEventFlags(

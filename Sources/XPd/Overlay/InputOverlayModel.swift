@@ -17,6 +17,19 @@ struct InputOverlayPresentation: Equatable {
             shortcutTokens = []
             title = "Not set"
             isConfigured = false
+        } else if mapping.action == .typeText {
+            shortcutTokens = []
+            let firstLine = mapping.command
+                .split(whereSeparator: \.isNewline)
+                .first
+                .map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
+            if mapping.command.isEmpty {
+                title = "Text not set"
+                isConfigured = false
+            } else {
+                title = "Type · " + (firstLine.count > 28 ? String(firstLine.prefix(28)) + "…" : firstLine)
+                isConfigured = true
+            }
         } else if mapping.action == .appleScript {
             shortcutTokens = []
             if command.isEmpty {

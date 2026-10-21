@@ -2046,6 +2046,8 @@ private struct StandardMappingActionEditor: View {
                 cancellationGeneration: shortcutCaptureCancellation,
                 onRecordingChange: updateCaptureState
             )
+        case .typeText:
+            typeTextEditor
         case .openApplication, .toggleApplication, .macOSShortcut:
             singleLineCommandEditor
         case .appleScript:
@@ -2171,6 +2173,49 @@ private struct StandardMappingActionEditor: View {
                 .help("Click to edit")
             }
         }
+    }
+
+    /// Plain-text box for the Type text action. Line breaks are typed as
+    /// Return; the length is capped at `TypeTextLimits.maximumLength`.
+    private var typeTextEditor: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Text to type")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ZStack(alignment: .topLeading) {
+                TextEditor(text: typeTextBinding)
+                    .font(.body)
+                    .frame(minHeight: 76)
+                    .scrollContentBackground(.hidden)
+                    .padding(3)
+                    .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 5))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 5)
+                            .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                    }
+                if binding.wrappedValue.command.isEmpty {
+                    Text("Kind regards,\nDr. …")
+                        .foregroundStyle(.tertiary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 9)
+                        .allowsHitTesting(false)
+                }
+            }
+            Text("Typed into the app in front, as if from the keyboard. \(binding.wrappedValue.command.count)/\(TypeTextLimits.maximumLength) characters.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var typeTextBinding: Binding<String> {
+        Binding(
+            get: { binding.wrappedValue.command },
+            set: { text in
+                binding.wrappedValue = binding.wrappedValue.editingCommand(
+                    String(text.prefix(TypeTextLimits.maximumLength))
+                )
+            }
+        )
     }
 
     private func multilineCommandEditor(label: String, placeholder: String) -> some View {

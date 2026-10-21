@@ -61,6 +61,7 @@ enum ComboMode: String, Codable {
 
 enum ActionKind: String, CaseIterable, Codable, Identifiable {
     case keyboardShortcut = "Keyboard shortcut"
+    case typeText = "Type text"
     case openApplication = "Open application"
     case toggleApplication = "Toggle application"
     case macOSShortcut = "Run macOS Shortcut"
@@ -101,6 +102,14 @@ enum ActionKind: String, CaseIterable, Codable, Identifiable {
         default: rawValue
         }
     }
+}
+
+/// Limits for the Type text action: the editor accepts at most
+/// `maximumLength` characters and typing posts at most `chunkLength` UTF-16
+/// units per keyboard event (the CGEvent Unicode string limit).
+enum TypeTextLimits {
+    static let maximumLength = 2_000
+    static let chunkLength = 20
 }
 
 /// Fixed choices stored in `Mapping.command` for Media control mappings. The
@@ -414,6 +423,10 @@ struct Mapping: Codable, Equatable {
         case .switchProfile:
             guard replacingInvalid, let profileName, !profileName.isEmpty else { return nil }
             return profileName
+        case .typeText:
+            // Never carry a previous script, app path or profile name into
+            // text that will be typed (it could run in a terminal).
+            return replacingInvalid ? "" : nil
         default:
             return nil
         }
