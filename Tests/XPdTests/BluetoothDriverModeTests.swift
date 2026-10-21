@@ -3,7 +3,7 @@ import XCTest
 @testable import XPd
 
 /// Packets below are exact FFE0/0003 notifications captured from the owner's
-/// ACK05-B on 2026-10-21 (see docs/firmware/XPPEN_DRIVER_BLE_NOTES.md).
+/// ACK05-B on 2026-10-21 (see docs/ACK05_BLUETOOTH_PROTOCOL.md).
 final class ShortcutRemoteDriverModeDecoderTests: XCTestCase {
     private func packet(_ lo: UInt8, _ hi: UInt8, wheel: UInt8 = 0) -> Data {
         Data([0x02, 0xF0, lo, hi, 0x00, 0x00, 0x00, wheel, 0x00, 0x00])

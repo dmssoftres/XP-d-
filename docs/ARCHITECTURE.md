@@ -287,4 +287,4 @@ The build script compiles `XPd`, assembles `dist/XP[d].app`, creates its Info.pl
 - `Sources/XPd/Models/MIDITypes.swift`
 - `Sources/XPd/Models/XPdConfiguration.swift`
 - `script/build_and_run.sh`
-- `.llm/DECISIONS.md`
+- `docs/ACK05_BLUETOOTH_PROTOCOL.md`
