@@ -299,6 +299,13 @@ final class MappingStore {
     /// persisted independently of the shared device-level hardware layout so
     /// enabling it cannot rewrite MIDI's physical input map.
     private(set) var usesStandardF13F22Preset = false
+    /// Owner setting: switch the remote into XPPen's Bluetooth driver mode on
+    /// every Bluetooth connection. Device-local; not part of profiles.
+    private(set) var usesBluetoothDriverMode = false
+    /// Mirrors `HIDService`: true only after the remote acknowledged driver
+    /// mode. While true, K1–K10 resolve through the verified driver-mode bit
+    /// order in both realms instead of the learned layout.
+    private(set) var isBluetoothDriverModeActive = false
     /// Connection-scoped evidence that the connected remote has emitted one
     /// exact report-6 F13–F22 preset identity while Standard is active. The
     /// persisted selection is not evidence that the remote was programmed.
@@ -568,6 +575,7 @@ final class MappingStore {
     private let wheelSensitivityDefaultsKey = "XPd.wheelSensitivity.v1"
     private let standardModifierHoldThresholdDefaultsKey = "XPd.standardModifierHoldThreshold.v1"
     private let standardF13F22PresetDefaultsKey = "XPd.standardF13F22Preset.v1"
+    private let bluetoothDriverModeDefaultsKey = "XPd.bluetoothDriverMode.v1"
     private var profileStates: [String: ProfileState] = [:]
     private var learningAllCandidate: [RemoteControl: String] = [:]
     private var learningAllCaptured: [RemoteControl: String] = [:]
@@ -748,6 +756,8 @@ final class MappingStore {
             ?? Self.defaultStandardModifierHoldThreshold
         standardModifierHoldThreshold = Self.normalizedStandardModifierHoldThreshold(savedModifierHoldThreshold)
         usesStandardF13F22Preset = defaults.bool(forKey: standardF13F22PresetDefaultsKey)
+        usesBluetoothDriverMode = defaults.bool(forKey: bluetoothDriverModeDefaultsKey)
+        hid.isBluetoothDriverModeEnabled = usesBluetoothDriverMode
 
         let migratedLegacyState = loadOrMigrateProfiles()
         let restoredProfile = migratedLegacyState
@@ -771,6 +781,9 @@ final class MappingStore {
 
         hid.onInput = { [weak self] signature in
             self?.handleHIDInput(signature)
+        }
+        hid.onBluetoothDriverModeChange = { [weak self] isActive in
+            self?.bluetoothDriverModeChanged(isActive)
         }
         hid.onDisconnect = { [weak self] in
             if let self, self.isLearningAll {
@@ -805,7 +818,10 @@ final class MappingStore {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.requestMIDIShutdown() }
+            MainActor.assumeIsolated {
+                self?.hid.prepareForTermination()
+                self?.requestMIDIShutdown()
+            }
         }
     }
 
@@ -2117,6 +2133,12 @@ final class MappingStore {
     }
 
     func learnSelectedControl() {
+        guard !isBluetoothDriverModeActive else {
+            lastHIDLearningResult = .failure(
+                "Controls are recognised automatically in Bluetooth driver mode. Turn driver mode off to relearn them."
+            )
+            return
+        }
         guard !(activeRealm == .standard && usesStandardF13F22Preset) else {
             lastHIDLearningResult = .failure(
                 "Disable the F13–F22 preset before manually changing Standard hardware bindings."
@@ -2170,6 +2192,12 @@ final class MappingStore {
             )
             return
         }
+        guard !isBluetoothDriverModeActive else {
+            lastHIDLearningResult = .failure(
+                "K buttons are recognised automatically in Bluetooth driver mode. Turn driver mode off to configure Standard K layers."
+            )
+            return
+        }
         invalidateStandardKLayerLiveVerification()
         cancelPendingButtonGestures()
         learningControl = nil
@@ -2213,6 +2241,12 @@ final class MappingStore {
     }
 
     func clearHIDBinding(for control: RemoteControl) {
+        guard !isBluetoothDriverModeActive else {
+            lastHIDLearningResult = .failure(
+                "Controls are recognised automatically in Bluetooth driver mode. Turn driver mode off to change their bindings."
+            )
+            return
+        }
         guard !(activeRealm == .standard && usesStandardF13F22Preset) else {
             lastHIDLearningResult = .failure(
                 "Disable the F13–F22 preset before manually changing Standard hardware bindings."
@@ -2243,12 +2277,65 @@ final class MappingStore {
     /// center, and every other physical binding continue to come from the
     /// active device-level layout.
     var effectiveStandardHIDBindings: [RemoteControl: String] {
-        guard activeRealm == .standard, usesStandardF13F22Preset else {
-            return hidBindings
+        guard activeRealm == .standard else { return hidBindings }
+        if isBluetoothDriverModeActive {
+            return effectiveMIDIHIDBindings
         }
+        guard usesStandardF13F22Preset else { return hidBindings }
         var effective = hidBindings
         effective.merge(Self.standardF13F22HIDBindings) { _, preset in preset }
         return effective
+    }
+
+    /// MIDI's K resolution: the learned layout, with K1–K10, the wheel, and
+    /// the center replaced by the identities `HIDService` emits for them while
+    /// Bluetooth driver mode is active.
+    var effectiveMIDIHIDBindings: [RemoteControl: String] {
+        guard isBluetoothDriverModeActive else { return hidBindings }
+        var effective = hidBindings
+        effective.merge(Self.bluetoothDriverModeHIDBindings) { _, driverMode in driverMode }
+        return effective
+    }
+
+    /// K1…K10 as report-2 one-hot identities in the order verified live on
+    /// 2026-10-21 (K1 = bit 0 … K10 = bit 9), plus the wheel and center
+    /// signatures emitted for driver-mode packets.
+    static let bluetoothDriverModeHIDBindings: [RemoteControl: String] =
+        Dictionary(uniqueKeysWithValues: hardwareLearningControls.enumerated().map { index, control in
+            (control, ShortcutRemoteDriverModeDecoder.keySignature(mask: UInt16(1) << index))
+        }).merging([
+            .wheelCW: "wheel:+",
+            .wheelCCW: "wheel:-",
+            .wheelCenter: "wheel:center"
+        ]) { key, _ in key }
+
+    /// Persists the owner's Bluetooth driver-mode choice and applies it to
+    /// the connected remote immediately.
+    func setBluetoothDriverModeEnabled(_ enabled: Bool) {
+        guard usesBluetoothDriverMode != enabled else { return }
+        usesBluetoothDriverMode = enabled
+        defaults.set(enabled, forKey: bluetoothDriverModeDefaultsKey)
+        hid.isBluetoothDriverModeEnabled = enabled
+        lastPersistenceResult = .saved
+    }
+
+    private func bluetoothDriverModeChanged(_ isActive: Bool) {
+        guard isBluetoothDriverModeActive != isActive else { return }
+        // The physical identity of every K changes with the mode, so no
+        // in-flight gesture, learning, or MIDI hold may cross the switch.
+        cancelPendingButtonGestures()
+        if isLearningAll {
+            failLearningAll(
+                standardKLayerLearningCancellationMessage("Bluetooth driver mode changed")
+            )
+        } else if learningControl != nil {
+            lastHIDLearningResult = .failure("Learning canceled because Bluetooth driver mode changed.")
+        }
+        cancelLearning()
+        resetMIDIState(force: true)
+        isBluetoothDriverModeActive = isActive
+        invalidateStandardKLayerLiveVerification()
+        refreshModifierAvailability()
     }
 
     /// Selects the deterministic Standard F13–F22 resolver. The selection is
@@ -3105,7 +3192,7 @@ final class MappingStore {
 
         let routingBindings = activeRealm == .standard
             ? effectiveStandardHIDBindings
-            : hidBindings
+            : effectiveMIDIHIDBindings
 
         if activeRealm == .standard,
            isStandardKLayerLiveVerified,
@@ -3167,7 +3254,7 @@ final class MappingStore {
         if activeRealm == .midi,
            let report = HIDKeyboardReport(signature: signature),
            report.isReport2OneHot {
-            let exactControl = hidBindings.first(where: { $0.value == signature })?.key
+            let exactControl = effectiveMIDIHIDBindings.first(where: { $0.value == signature })?.key
             handleMIDIReport2Snapshot(
                 report: report,
                 signature: signature,
@@ -3179,7 +3266,7 @@ final class MappingStore {
         if activeRealm == .midi,
            let report = HIDKeyboardReport(signature: signature),
            report.encoding == .report6BootKeyboard {
-            let exactControl = hidBindings.first(where: { $0.value == signature })?.key
+            let exactControl = effectiveMIDIHIDBindings.first(where: { $0.value == signature })?.key
             handleMIDIReport6Snapshot(
                 signature: signature,
                 exactControl: exactControl
@@ -3480,7 +3567,7 @@ final class MappingStore {
             desiredControls = [exactControl]
         } else if let decomposed = Self.decomposedKeyboardControls(
             for: signature,
-            bindings: hidBindings
+            bindings: effectiveMIDIHIDBindings
         ) {
             desiredControls = Set(decomposed)
         } else {
@@ -4399,7 +4486,7 @@ final class MappingStore {
             desiredControls = [exactControl]
         } else if let decomposed = Self.decomposedStandardBitmaskControls(
             for: signature,
-            bindings: hidBindings
+            bindings: effectiveMIDIHIDBindings
         ) {
             desiredControls = Set(decomposed)
         } else {

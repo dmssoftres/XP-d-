@@ -2,23 +2,67 @@ import CoreBluetooth
 import Foundation
 import OSLog
 
-/// Reads the ACK05/Shortcut Remote's verified BLE battery notification. It
-/// neither writes proprietary characteristics nor scans while the matching HID
-/// remote is disconnected.
+/// Reads the ACK05/Shortcut Remote's verified BLE battery notification and,
+/// when enabled, switches the remote into XPPen's Bluetooth driver mode. The
+/// only writes are XPPen's own driver-mode commands to FFE0/0001 (`02 B0 04`
+/// on, `02 B0 00` off), sent only after the exact PnP ID is verified. It does
+/// not scan while the matching HID remote is disconnected.
 @MainActor
 final class ShortcutRemoteBatteryMonitor: NSObject, @preconcurrency CBCentralManagerDelegate, @preconcurrency CBPeripheralDelegate {
     var onBatteryPercentage: ((Int?) -> Void)?
+    /// Called with `true` once the remote acknowledges `02 B0 04`, and with
+    /// `false` when driver mode ends (command off, disconnect, or failure).
+    var onDriverModeActive: ((Bool) -> Void)?
+    /// Raw FFE0/0003 notifications received while driver mode is active.
+    var onDriverModePacket: ((Data) -> Void)?
+    /// Called when a driver-mode request failed or was not acknowledged.
+    var onDriverModeRequestFailed: (() -> Void)?
+
+    static let driverModeOnCommand = Data([0x02, 0xB0, 0x04, 0, 0, 0, 0, 0, 0, 0])
+    static let driverModeOffCommand = Data([0x02, 0xB0, 0x00, 0, 0, 0, 0, 0, 0, 0])
 
     private static let deviceInformationServiceUUID = CBUUID(string: "180A")
     private static let deviceInformationCharacteristicUUID = CBUUID(string: "2A50")
     private static let vendorServiceUUID = CBUUID(string: "FFE0")
     private static let companionNotificationCharacteristicUUID = CBUUID(string: "0002")
     private static let batteryNotificationCharacteristicUUID = CBUUID(string: "0003")
+    private static let commandCharacteristicUUID = CBUUID(string: "0001")
 
     private var central: CBCentralManager?
     private var peripheral: CBPeripheral?
     private var pendingCompanionCharacteristic: CBCharacteristic?
     private var pendingBatteryCharacteristic: CBCharacteristic?
+    private var commandCharacteristic: CBCharacteristic?
+    private var notificationsReady: Set<CBUUID> = []
+    private var awaitingDriverModeAcknowledgement = false
+    private(set) var isDriverModeActive = false
+    private var driverModeRequestGeneration = 0
+    private var pendingTerminationWrite = false
+    static let driverModeAcknowledgementTimeout: TimeInterval = 1.5
+    /// Driver mode is only requested while the matched HID connection is
+    /// Bluetooth; over USB the remote must keep its normal HID input.
+    var isBluetoothTransport = false {
+        didSet {
+            guard isBluetoothTransport != oldValue else { return }
+            if isBluetoothTransport {
+                requestDriverModeIfReady()
+            } else {
+                leaveDriverMode()
+            }
+        }
+    }
+    /// Owner setting. Applied on every verified connection, because the
+    /// remote leaves driver mode whenever it is switched off.
+    var isDriverModeEnabled = false {
+        didSet {
+            guard isDriverModeEnabled != oldValue else { return }
+            if isDriverModeEnabled {
+                requestDriverModeIfReady()
+            } else {
+                leaveDriverMode()
+            }
+        }
+    }
     private var isVerifiedRemote = false
     private var isMonitoring = false
     private let logger = Logger(subsystem: "com.dmssoftres.xpd", category: "Battery")
@@ -41,9 +85,31 @@ final class ShortcutRemoteBatteryMonitor: NSObject, @preconcurrency CBCentralMan
         peripheral = nil
         pendingCompanionCharacteristic = nil
         pendingBatteryCharacteristic = nil
+        commandCharacteristic = nil
+        notificationsReady = []
         isVerifiedRemote = false
+        setDriverModeInactive()
         onBatteryPercentage?(nil)
         logger.info("BLE battery monitor stopped")
+    }
+
+    /// Best-effort return to normal keyboard behaviour when XP[d] quits, so
+    /// the remote's keys keep working without XP[d]. A crash cannot run
+    /// this; switching the remote off and on also leaves driver mode.
+    func leaveDriverModeForTermination() {
+        guard isDriverModeActive || awaitingDriverModeAcknowledgement,
+              let peripheral, let command = commandCharacteristic
+        else { return }
+        pendingTerminationWrite = true
+        peripheral.writeValue(Self.driverModeOffCommand, for: command, type: .withResponse)
+        setDriverModeInactive()
+        logger.info("BLE driver mode off requested at termination")
+        // CoreBluetooth delivers the write asynchronously; keep the main run
+        // loop alive briefly so it reaches the remote before the process exits.
+        let deadline = Date().addingTimeInterval(0.5)
+        while pendingTerminationWrite, Date() < deadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
+        }
     }
 
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
@@ -116,7 +182,8 @@ final class ShortcutRemoteBatteryMonitor: NSObject, @preconcurrency CBCentralMan
         peripheral.discoverCharacteristics(
             [
                 Self.companionNotificationCharacteristicUUID,
-                Self.batteryNotificationCharacteristicUUID
+                Self.batteryNotificationCharacteristicUUID,
+                Self.commandCharacteristicUUID
             ],
             for: vendorService
         )
@@ -154,6 +221,9 @@ final class ShortcutRemoteBatteryMonitor: NSObject, @preconcurrency CBCentralMan
             }
             pendingCompanionCharacteristic = companion
             pendingBatteryCharacteristic = battery
+            commandCharacteristic = service.characteristics?.first(where: {
+                $0.uuid == Self.commandCharacteristicUUID && $0.properties.contains(.write)
+            })
             logger.info("BLE battery notification characteristics ready")
             enableBatteryNotificationsIfVerified()
 
@@ -179,6 +249,18 @@ final class ShortcutRemoteBatteryMonitor: NSObject, @preconcurrency CBCentralMan
                 logger.info("BLE PnP ID accepted")
             }
             enableBatteryNotificationsIfVerified()
+            return
+        }
+
+        if characteristic.uuid == Self.companionNotificationCharacteristicUUID {
+            handleCompanionNotification(data)
+            return
+        }
+
+        if characteristic.uuid == Self.batteryNotificationCharacteristicUUID,
+           isDriverModeActive,
+           data.count >= 2, data[data.startIndex + 1] == 0xF0 {
+            onDriverModePacket?(data)
             return
         }
 
@@ -212,6 +294,84 @@ final class ShortcutRemoteBatteryMonitor: NSObject, @preconcurrency CBCentralMan
         } else {
             logger.info("BLE battery notification subscription enabled")
         }
+        notificationsReady.insert(characteristic.uuid)
+        requestDriverModeIfReady()
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
+        guard peripheral === self.peripheral,
+              characteristic.uuid == Self.commandCharacteristicUUID
+        else { return }
+        pendingTerminationWrite = false
+        guard error != nil else { return }
+        logger.error("BLE driver-mode command write failed; staying in normal mode")
+        let failedRequest = awaitingDriverModeAcknowledgement
+        setDriverModeInactive()
+        if failedRequest {
+            onDriverModeRequestFailed?()
+        }
+    }
+
+    /// `02 B0 01` on FFE0/0002 is the remote's acknowledgement of a
+    /// driver-mode command. Only an acknowledgement of our own `02 B0 04`
+    /// activates key routing.
+    private func handleCompanionNotification(_ data: Data) {
+        let bytes = [UInt8](data)
+        guard bytes.count >= 3, bytes[0] == 0x02, bytes[1] == 0xB0, bytes[2] == 0x01,
+              awaitingDriverModeAcknowledgement
+        else { return }
+        awaitingDriverModeAcknowledgement = false
+        guard isDriverModeEnabled, isBluetoothTransport else { return }
+        isDriverModeActive = true
+        logger.info("BLE driver mode active")
+        onDriverModeActive?(true)
+    }
+
+    private func requestDriverModeIfReady() {
+        guard isDriverModeEnabled,
+              isBluetoothTransport,
+              isVerifiedRemote,
+              !isDriverModeActive,
+              !awaitingDriverModeAcknowledgement,
+              notificationsReady.contains(Self.companionNotificationCharacteristicUUID),
+              notificationsReady.contains(Self.batteryNotificationCharacteristicUUID),
+              let peripheral,
+              let command = commandCharacteristic
+        else { return }
+        awaitingDriverModeAcknowledgement = true
+        driverModeRequestGeneration += 1
+        let generation = driverModeRequestGeneration
+        peripheral.writeValue(Self.driverModeOnCommand, for: command, type: .withResponse)
+        logger.info("BLE driver mode requested")
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.driverModeAcknowledgementTimeout) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self,
+                      self.driverModeRequestGeneration == generation,
+                      self.awaitingDriverModeAcknowledgement
+                else { return }
+                // The remote may have switched modes without the reply
+                // reaching us; send off so its normal keys keep working.
+                self.logger.error("BLE driver mode not acknowledged; returning remote to normal mode")
+                self.leaveDriverMode()
+                self.onDriverModeRequestFailed?()
+            }
+        }
+    }
+
+    private func leaveDriverMode() {
+        let wasRequested = isDriverModeActive || awaitingDriverModeAcknowledgement
+        if wasRequested, let peripheral, let command = commandCharacteristic {
+            peripheral.writeValue(Self.driverModeOffCommand, for: command, type: .withResponse)
+            logger.info("BLE driver mode off requested")
+        }
+        setDriverModeInactive()
+    }
+
+    private func setDriverModeInactive() {
+        awaitingDriverModeAcknowledgement = false
+        guard isDriverModeActive else { return }
+        isDriverModeActive = false
+        onDriverModeActive?(false)
     }
 
     private func discoverRemote() {
@@ -268,7 +428,10 @@ final class ShortcutRemoteBatteryMonitor: NSObject, @preconcurrency CBCentralMan
         peripheral = nil
         pendingCompanionCharacteristic = nil
         pendingBatteryCharacteristic = nil
+        commandCharacteristic = nil
+        notificationsReady = []
         isVerifiedRemote = false
+        setDriverModeInactive()
         onBatteryPercentage?(nil)
     }
 

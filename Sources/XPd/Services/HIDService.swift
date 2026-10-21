@@ -34,6 +34,13 @@ final class HIDService {
     private(set) var hasInputAccess = false
     private(set) var hasExclusiveControl = false
     private(set) var batteryPercentage: Int?
+    /// True only after the remote acknowledged XPPen's Bluetooth driver-mode
+    /// command. K, wheel, and center input then arrives over FFE0/0003 and
+    /// the remote's standard HID keyboard collection stays silent.
+    private(set) var isBluetoothDriverModeActive = false
+    /// True when the last driver-mode request failed or got no
+    /// acknowledgement; the remote was sent back to normal mode.
+    private(set) var didBluetoothDriverModeRequestFail = false
     private(set) var lastEvent = "Waiting for Shortcut Remote…"
     private(set) var recentReports: [String] = []
     /// Chronological, memory-only diagnostic trace of reports delivered to
@@ -43,9 +50,22 @@ final class HIDService {
 
     var onInput: ((String?) -> Void)?
     var onDisconnect: (() -> Void)?
+    /// Called when Bluetooth driver mode starts or ends, so key resolution can
+    /// switch between the learned layout and the driver-mode bit order.
+    var onBluetoothDriverModeChange: ((Bool) -> Void)?
+
+    /// Owner setting: request XPPen's Bluetooth driver mode whenever the
+    /// verified remote connects over Bluetooth.
+    var isBluetoothDriverModeEnabled: Bool {
+        get { bluetoothBatteryMonitor.isDriverModeEnabled }
+        set { bluetoothBatteryMonitor.isDriverModeEnabled = newValue }
+    }
+
+
 
     @ObservationIgnored private let resources = HIDResources()
     @ObservationIgnored private let bluetoothBatteryMonitor = ShortcutRemoteBatteryMonitor()
+    @ObservationIgnored private var driverModeDecoder = ShortcutRemoteDriverModeDecoder()
     @ObservationIgnored private var report6ControlIsActive = false
     @ObservationIgnored private var wheelCenterIsHeld = false
     @ObservationIgnored private var connectedDevice: IOHIDDevice?
@@ -71,6 +91,16 @@ final class HIDService {
             guard let self, self.isConnected else { return }
             self.bluetoothBatteryPercentage = percentage
             self.updateBatteryPercentage()
+        }
+        bluetoothBatteryMonitor.onDriverModeActive = { [weak self] isActive in
+            self?.setBluetoothDriverModeActive(isActive)
+        }
+        bluetoothBatteryMonitor.onDriverModePacket = { [weak self] data in
+            self?.receivedDriverModePacket(data)
+        }
+        bluetoothBatteryMonitor.onDriverModeRequestFailed = { [weak self] in
+            self?.didBluetoothDriverModeRequestFail = true
+            self?.lastEvent = "Bluetooth driver mode unavailable"
         }
         if startHardware {
             start()
@@ -113,6 +143,7 @@ final class HIDService {
                 )
                 service.isConnected = true
                 service.refreshBattery(force: true)
+                service.bluetoothBatteryMonitor.isBluetoothTransport = service.connectionTransport == .bluetooth
                 service.bluetoothBatteryMonitor.startMonitoring()
                 service.lastEvent = service.hasInputAccess
                     ? "Shortcut Remote connected"
@@ -326,7 +357,66 @@ final class HIDService {
         onInput?(signature)
     }
 
+    /// Best-effort: return the remote to its normal keyboard behaviour before
+    /// XP[d] quits.
+    func prepareForTermination() {
+        bluetoothBatteryMonitor.leaveDriverModeForTermination()
+    }
+
+    private func setBluetoothDriverModeActive(_ isActive: Bool) {
+        guard isActive != isBluetoothDriverModeActive else { return }
+        let hadHeldInput = driverModeDecoder.keyMask != 0 || driverModeDecoder.isWheelCenterHeld
+        driverModeDecoder.reset()
+        isBluetoothDriverModeActive = isActive
+        if isActive { didBluetoothDriverModeRequestFail = false }
+        lastEvent = isActive ? "Bluetooth driver mode active" : "Bluetooth driver mode off"
+        logger.info("Bluetooth driver mode active=\(isActive, privacy: .public)")
+        if hadHeldInput {
+            // Never leave a K cycle or center hold open across a mode change.
+            onInput?(nil)
+        }
+        onBluetoothDriverModeChange?(isActive)
+    }
+
+    private func receivedDriverModePacket(_ data: Data) {
+        guard isBluetoothDriverModeActive, isConnected, connectionTransport == .bluetooth else { return }
+        for event in driverModeDecoder.decode(data) {
+            switch event {
+            case .keys(let signature):
+                refreshBatteryIfNeeded()
+                rawReportTrace.append(signature)
+                if rawReportTrace.count > Self.rawReportTraceLimit {
+                    rawReportTrace.removeFirst(rawReportTrace.count - Self.rawReportTraceLimit)
+                }
+                lastEvent = signature
+                recentReports.insert(signature, at: 0)
+                recentReports = Array(recentReports.prefix(8))
+                logger.info("BLE driver-mode input: \(signature, privacy: .public)")
+                onInput?(signature)
+            case .wheelCenterPressed:
+                lastEvent = "wheel:center"
+                recentReports.insert(lastEvent, at: 0)
+                recentReports = Array(recentReports.prefix(8))
+                onInput?("wheel:center")
+            case .wheelCenterReleased:
+                lastEvent = "wheel:center released"
+                recentReports.insert(lastEvent, at: 0)
+                recentReports = Array(recentReports.prefix(8))
+                onInput?(nil)
+            case .wheel(let signature):
+                lastEvent = "\(signature) · BLE"
+                recentReports.insert(lastEvent, at: 0)
+                recentReports = Array(recentReports.prefix(8))
+                onInput?(signature)
+            }
+        }
+    }
+
     private func handleDeviceRemoval() {
+        // Route through the single deactivation path so MappingStore drops
+        // its driver-mode key identities before the disconnect is reported.
+        setBluetoothDriverModeActive(false)
+        bluetoothBatteryMonitor.isBluetoothTransport = false
         isConnected = false
         connectedDevice = nil
         connectionTransport = nil
@@ -339,6 +429,17 @@ final class HIDService {
         lastBatteryRefresh = .distantPast
         bluetoothBatteryMonitor.stopMonitoring()
         onDisconnect?()
+    }
+
+    /// Internal test seams for Bluetooth driver mode without CoreBluetooth.
+    func simulateBluetoothDriverModeForTesting(active: Bool) {
+        connectionTransport = .bluetooth
+        isConnected = true
+        setBluetoothDriverModeActive(active)
+    }
+
+    func simulateDriverModePacketForTesting(_ bytes: [UInt8]) {
+        receivedDriverModePacket(Data(bytes))
     }
 
     func simulateDisconnectForTesting() {

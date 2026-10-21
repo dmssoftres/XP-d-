@@ -156,7 +156,10 @@ struct ContentView: View {
         guard store.hid.isConnected else { return "Waiting for Shortcut Remote" }
         switch store.hid.connectionTransport {
         case .usb: return "Connected via USB cable"
-        case .bluetooth: return "Connected via Bluetooth"
+        case .bluetooth:
+            return store.hid.isBluetoothDriverModeActive
+                ? "Connected via Bluetooth · driver mode"
+                : "Connected via Bluetooth"
         case .other(let raw): return "Connected via \(raw)"
         case nil: return "Connected"
         }
