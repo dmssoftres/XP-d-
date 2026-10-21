@@ -299,9 +299,6 @@ final class MappingStore {
     /// persisted independently of the shared device-level hardware layout so
     /// enabling it cannot rewrite MIDI's physical input map.
     private(set) var usesStandardF13F22Preset = false
-    /// Owner setting: switch the remote into XPPen's Bluetooth driver mode on
-    /// every Bluetooth connection. Device-local; not part of profiles.
-    private(set) var usesBluetoothDriverMode = false
     /// Mirrors `HIDService`: true only after the remote acknowledged driver
     /// mode. While true, K1–K10 resolve through the verified driver-mode bit
     /// order in both realms instead of the learned layout.
@@ -575,7 +572,6 @@ final class MappingStore {
     private let wheelSensitivityDefaultsKey = "XPd.wheelSensitivity.v1"
     private let standardModifierHoldThresholdDefaultsKey = "XPd.standardModifierHoldThreshold.v1"
     private let standardF13F22PresetDefaultsKey = "XPd.standardF13F22Preset.v1"
-    private let bluetoothDriverModeDefaultsKey = "XPd.bluetoothDriverMode.v1"
     private var profileStates: [String: ProfileState] = [:]
     private var learningAllCandidate: [RemoteControl: String] = [:]
     private var learningAllCaptured: [RemoteControl: String] = [:]
@@ -756,8 +752,6 @@ final class MappingStore {
             ?? Self.defaultStandardModifierHoldThreshold
         standardModifierHoldThreshold = Self.normalizedStandardModifierHoldThreshold(savedModifierHoldThreshold)
         usesStandardF13F22Preset = defaults.bool(forKey: standardF13F22PresetDefaultsKey)
-        usesBluetoothDriverMode = defaults.bool(forKey: bluetoothDriverModeDefaultsKey)
-        hid.isBluetoothDriverModeEnabled = usesBluetoothDriverMode
 
         let migratedLegacyState = loadOrMigrateProfiles()
         let restoredProfile = migratedLegacyState
@@ -2308,16 +2302,6 @@ final class MappingStore {
             .wheelCCW: "wheel:-",
             .wheelCenter: "wheel:center"
         ]) { key, _ in key }
-
-    /// Persists the owner's Bluetooth driver-mode choice and applies it to
-    /// the connected remote immediately.
-    func setBluetoothDriverModeEnabled(_ enabled: Bool) {
-        guard usesBluetoothDriverMode != enabled else { return }
-        usesBluetoothDriverMode = enabled
-        defaults.set(enabled, forKey: bluetoothDriverModeDefaultsKey)
-        hid.isBluetoothDriverModeEnabled = enabled
-        lastPersistenceResult = .saved
-    }
 
     private func bluetoothDriverModeChanged(_ isActive: Bool) {
         guard isBluetoothDriverModeActive != isActive else { return }

@@ -61,8 +61,6 @@ struct MappingInspector: View {
 
                     standardInputPresetEditor
 
-                    bluetoothDriverModeEditor
-
                     DisclosureGroup(isExpanded: $showsAdvancedHardwareLayout) {
                         hardwareLayoutEditor
                     } label: {
@@ -290,46 +288,6 @@ struct MappingInspector: View {
             && store.learningControl == nil
             && !store.isLearningAll
             && !store.usesStandardF13F22Preset
-    }
-
-    private var bluetoothDriverModeEditor: some View {
-        GroupBox("Bluetooth input") {
-            VStack(alignment: .leading, spacing: 8) {
-                Toggle(isOn: Binding(
-                    get: { store.usesBluetoothDriverMode },
-                    set: { store.setBluetoothDriverModeEnabled($0) }
-                )) {
-                    Label("Bluetooth driver mode (distinct keys)", systemImage: "antenna.radiowaves.left.and.right")
-                        .font(.subheadline.weight(.medium))
-                }
-                .toggleStyle(.switch)
-
-                Text("Over Bluetooth, sends XPPen's own driver-mode command so every K key, the wheel and the wheel center arrive separately, including combinations. K1–K10 are recognised automatically; learned bindings are kept for USB. Applies to Standard and MIDI.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                if store.isBluetoothDriverModeActive {
-                    Label("Driver mode active on this connection.", systemImage: "checkmark.circle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.green)
-                } else if store.usesBluetoothDriverMode, store.hid.didBluetoothDriverModeRequestFail {
-                    Label("The remote did not confirm driver mode; normal keys are in use.", systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                } else if store.usesBluetoothDriverMode {
-                    Label("Waiting for the remote over Bluetooth.", systemImage: "hourglass")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Text("If XP[d] quits unexpectedly, switch the remote off and on to restore its normal keys.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
     }
 
     private var standardInputPresetEditor: some View {

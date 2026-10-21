@@ -38,9 +38,6 @@ final class HIDService {
     /// command. K, wheel, and center input then arrives over FFE0/0003 and
     /// the remote's standard HID keyboard collection stays silent.
     private(set) var isBluetoothDriverModeActive = false
-    /// True when the last driver-mode request failed or got no
-    /// acknowledgement; the remote was sent back to normal mode.
-    private(set) var didBluetoothDriverModeRequestFail = false
     private(set) var lastEvent = "Waiting for Shortcut Remote…"
     private(set) var recentReports: [String] = []
     /// Chronological, memory-only diagnostic trace of reports delivered to
@@ -54,12 +51,6 @@ final class HIDService {
     /// switch between the learned layout and the driver-mode bit order.
     var onBluetoothDriverModeChange: ((Bool) -> Void)?
 
-    /// Owner setting: request XPPen's Bluetooth driver mode whenever the
-    /// verified remote connects over Bluetooth.
-    var isBluetoothDriverModeEnabled: Bool {
-        get { bluetoothBatteryMonitor.isDriverModeEnabled }
-        set { bluetoothBatteryMonitor.isDriverModeEnabled = newValue }
-    }
 
 
 
@@ -99,10 +90,12 @@ final class HIDService {
             self?.receivedDriverModePacket(data)
         }
         bluetoothBatteryMonitor.onDriverModeRequestFailed = { [weak self] in
-            self?.didBluetoothDriverModeRequestFail = true
             self?.lastEvent = "Bluetooth driver mode unavailable"
         }
         if startHardware {
+            // Over Bluetooth the remote always uses XPPen's driver mode, so
+            // every K, the wheel, and the center arrive as distinct inputs.
+            bluetoothBatteryMonitor.isDriverModeEnabled = true
             start()
         }
     }
@@ -368,7 +361,6 @@ final class HIDService {
         let hadHeldInput = driverModeDecoder.keyMask != 0 || driverModeDecoder.isWheelCenterHeld
         driverModeDecoder.reset()
         isBluetoothDriverModeActive = isActive
-        if isActive { didBluetoothDriverModeRequestFail = false }
         lastEvent = isActive ? "Bluetooth driver mode active" : "Bluetooth driver mode off"
         logger.info("Bluetooth driver mode active=\(isActive, privacy: .public)")
         if hadHeldInput {

@@ -185,17 +185,6 @@ final class BluetoothDriverModeTests: XCTestCase {
         XCTAssertFalse(store.isLearningAll)
     }
 
-    func testSettingPersistsAndIsAppliedToHIDService() {
-        let store = makeStore()
-        XCTAssertFalse(store.usesBluetoothDriverMode)
-        store.setBluetoothDriverModeEnabled(true)
-        XCTAssertTrue(store.hid.isBluetoothDriverModeEnabled)
-
-        let reloaded = makeStore()
-        XCTAssertTrue(reloaded.usesBluetoothDriverMode)
-        XCTAssertTrue(reloaded.hid.isBluetoothDriverModeEnabled)
-    }
-
     func testDisconnectWhileActiveRestoresTheLearnedLayout() {
         let store = makeStore()
         let learned = store.hidBindings
