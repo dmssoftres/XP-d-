@@ -14,8 +14,13 @@ struct ContentView: View {
             header
             Divider()
             HStack(alignment: .top, spacing: 28) {
-                RemoteView(store: store)
-                    .frame(width: 300)
+                VStack(spacing: 8) {
+                    RemoteView(store: store)
+                    if store.showsKeyMonitor {
+                        KeyMonitorView(store: store)
+                    }
+                }
+                .frame(width: 300)
                 ScrollView(.vertical) {
                     MappingInspector(store: store)
                         .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -687,5 +692,79 @@ enum AppIdentity {
                 return RunningApp(bundleID: id, name: app.localizedName ?? id)
             }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+}
+
+/// Small always-visible monitor: the remote keys held right now and the
+/// last few presses, combos and wheel turns with what they did.
+private struct KeyMonitorView: View {
+    let store: MappingStore
+    private static let visibleEvents = 3
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 4) {
+                Text("Pressed")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                let held = store.keyMonitorHeldControls
+                if held.isEmpty {
+                    Text("—").font(.caption).foregroundStyle(.tertiary)
+                } else {
+                    ForEach(Array(held.enumerated()), id: \.element) { index, control in
+                        if index > 0 { Text("+").font(.caption).foregroundStyle(.secondary) }
+                        Text(control.rawValue)
+                            .font(.caption.weight(.bold).monospaced())
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Color.green.opacity(0.35), in: Capsule())
+                    }
+                }
+                Spacer()
+                if !store.keyMonitorEvents.isEmpty {
+                    Button {
+                        store.clearKeyMonitor()
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .help("Clear the list")
+                }
+                Button {
+                    store.showsKeyMonitor = false
+                } label: {
+                    Image(systemName: "eye.slash")
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .help("Hide the key monitor (turn it back on from the XP[d] menu bar icon)")
+            }
+            ForEach(store.keyMonitorEvents.prefix(Self.visibleEvents)) { event in
+                HStack(spacing: 4) {
+                    Text(event.input + (event.count > 1 ? " ×\(event.count)" : ""))
+                        .font(.caption2.weight(.semibold))
+                        .lineLimit(1)
+                    Image(systemName: "arrow.right")
+                        .font(.system(size: 7))
+                        .foregroundStyle(.secondary)
+                    Text(event.result)
+                        .font(.caption2)
+                        .foregroundStyle(event.failed ? Color.orange : Color.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+            }
+            if store.keyMonitorEvents.isEmpty {
+                Text("Press a key on the remote to see it here.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .padding(8)
+        .frame(width: 260, alignment: .leading)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Key monitor")
     }
 }

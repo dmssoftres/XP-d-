@@ -640,7 +640,7 @@ final class ActionRunner {
             completion(windowActionOverride(action))
             return
         }
-        if action == .toggleXPd {
+        if action == .toggleXPd || action == .showKeyMap {
             completion(.failure("XP[d] window action is unavailable outside the mapping store"))
             return
         }
@@ -673,7 +673,7 @@ final class ActionRunner {
         }
 
         switch action {
-        case .toggleXPd:
+        case .toggleXPd, .showKeyMap:
             break
         case .minimize:
             switch setMinimized(true, for: application) {

@@ -155,6 +155,15 @@ enum MappingClipboardResult: Equatable {
     case invalidSource
 }
 
+/// One line of the key monitor: what was pressed and what happened.
+struct KeyMonitorEvent: Identifiable, Equatable {
+    let id: Int
+    let input: String
+    let result: String
+    let failed: Bool
+    var count = 1
+}
+
 /// A session-only drag of one action, or of the actions one key chip stands
 /// for (every gesture of one layer sharing that chip). The drag pasteboard
 /// carries only the opaque token; the mappings never leave the store.
@@ -680,6 +689,7 @@ final class MappingStore {
     private let standardModifierHoldThresholdDefaultsKey = "XPd.standardModifierHoldThreshold.v1"
     private let standardF13F22PresetDefaultsKey = "XPd.standardF13F22Preset.v1"
     private let autoSwitchProfilesDefaultsKey = "XPd.autoSwitchProfiles.v1"
+    private let keyMonitorDefaultsKey = "XPd.showsKeyMonitor.v1"
     private var profileStates: [String: ProfileState] = [:]
     private var learningAllCandidate: [RemoteControl: String] = [:]
     private var learningAllCaptured: [RemoteControl: String] = [:]
@@ -801,6 +811,24 @@ final class MappingStore {
     private var isRemoteTriggerCaptureActive = false
     private var remoteTriggerModifierCaptureHandler: ((RemoteControl) -> Void)?
     @ObservationIgnored private lazy var inputOverlay = InputOverlayController(displayDuration: inputOverlayDuration)
+    @ObservationIgnored private lazy var keyMapOverlay: KeyMapOverlayController = {
+        let controller = KeyMapOverlayController()
+        controller.onDismiss = { [weak self] in self?.isKeyMapVisible = false }
+        return controller
+    }()
+    /// True while the on-screen key map is shown.
+    private(set) var isKeyMapVisible = false
+    /// Owner option, on by default: the small "pressed keys" monitor in the
+    /// main window.
+    var showsKeyMonitor = true {
+        didSet { defaults.set(showsKeyMonitor, forKey: keyMonitorDefaultsKey) }
+    }
+    /// Newest first; session only.
+    private(set) var keyMonitorEvents: [KeyMonitorEvent] = []
+    @ObservationIgnored private var nextKeyMonitorEventID = 0
+    static let keyMonitorEventLimit = 6
+    /// The key map stays up at least this long (or the overlay time if longer).
+    static let keyMapMinimumDisplayDuration: TimeInterval = 12
     @ObservationIgnored private let terminationObserver = MIDIShutdownObserver()
 
     private static func currentRemoteModifierSet() -> Set<KeyboardShortcut.Modifier> {
@@ -856,6 +884,7 @@ final class MappingStore {
         self.remoteKeyProvider = remoteKeyProvider
 
         autoSwitchProfilesEnabled = defaults.bool(forKey: autoSwitchProfilesDefaultsKey)
+        showsKeyMonitor = defaults.object(forKey: keyMonitorDefaultsKey) as? Bool ?? true
         let savedProfile = defaults.string(forKey: profileNameDefaultsKey)
         showsInputOverlay = defaults.object(forKey: inputOverlayDefaultsKey) as? Bool ?? true
         let savedDuration = defaults.object(forKey: inputOverlayDurationDefaultsKey) as? Double ?? 4
@@ -2123,6 +2152,138 @@ final class MappingStore {
         return true
     }
 
+    // MARK: Key monitor
+
+    /// Remote keys held right now, in remote order (Standard or MIDI).
+    var keyMonitorHeldControls: [RemoteControl] {
+        let held = activeRealm == .midi ? activeMIDIControls : activeStandardControls
+        return RemoteControl.allCases.filter { held.contains($0) && $0 != .wheelCenter }
+    }
+
+    func clearKeyMonitor() {
+        keyMonitorEvents.removeAll()
+    }
+
+    static func keyMonitorInput(control: RemoteControl, layer: Set<RemoteControl>, gesture: GestureKind?) -> String {
+        let name: String
+        switch control {
+        case .wheelCW: name = "Wheel ↻"
+        case .wheelCCW: name = "Wheel ↺"
+        default: name = control.rawValue
+        }
+        let keys = (RemoteControl.allCases.filter { layer.contains($0) }.map(\.rawValue) + [name])
+            .joined(separator: " + ")
+        guard let gesture else { return keys }
+        return "\(keys) · \(gesture.rawValue)"
+    }
+
+    private func recordKeyMonitorEvent(input: String, result: ActionExecutionResult) {
+        recordKeyMonitorEvent(input: input, result: result.message, failed: !result.succeeded)
+    }
+
+    /// Adds an event, folding an immediate repeat (e.g. wheel clicks) into
+    /// a count instead of a new line.
+    private func recordKeyMonitorEvent(input: String, result: String, failed: Bool = false) {
+        guard showsKeyMonitor else { return }
+        if let first = keyMonitorEvents.first, first.input == input, first.result == result, first.failed == failed {
+            keyMonitorEvents[0].count += 1
+            return
+        }
+        nextKeyMonitorEventID += 1
+        keyMonitorEvents.insert(
+            KeyMonitorEvent(id: nextKeyMonitorEventID, input: input, result: result, failed: failed),
+            at: 0
+        )
+        if keyMonitorEvents.count > Self.keyMonitorEventLimit {
+            keyMonitorEvents.removeLast(keyMonitorEvents.count - Self.keyMonitorEventLimit)
+        }
+    }
+
+    // MARK: Key map (cheat sheet)
+
+    /// The press that opened the key map (e.g. a Hold) may keep sending its
+    /// own state; only a different press closes the map.
+    @ObservationIgnored private var keyMapOpeningSignature: String?
+    @ObservationIgnored private var lastHIDSignatureForKeyMap: String?
+    private static let emptyReport2Signature = "r2:F0 00 00 00 00 00 00 00"
+
+    private func isPressContinuingKeyMapGesture(_ signature: String?) -> Bool {
+        signature != nil && signature == keyMapOpeningSignature
+    }
+
+    func keyMapPresentation() -> KeyMapPresentation {
+        let keyControls = RemoteControl.allCases.filter(\.isMIDIButton)
+        if activeRealm == .midi {
+            let keys = keyControls.map { control in
+                let detail = midiButtonMapping(for: control, layer: .primary).displayDetail
+                let line = [detail.primary, detail.secondary].filter { !$0.isEmpty }.joined(separator: " · ")
+                return KeyMapPresentation.Key(control: control, title: "", isModifier: false, lines: [line])
+            }
+            return KeyMapPresentation(profileName: profileName, isMIDI: true, keys: keys, wheelLines: [])
+        }
+
+        func label(_ gesture: GestureKind, _ mapping: Mapping) -> String? {
+            let presentation = InputOverlayPresentation(mapping: mapping)
+            guard presentation.isConfigured else { return nil }
+            return gesture == .tap ? presentation.title : "\(gesture.rawValue): \(presentation.title)"
+        }
+        func layerName(_ modifiers: Set<RemoteControl>) -> String {
+            RemoteControl.allCases.filter { modifiers.contains($0) }.map(\.rawValue).joined(separator: "+")
+        }
+        func resolved(_ control: RemoteControl, _ gesture: GestureKind, _ modifiers: Set<RemoteControl>) -> Mapping {
+            (try? resolvedMapping(for: control, gesture: gesture, modifierControls: modifiers).get()) ?? Mapping()
+        }
+
+        let layers = Set(mappings.keys.map(\.modifierControls).filter { !$0.isEmpty })
+            .sorted { layerName($0) < layerName($1) }
+        let keys = keyControls.map { control -> KeyMapPresentation.Key in
+            var lines = GestureKind.allCases.compactMap { label($0, resolved(control, $0, [])) }
+            for layer in layers where !layer.contains(control) {
+                for gesture in GestureKind.allCases {
+                    if let text = label(gesture, resolved(control, gesture, layer)) {
+                        lines.append("\(layerName(layer))+ \(text)")
+                    }
+                }
+            }
+            return KeyMapPresentation.Key(
+                control: control,
+                title: standardButtonTitle(for: control),
+                isModifier: isRemoteModifier(control),
+                lines: KeyMapPresentation.capped(lines)
+            )
+        }
+
+        var wheelLines = ["Turn: scroll"]
+        for modifier in wheelLayerModifiers {
+            for (direction, arrow) in [(RemoteControl.wheelCW, "↻"), (.wheelCCW, "↺")] {
+                if let text = label(.tap, wheelLayerMapping(for: direction, modifier: modifier)) {
+                    wheelLines.append("\(modifier.rawValue) + \(arrow): \(text)")
+                }
+            }
+        }
+        return KeyMapPresentation(profileName: profileName, isMIDI: false, keys: keys, wheelLines: wheelLines)
+    }
+
+    func showKeyMap() {
+        keyMapOpeningSignature = activeStandardControls.isEmpty ? nil : lastHIDSignatureForKeyMap
+        keyMapOverlay.show(
+            keyMapPresentation(),
+            hideAfter: max(Self.keyMapMinimumDisplayDuration, inputOverlayDuration)
+        )
+        isKeyMapVisible = true
+    }
+
+    func hideKeyMap() {
+        keyMapOpeningSignature = nil
+        guard isKeyMapVisible else { return }
+        keyMapOverlay.hide()
+        isKeyMapVisible = false
+    }
+
+    func toggleKeyMap() {
+        isKeyMapVisible ? hideKeyMap() : showKeyMap()
+    }
+
     // MARK: Wheel with a MOD key held
 
     /// Single MOD keys that can give the wheel extra actions.
@@ -2481,6 +2642,10 @@ final class MappingStore {
         case let .success(mapping):
             if let actionExecutionOverride {
                 actionExecutionOverride(mapping, completion)
+            } else if mapping.action == .windowDisplay,
+                      mapping.command == WindowDisplayAction.showKeyMap.rawValue {
+                toggleKeyMap()
+                completion(.success(isKeyMapVisible ? "Key map shown" : "Key map hidden"))
             } else if mapping.action == .windowDisplay,
                       mapping.command == WindowDisplayAction.toggleXPd.rawValue {
                 guard let mainWindowToggle else {
@@ -3657,6 +3822,16 @@ final class MappingStore {
     }
 
     private func handleHIDInput(_ signature: String?) {
+        // A new press after the key map is up closes it; the press still
+        // runs normally.
+        if isKeyMapVisible, let signature, signature != Self.emptyReport2Signature,
+           !isPressContinuingKeyMapGesture(signature) {
+            hideKeyMap()
+        }
+        if signature == nil || signature == Self.emptyReport2Signature {
+            keyMapOpeningSignature = nil // the opening press was released
+        }
+        lastHIDSignatureForKeyMap = signature
         liveInputGeneration += 1
         let generation = liveInputGeneration
         observeStandardF13F22PresetInput(signature)
@@ -3973,8 +4148,10 @@ final class MappingStore {
                 cancelActiveStandardModifierHoldTasks(reason: "wheel-layer")
                 cancelActiveStandardSequenceWindows(reason: "wheel-layer")
                 activeStandardModifierBaseSuppressed = true
+                let monitorInput = Self.keyMonitorInput(control: matched, layer: wheelLayer, gesture: nil)
                 executeMapping(for: matched, gesture: .tap, modifierControls: wheelLayer) { [weak self] result in
                     self?.lastActionResult = result
+                    self?.recordKeyMonitorEvent(input: monitorInput, result: result)
                 }
                 releaseWheelAfterDelay(generation: generation)
                 return
@@ -3985,6 +4162,10 @@ final class MappingStore {
             if activeStandardReport2Controls.isEmpty {
                 cancelStandardCycle()
             }
+            recordKeyMonitorEvent(
+                input: Self.keyMonitorInput(control: matched, layer: [], gesture: nil),
+                result: "scroll"
+            )
             actionRunner.scroll(
                 direction: matched == .wheelCW ? .down : .up,
                 sensitivity: wheelSensitivity
@@ -5007,7 +5188,9 @@ final class MappingStore {
     private func recognizedButtonGesture(identity: ButtonGestureIdentity, gesture: GestureKind) {
         let control = identity.control
         let layer = identity.modifierControls
+        let monitorInput = Self.keyMonitorInput(control: control, layer: layer, gesture: gesture)
         guard mappings[MappingKey(control: control, gesture: gesture, modifierControls: layer)] != nil else {
+            recordKeyMonitorEvent(input: monitorInput, result: "no action")
             return
         }
         let mapping = mapping(for: control, gesture: gesture, modifierControls: layer)
@@ -5015,7 +5198,10 @@ final class MappingStore {
         let expectedKeyboardKeys = mapping.remoteTriggerKeyCode.map { Set([$0]) } ?? []
         guard mapping.remoteTriggerModifiers == identity.keyboardModifiers,
               identity.functionKeys == expectedFunctionKeys,
-              identity.keyboardKeys == expectedKeyboardKeys else { return }
+              identity.keyboardKeys == expectedKeyboardKeys else {
+            recordKeyMonitorEvent(input: monitorInput, result: "no action")
+            return
+        }
         modifierArbitrationLogger.info(
             "gesture selected control=\(control.rawValue, privacy: .public) gesture=\(gesture.rawValue, privacy: .public) scope=\(layer.isEmpty ? "base" : "layer", privacy: .public) modifier-count=\(layer.count, privacy: .public)"
         )
@@ -5029,6 +5215,7 @@ final class MappingStore {
         }
         executeMapping(for: control, gesture: gesture, modifierControls: layer) { [weak self] result in
             self?.lastActionResult = result
+            self?.recordKeyMonitorEvent(input: monitorInput, result: result)
         }
     }
 
@@ -5175,6 +5362,12 @@ final class MappingStore {
     }
 
     private func handleMIDIControlPress(_ control: RemoteControl) {
+        if control.isMIDIButton {
+            let detail = midiButtonMapping(for: control, layer: fnIsActive ? .function : .primary).displayDetail
+            recordKeyMonitorEvent(input: control.rawValue, result: detail.primary)
+        } else if control.isWheelRotation {
+            recordKeyMonitorEvent(input: Self.keyMonitorInput(control: control, layer: [], gesture: nil), result: "MIDI wheel")
+        }
         if control == .wheelCenter, fnControl == .wheelCenter {
             beginCenterMIDIInteraction()
             return

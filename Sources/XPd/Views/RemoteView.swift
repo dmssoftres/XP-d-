@@ -364,24 +364,7 @@ struct RemoteView: View {
     }
 
     private func midiButtonDetail(_ mapping: MIDIButtonMapping) -> (primary: String, secondary: String) {
-        switch mapping.kind {
-        case .note:
-            return ("\(midiNoteName(mapping.note)) (\(mapping.note))", "Ch \(mapping.channel) · V \(mapping.velocity)")
-        case .cc:
-            return ("CC \(mapping.controller)", "Ch \(mapping.channel) · \(mapping.pressValue)/\(mapping.releaseValue)")
-        case .program:
-            return ("PC \(mapping.program)", "Ch \(mapping.channel)")
-        case .chord:
-            return (mapping.chord.map(String.init).joined(separator: ","), "Ch \(mapping.channel) · V \(mapping.velocity)")
-        case .noAction:
-            return ("No output", "")
-        }
-    }
-
-    private func midiNoteName(_ note: Int) -> String {
-        let names = ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B"]
-        guard (0...127).contains(note) else { return "N" }
-        return names[note % 12] + String(note / 12 - 2)
+        mapping.displayDetail
     }
 
     private func midiMenuKinds(current: MIDIButtonKind) -> [MIDIButtonKind] {

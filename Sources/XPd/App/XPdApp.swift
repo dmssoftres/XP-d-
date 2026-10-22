@@ -36,10 +36,10 @@ struct XPdApp: App {
     var body: some Scene {
         WindowGroup("XP[d]", id: "main") {
             ContentView(store: store)
-                .frame(minWidth: 860, minHeight: 640)
+                .frame(minWidth: 860, minHeight: 712)
                 .background(MainWindowRegistrationView(controller: mainWindowController))
         }
-        .defaultSize(width: 964, height: 709)
+        .defaultSize(width: 964, height: 760)
         .commands {
             CommandGroup(replacing: .undoRedo) {
                 Button("Undo") { Self.undoOrForward(store: store, redo: false) }
@@ -113,6 +113,10 @@ private struct MenuBarView: View {
             store.previewInputOverlay()
         }
         .disabled(!store.showsInputOverlay)
+        Toggle("Show Key Monitor in Window", isOn: Bindable(store).showsKeyMonitor)
+        Button(store.isKeyMapVisible ? "Hide Key Map" : "Show Key Map") {
+            store.toggleKeyMap()
+        }
         Divider()
         Text("Profile: \(store.profileName)")
         Label(
