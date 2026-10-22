@@ -2123,6 +2123,48 @@ final class MappingStore {
         return true
     }
 
+    // MARK: Wheel with a MOD key held
+
+    /// Single MOD keys that can give the wheel extra actions.
+    var wheelLayerModifiers: [RemoteControl] {
+        guard activeRealm == .standard else { return [] }
+        let available = remoteModifierControls.subtracting(unavailableRemoteModifierControls)
+        return RemoteControl.allCases.filter { available.contains($0) }
+    }
+
+    /// Wheel layer actions are limited to keys and media, which make sense
+    /// once per wheel click.
+    static let wheelLayerActions: [ActionKind] = [.keyboardShortcut, .mediaControl]
+
+    func wheelLayerMapping(for direction: RemoteControl, modifier: RemoteControl) -> Mapping {
+        mapping(for: direction, gesture: .tap, modifierControls: [modifier])
+    }
+
+    func updateWheelLayerMapping(_ mapping: Mapping, for direction: RemoteControl, modifier: RemoteControl) {
+        guard direction.isWheelRotation, wheelLayerModifiers.contains(modifier) else { return }
+        guard mapping.action == .noAction || Self.wheelLayerActions.contains(mapping.action) else { return }
+        guard mapping != Mapping() else {
+            // "Scroll" removes the entry instead of storing an empty one.
+            let key = MappingKey(control: direction, gesture: .tap, modifierControls: [modifier])
+            guard mappings.removeValue(forKey: key) != nil else { return }
+            save()
+            return
+        }
+        update(mapping, for: direction, gesture: .tap, modifierControls: [modifier])
+    }
+
+    /// The held MOD layer whose wheel action should run instead of
+    /// scrolling, or nil to scroll as usual.
+    private func configuredWheelLayer(for direction: RemoteControl) -> Set<RemoteControl>? {
+        let available = remoteModifierControls.subtracting(unavailableRemoteModifierControls)
+        let held = activeStandardControls.intersection(available)
+        guard !held.isEmpty else { return nil }
+        let mapping = mapping(for: direction, gesture: .tap, modifierControls: held)
+        guard Self.wheelLayerActions.contains(mapping.action),
+              InputOverlayPresentation(mapping: mapping).isConfigured else { return nil }
+        return held
+    }
+
     // MARK: Auto-switch profile by app
 
     enum AutoSwitchAssignmentResult: Equatable {
@@ -2469,7 +2511,8 @@ final class MappingStore {
         _ modifierControls: Set<RemoteControl>,
         for control: RemoteControl
     ) -> Set<RemoteControl> {
-        guard activeRealm == .standard, control.isModifierEligible else { return [] }
+        // Wheel rotation may have MOD-layer actions (Hold MOD + turn).
+        guard activeRealm == .standard, control.isModifierEligible || control.isWheelRotation else { return [] }
         return modifierControls
             .intersection(remoteModifierControls.subtracting(unavailableRemoteModifierControls))
             .subtracting([control])
@@ -3920,6 +3963,22 @@ final class MappingStore {
         }
 
         if matched.isWheelRotation {
+            // Read the held MOD layer before any cycle reset below.
+            if let wheelLayer = configuredWheelLayer(for: matched) {
+                // Keep the held MOD cycle alive (on report 6 too) so further
+                // wheel clicks reach the same layer; stop everything that
+                // would otherwise fire on release: other held keys' gestures,
+                // the MOD's hold timers and sequence windows, and its Tap.
+                cancelActiveStandardPrimaryGestures()
+                cancelActiveStandardModifierHoldTasks(reason: "wheel-layer")
+                cancelActiveStandardSequenceWindows(reason: "wheel-layer")
+                activeStandardModifierBaseSuppressed = true
+                executeMapping(for: matched, gesture: .tap, modifierControls: wheelLayer) { [weak self] result in
+                    self?.lastActionResult = result
+                }
+                releaseWheelAfterDelay(generation: generation)
+                return
+            }
             // Wheel reports belong to report 6. Keep a separate report-2
             // snapshot cycle alive while the wheel detent and its generic
             // release are processed.

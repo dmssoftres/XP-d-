@@ -1253,10 +1253,47 @@ struct MappingInspector: View {
                     }
                 }
 
+                if store.activeRealm == .standard {
+                    wheelLayerEditor
+                }
+
                 actionResult
                 persistenceResult
             }
             .padding(4)
+        }
+    }
+
+    /// Hold a MOD key and turn the wheel: one action per wheel click. An
+    /// empty row keeps normal scrolling for that layer.
+    @ViewBuilder
+    private var wheelLayerEditor: some View {
+        Divider()
+        VStack(alignment: .leading, spacing: 8) {
+            Text("With a MOD key held")
+                .font(.headline)
+            if store.wheelLayerModifiers.isEmpty {
+                Text("Make a K key a MOD key to give the wheel extra actions, such as volume or zoom.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(store.wheelLayerModifiers) { modifier in
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(store.modifierColor(for: modifier).swiftUIColor)
+                                .frame(width: 8, height: 8)
+                            Text("Hold \(modifier.rawValue) and turn")
+                                .font(.subheadline.weight(.semibold))
+                        }
+                        WheelLayerActionRow(store: store, direction: .wheelCW, modifier: modifier, label: "Clockwise")
+                        WheelLayerActionRow(store: store, direction: .wheelCCW, modifier: modifier, label: "Counter-clockwise")
+                    }
+                }
+                Text("Empty rows scroll as usual. The MOD key's own action does not run after it was used with the wheel.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -2649,6 +2686,79 @@ private struct StandardMappingActionEditor: View {
             activeCaptureLayer = modifierControls
         } else if activeCaptureLayer == modifierControls {
             activeCaptureLayer = nil
+        }
+    }
+}
+
+/// One wheel direction for one MOD key: Scroll (default), a keyboard
+/// shortcut, or a media key.
+private struct WheelLayerActionRow: View {
+    let store: MappingStore
+    let direction: RemoteControl
+    let modifier: RemoteControl
+    let label: String
+
+    private var mapping: Mapping {
+        store.wheelLayerMapping(for: direction, modifier: modifier)
+    }
+
+    private func write(_ mapping: Mapping) {
+        store.updateWheelLayerMapping(mapping, for: direction, modifier: modifier)
+    }
+
+    private var kindBinding: Binding<ActionKind> {
+        Binding(
+            get: { MappingStore.wheelLayerActions.contains(mapping.action) ? mapping.action : .noAction },
+            set: { kind in
+                write(kind == .noAction ? Mapping() : mapping.selectingAction(kind))
+            }
+        )
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .font(.caption)
+                .frame(width: 112, alignment: .leading)
+            Picker(label, selection: kindBinding) {
+                Text("Scroll").tag(ActionKind.noAction)
+                ForEach(MappingStore.wheelLayerActions) { kind in
+                    Text(kind.rawValue).tag(kind)
+                }
+            }
+            .labelsHidden()
+            .frame(width: 150)
+            switch kindBinding.wrappedValue {
+            case .keyboardShortcut:
+                KeyboardShortcutCaptureField(
+                    command: Binding(
+                        get: { mapping.command },
+                        set: { write(mapping.editingCommand($0)) }
+                    ),
+                    shortcut: Binding(
+                        get: { mapping.keyboardShortcut },
+                        set: { shortcut in
+                            var updated = mapping
+                            updated.keyboardShortcut = shortcut
+                            write(updated)
+                        }
+                    ),
+                    cancellationGeneration: 0,
+                    onRecordingChange: { _ in }
+                )
+            case .mediaControl:
+                Picker("Media", selection: Binding(
+                    get: { MediaControlAction(rawValue: mapping.command) ?? .playPause },
+                    set: { write(mapping.editingCommand($0.rawValue)) }
+                )) {
+                    ForEach(MediaControlAction.allCases) { action in
+                        Text(action.rawValue).tag(action)
+                    }
+                }
+                .labelsHidden()
+            default:
+                EmptyView()
+            }
         }
     }
 }
