@@ -1,4 +1,5 @@
 import Foundation
+import UniformTypeIdentifiers
 
 enum RemoteControl: String, CaseIterable, Codable, Identifiable {
     case k1 = "K1", k2 = "K2", k3 = "K3", k4 = "K4", k5 = "K5"
@@ -62,6 +63,7 @@ enum ComboMode: String, Codable {
 enum ActionKind: String, CaseIterable, Codable, Identifiable {
     case keyboardShortcut = "Keyboard shortcut"
     case typeText = "Type text"
+    case openLink = "Open link or file"
     case openApplication = "Open application"
     case toggleApplication = "Toggle application"
     case macOSShortcut = "Run macOS Shortcut"
@@ -110,6 +112,100 @@ enum ActionKind: String, CaseIterable, Codable, Identifiable {
 enum TypeTextLimits {
     static let maximumLength = 2_000
     static let chunkLength = 20
+}
+
+/// What an "Open link or file" mapping points to. Only web pages, e-mail
+/// addresses and files/folders on this Mac are allowed (owner decision);
+/// a bare domain such as `example.com` is treated as a web page.
+enum OpenLinkTarget: Equatable {
+    case web(URL)
+    case mail(URL)
+    case file(URL)
+
+    enum Problem: Error, Equatable {
+        case empty
+        case unsupported(String)
+        case missingFile(String)
+        /// Apps, scripts and link files run or redirect when opened; they
+        /// belong to Open application / Run shell command, which have their
+        /// own approval rules.
+        case runnable(String)
+    }
+
+    /// Extensions that run code or jump to an arbitrary link when opened.
+    static let runnableExtensions: Set<String> = [
+        "app", "command", "tool", "terminal", "sh", "zsh", "bash", "csh", "ksh",
+        "py", "pl", "rb", "js", "jar", "scpt", "scptd", "applescript", "workflow",
+        "shortcut", "action", "webloc", "inetloc", "fileloc", "pkg", "mpkg"
+    ]
+
+    /// Document-like endings that must not be read as a bare web domain.
+    private static let fileLikeEndings: Set<String> = [
+        "pdf", "doc", "docx", "txt", "rtf", "pages", "key", "numbers", "xls", "xlsx",
+        "ppt", "pptx", "csv", "jpg", "jpeg", "png", "heic", "gif", "mov", "mp4", "zip", "md"
+    ]
+
+    static func isRunnableFile(_ url: URL) -> Bool {
+        if runnableExtensions.contains(url.pathExtension.lowercased()) { return true }
+        let values = try? url.resourceValues(forKeys: [.contentTypeKey, .isRegularFileKey, .isExecutableKey])
+        if let type = values?.contentType,
+           type.conforms(to: .application) || type.conforms(to: .executable) || type.conforms(to: .script) {
+            return true
+        }
+        return values?.isRegularFile == true && values?.isExecutable == true
+    }
+
+    var url: URL {
+        switch self {
+        case let .web(url), let .mail(url), let .file(url): url
+        }
+    }
+
+    static func resolve(
+        _ rawCommand: String,
+        fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
+        isRunnable: (URL) -> Bool = OpenLinkTarget.isRunnableFile
+    ) -> Result<OpenLinkTarget, Problem> {
+        func file(_ url: URL, shown: String) -> Result<OpenLinkTarget, Problem> {
+            guard fileExists(url.path) else { return .failure(.missingFile(shown)) }
+            guard !isRunnable(url) else { return .failure(.runnable(shown)) }
+            return .success(.file(url))
+        }
+        let command = rawCommand.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !command.isEmpty else { return .failure(.empty) }
+
+        if command.hasPrefix("/") || command.hasPrefix("~") {
+            let path = (command as NSString).expandingTildeInPath
+            return file(URL(fileURLWithPath: path), shown: command)
+        }
+
+        if let url = URL(string: command), let scheme = url.scheme?.lowercased() {
+            switch scheme {
+            case "http", "https":
+                guard url.host?.isEmpty == false else { return .failure(.unsupported(command)) }
+                return .success(.web(url))
+            case "mailto":
+                return .success(.mail(url))
+            case "file":
+                return file(url, shown: url.path)
+            default:
+                // "example.com:8080" parses with scheme "example.com"; only
+                // a dotted, space-free word may be read as a bare domain.
+                break
+            }
+        }
+
+        if !command.contains(" "), !command.contains("://"),
+           command.contains("."), !command.hasPrefix("."),
+           let url = URL(string: "https://" + command),
+           let host = url.host, host.contains("."),
+           let ending = host.split(separator: ".").last.map({ String($0).lowercased() }),
+           ending.count >= 2, ending.allSatisfy(\.isLetter),
+           !fileLikeEndings.contains(ending), !runnableExtensions.contains(ending) {
+            return .success(.web(url))
+        }
+        return .failure(.unsupported(command))
+    }
 }
 
 /// Fixed choices stored in `Mapping.command` for Media control mappings. The
@@ -423,9 +519,9 @@ struct Mapping: Codable, Equatable {
         case .switchProfile:
             guard replacingInvalid, let profileName, !profileName.isEmpty else { return nil }
             return profileName
-        case .typeText:
-            // Never carry a previous script, app path or profile name into
-            // text that will be typed (it could run in a terminal).
+        case .typeText, .openLink:
+            // Never carry a previous script, app path, profile name or text
+            // into a new target (it could be typed or opened).
             return replacingInvalid ? "" : nil
         default:
             return nil

@@ -2048,6 +2048,8 @@ private struct StandardMappingActionEditor: View {
             )
         case .typeText:
             typeTextEditor
+        case .openLink:
+            openLinkEditor
         case .openApplication, .toggleApplication, .macOSShortcut:
             singleLineCommandEditor
         case .appleScript:
@@ -2173,6 +2175,42 @@ private struct StandardMappingActionEditor: View {
                 .help("Click to edit")
             }
         }
+    }
+
+    /// Link field plus Choose… for files and folders, with a live check of
+    /// what the target will open.
+    private var openLinkEditor: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .bottom, spacing: 6) {
+                singleLineCommandEditor
+                Button("Choose…", action: chooseLinkFile)
+            }
+            Text(openLinkStatus)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var openLinkStatus: String {
+        switch OpenLinkTarget.resolve(binding.wrappedValue.command) {
+        case .success(.web): "Opens this web page in your browser."
+        case .success(.mail): "Starts a new e-mail."
+        case let .success(.file(url)): "Opens \(url.lastPathComponent) with its usual app."
+        case .failure(.empty): "Web pages, e-mail addresses, files and folders."
+        case .failure(.missingFile): "File or folder not found."
+        case .failure(.unsupported): "Only web links, e-mail addresses and files can be opened."
+        case .failure(.runnable): "Apps and scripts can't be opened here. Use Open application or Run shell command."
+        }
+    }
+
+    private func chooseLinkFile() {
+        cancelEditing()
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        commandBinding.wrappedValue = url.path
     }
 
     /// Plain-text box for the Type text action. Line breaks are typed as
@@ -2537,6 +2575,8 @@ private struct StandardMappingActionEditor: View {
             "Application name (for example, ChatGPT)"
         case .macOSShortcut:
             "Name from the Shortcuts app"
+        case .openLink:
+            "https://…, mailto:…, or a file"
         default:
             "Command"
         }
@@ -2548,6 +2588,8 @@ private struct StandardMappingActionEditor: View {
             "Application"
         case .macOSShortcut:
             "Shortcut name"
+        case .openLink:
+            "Link, file or folder"
         default:
             "Command"
         }

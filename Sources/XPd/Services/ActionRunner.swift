@@ -23,6 +23,7 @@ struct ActionExecutionResult: Equatable {
 @MainActor
 final class ActionRunner {
     typealias EventPoster = (CGEvent) -> Void
+    typealias URLOpener = (URL) -> Bool
     typealias PostEventAccessProvider = () -> Bool
     typealias ProcessExecutor = @Sendable (URL, [String]) async -> ProcessExecutionOutcome
     typealias WindowActionOverride = (WindowDisplayAction) -> ActionExecutionResult
@@ -76,6 +77,7 @@ final class ActionRunner {
     private static let activationVerificationDelay = Duration.milliseconds(50)
 
     private let eventPoster: EventPoster
+    private let urlOpener: URLOpener
     private let postEventAccessProvider: PostEventAccessProvider
     private let processExecutor: ProcessExecutor
     private let windowActionOverride: WindowActionOverride?
@@ -102,10 +104,12 @@ final class ActionRunner {
         },
         processExecutor: @escaping ProcessExecutor = ActionRunner.runProcess,
         windowActionOverride: WindowActionOverride? = nil,
-        screenMoveOverride: ScreenMoveOverride? = nil
+        screenMoveOverride: ScreenMoveOverride? = nil,
+        urlOpener: @escaping URLOpener = { NSWorkspace.shared.open($0) }
     ) {
         self.postEventAccessProvider = postEventAccessProvider
         self.eventPoster = eventPoster
+        self.urlOpener = urlOpener
         self.processExecutor = processExecutor
         self.windowActionOverride = windowActionOverride
         self.screenMoveOverride = screenMoveOverride
@@ -211,6 +215,9 @@ final class ActionRunner {
             return
         case .typeText:
             executeTypeText(mapping, completion: completion)
+            return
+        case .openLink:
+            executeOpenLink(mapping, completion: completion)
             return
         case .macOSShortcut:
             executeMacOSShortcut(mapping, completion: completion)
@@ -872,6 +879,32 @@ final class ActionRunner {
         }
         flush()
         return steps
+    }
+
+    private func executeOpenLink(
+        _ mapping: Mapping,
+        completion: @escaping @MainActor (ActionExecutionResult) -> Void
+    ) {
+        switch OpenLinkTarget.resolve(mapping.command) {
+        case let .success(target):
+            let label: String
+            switch target {
+            case let .web(url): label = url.host ?? url.absoluteString
+            case let .mail(url): label = url.absoluteString
+            case let .file(url): label = url.lastPathComponent
+            }
+            completion(urlOpener(target.url)
+                ? .success("Opened " + label)
+                : .failure("Could not open " + label))
+        case .failure(.empty):
+            completion(.failure("Enter a link or choose a file first"))
+        case .failure(.missingFile):
+            completion(.failure("File or folder not found; choose it again"))
+        case .failure(.unsupported):
+            completion(.failure("Only web links, e-mail addresses and files can be opened"))
+        case .failure(.runnable):
+            completion(.failure("Apps and scripts can't be opened here; use Open application or Run shell command"))
+        }
     }
 
     private func executeTypeText(

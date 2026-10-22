@@ -74,10 +74,18 @@ struct InputOverlayPresentation: Equatable {
                     .lastPathComponent
             } else if mapping.action == .switchProfile {
                 title = "Profile · " + command
+            } else if mapping.action == .openLink {
+                switch OpenLinkTarget.resolve(command) {
+                case let .success(.web(url)): title = "Open · " + (url.host ?? command)
+                case let .success(.mail(url)): title = "Mail · " + url.absoluteString.replacingOccurrences(of: "mailto:", with: "")
+                case let .success(.file(url)): title = "Open · " + url.lastPathComponent
+                case .failure: title = "Link needs fixing"
+                }
             } else {
                 title = command
             }
-            isConfigured = true
+            isConfigured = mapping.action != .openLink
+                || (try? OpenLinkTarget.resolve(command).get()) != nil
         } else {
             shortcutTokens = []
             title = "Not set"
