@@ -11,17 +11,134 @@ drums, and chords.
 > the hardware this app works with. No XPPen software, firmware or code is
 > included or distributed.
 
-## Requirements and building
+## Installation (new users)
 
-- macOS 14 or later, Swift 6 toolchain (Xcode command-line tools).
-- An XPPen ACK05 "Shortcut Remote" (tested: model ACK05-B over Bluetooth and
-  USB). XPPen's own driver is **not** needed; quit or remove it, because it
-  competes with XP[d] for the remote.
-- Build, sign (ad hoc) and launch: `./script/build_and_run.sh`
+XP[d] is not sold through the App Store and is not yet a ready-made download.
+You build it on your own Mac from this source code. It takes about five minutes
+and you only need to copy a few commands into the Terminal app.
+
+### What you need
+
+- A Mac with **macOS 14 (Sonoma) or later**.
+- An **XPPen ACK05 Shortcut Remote** (tested with model ACK05-B, over Bluetooth
+  and USB).
+- Apple's free **Command Line Tools** (they contain the Swift compiler).
+- About 1 GB of free disk space.
+
+### Step 1 — Install Apple's Command Line Tools
+
+Open **Terminal** (Applications › Utilities › Terminal), paste this line and
+press Return:
+
+```sh
+xcode-select --install
+```
+
+Click **Install** in the window that appears and wait for it to finish. If it
+says the tools are already installed, go to the next step. (If you already
+have Xcode installed, you can skip this step.)
+
+### Step 2 — Download XP[d]
+
+Either:
+
+- **With git** (in Terminal):
+
+  ```sh
+  git clone https://github.com/dmssoftres/XP-d-.git
+  cd XP-d-
+  ```
+
+- **Or without git:** on this GitHub page click **Code › Download ZIP**, unzip
+  it, then in Terminal type `cd ` (with a space) and drag the unzipped folder
+  onto the Terminal window, and press Return.
+
+### Step 3 — Build and open the app
+
+In Terminal, inside the XP[d] folder, run:
+
+```sh
+bash script/build_and_run.sh
+```
+
+The first build takes a few minutes. When it finishes, XP[d] opens by itself.
+The finished app is in the `dist` folder as **XP[d].app**. You can drag it into
+your **Applications** folder and open it from there from now on.
+
+### Step 4 — Remove XPPen's own driver
+
+XPPen's driver and XP[d] cannot both control the remote. Quit the XPPen driver
+and stop it from starting at login (System Settings › General › Login Items &
+Extensions). You can also uninstall it; XP[d] does not need it.
+
+### Step 5 — Connect the remote
+
+- **Bluetooth:** switch the remote on and pair it in **System Settings ›
+  Bluetooth**.
+- **Or USB:** plug it in with a data cable.
+
+The status in the top-left of the XP[d] window shows *Connected via Bluetooth*
+or *Connected via USB cable* when it is found.
+
+### Step 6 — Give XP[d] its permissions
+
+macOS asks for these the first time; you can also set them yourself in
+**System Settings › Privacy & Security**:
+
+- **Input Monitoring** — required, so XP[d] can read the remote's keys.
+- **Accessibility** — needed for keyboard shortcuts, scrolling, typing text and
+  window actions.
+- **Bluetooth** — allow it when asked (used for driver mode and the battery
+  level).
+
+After switching a permission on, quit XP[d] (menu-bar icon › Quit) and open it
+again.
+
+### Step 7 — Start using it
+
+Click a key on the picture of the remote and choose its action on the right.
+Over Bluetooth every key is recognised automatically. Changes save
+automatically; **⌘Z** undoes a change. Use **Profiles** (the stacked-squares
+button at the top) to make different layouts, for example one per app.
+
+### Updating to a newer version
+
+In Terminal, inside the XP[d] folder:
+
+```sh
+git pull
+bash script/build_and_run.sh
+```
+
+(If you used Download ZIP, download the new ZIP and repeat Step 3.) Your keys
+and profiles are kept. If you copied the app to Applications, copy the new
+`dist/XP[d].app` over it.
+
+### If something does not work
+
+- **Keys do nothing or scrolling asks for permission again** after an update:
+  run `bash script/build_and_run.sh --reset-permissions`, switch XP[d] on again
+  in Accessibility and Input Monitoring, then run
+  `bash script/build_and_run.sh --relaunch`.
+- **Remote not found:** check it is on and paired, and that XPPen's driver is
+  not running.
+- **The keys of the remote stop working after XP[d] crashed:** switch the remote
+  off and on again.
+- More help: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+
+### Uninstalling
+
+Quit XP[d], move **XP[d].app** to the Bin, and remove it from Input Monitoring
+and Accessibility in System Settings. Your settings are stored under the name
+`com.dmssoftres.xpd`.
+
+## For developers
+
+- Swift 6 package, macOS 14+. Build, ad-hoc sign and launch:
+  `./script/build_and_run.sh` (output in `dist/XP[d].app`).
 - Run the tests: `swift test`
-- On first launch, allow XP[d] in **System Settings › Privacy & Security ›
-  Input Monitoring**, and in **Accessibility** for actions that control other
-  apps. Bluetooth access is requested by macOS.
+- Other script modes: `--verify`, `--relaunch`, `--logs`, `--debug`,
+  `--reset-permissions`.
 
 ## Bluetooth driver mode (distinct keys over Bluetooth)
 
