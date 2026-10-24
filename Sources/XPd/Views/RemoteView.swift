@@ -6,7 +6,10 @@ struct RemoteView: View {
 
     @State private var dropTargetControl: RemoteControl?
     @State private var pendingDrop: MappingDropProposal?
+    @State private var pendingKeyDrop: KeyDropProposal?
     @State private var chipDrag: ChipDrag?
+    /// Whether the current key-face drag started with ⌥ (decided once).
+    @State private var keyDragStartedWithOption: Bool?
     @State private var keyFrames: [RemoteControl: CGRect] = [:]
 
     /// A chip being dragged inside the remote picture. This is an in-view
@@ -17,6 +20,8 @@ struct RemoteView: View {
         let preview: AnyView
         var location: CGPoint
         var isCopy: Bool
+        /// True for an ⌥-drag of the whole key rather than one chip.
+        var isWholeKey = false
     }
 
     var body: some View {
@@ -42,6 +47,84 @@ struct RemoteView: View {
                     : proposal.canSwap
                     ? "Swap exchanges the actions. Replace moves this action and erases the one on \(proposal.destinationControl.rawValue)."
                     : "The other action has an incomplete application target, so it cannot be swapped. Replace erases it.")
+            }
+            .confirmationDialog(
+                pendingKeyDrop.map { "\($0.target.rawValue) already has actions" } ?? "This key already has actions",
+                isPresented: keyDropChoiceIsPresented,
+                titleVisibility: .visible,
+                presenting: pendingKeyDrop
+            ) { proposal in
+                if proposal.canSwap {
+                    Button("Swap Keys") { resolvePendingKeyDrop(swap: true) }
+                }
+                Button("Replace", role: .destructive) { resolvePendingKeyDrop(swap: false) }
+                Button("Cancel", role: .cancel) {
+                    pendingKeyDrop = nil
+                    store.cancelKeyDrag()
+                }
+            } message: { proposal in
+                Text(proposal.isCopy
+                    ? "Replace erases everything on \(proposal.target.rawValue) and puts a copy of \(proposal.drag.control.rawValue) there."
+                    : proposal.canSwap
+                    ? "Swap exchanges all actions and titles of \(proposal.drag.control.rawValue) and \(proposal.target.rawValue). Replace moves \(proposal.drag.control.rawValue) and erases \(proposal.target.rawValue)."
+                    : "\(proposal.target.rawValue) has shortcuts that use \(proposal.drag.control.rawValue) as MOD, so they cannot be swapped. Replace erases \(proposal.target.rawValue).")
+            }
+    }
+
+    private var keyDropChoiceIsPresented: Binding<Bool> {
+        Binding(
+            get: { pendingKeyDrop != nil },
+            set: { isPresented in
+                if !isPresented, pendingKeyDrop != nil {
+                    pendingKeyDrop = nil
+                    store.cancelKeyDrag()
+                }
+            }
+        )
+    }
+
+    private func resolvePendingKeyDrop(swap: Bool) {
+        guard let proposal = pendingKeyDrop else { return }
+        pendingKeyDrop = nil
+        if store.resolveKeyDrop(proposal, swap: swap) {
+            store.selectedControl = proposal.target
+        }
+    }
+
+    /// ⌥-drag on a key's face moves the whole key (all its actions and its
+    /// title); add ⌘ to copy. Without ⌥ the key behaves as a normal button.
+    private func wholeKeyDragGesture(_ control: RemoteControl) -> some Gesture {
+        DragGesture(minimumDistance: 4, coordinateSpace: .named(remoteSpace))
+            .onChanged { value in
+                let flags = NSEvent.modifierFlags
+                let isCopy = flags.contains(.command)
+                if keyDragStartedWithOption == nil {
+                    keyDragStartedWithOption = flags.contains(.option)
+                }
+                if chipDrag == nil {
+                    guard keyDragStartedWithOption == true,
+                          let token = store.beginKeyDrag(from: control) else {
+                        keyDragStartedWithOption = false // try once only
+                        return
+                    }
+                    let preview = Text(control.rawValue)
+                        .font(.caption.weight(.bold))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(Color(white: 0.2), in: RoundedRectangle(cornerRadius: 8))
+                        .foregroundStyle(.white)
+                    chipDrag = ChipDrag(token: token, preview: AnyView(preview), location: value.location, isCopy: isCopy, isWholeKey: true)
+                }
+                guard chipDrag?.isWholeKey == true else { return }
+                chipDrag?.location = value.location
+                chipDrag?.isCopy = isCopy
+                dropTargetControl = keyFrames.first { $0.value.contains(value.location) }?.key
+                (isCopy ? NSCursor.dragCopy : NSCursor.closedHand).set()
+            }
+            .onEnded { value in
+                keyDragStartedWithOption = nil
+                guard chipDrag?.isWholeKey == true else { return }
+                finishChipDrag(at: value.location)
             }
     }
 
@@ -438,6 +521,7 @@ struct RemoteView: View {
             selected: store.selectedControl == control,
             live: store.liveControl == control
         ))
+        .simultaneousGesture(wholeKeyDragGesture(control))
         // Chips sit above the button (matching HardwareKeyStyle's 5 pt label
         // inset) so each one can be dragged onto another key.
         .overlay {
@@ -613,9 +697,21 @@ struct RemoteView: View {
         guard let drag = chipDrag,
               let target = keyFrames.first(where: { $0.value.contains(location) })?.key else {
             store.cancelMappingDrag()
+            store.cancelKeyDrag()
             return
         }
         let isCopy = NSEvent.modifierFlags.contains(.command)
+        if drag.isWholeKey {
+            switch store.dropKey(token: drag.token, onto: target, copy: isCopy) {
+            case .moved:
+                store.selectedControl = target
+            case .needsChoice(let proposal):
+                pendingKeyDrop = proposal
+            case .rejected:
+                store.cancelKeyDrag()
+            }
+            return
+        }
         switch store.dropMapping(token: drag.token, onto: target, copy: isCopy) {
         case .moved:
             store.selectedControl = target

@@ -155,6 +155,34 @@ enum MappingClipboardResult: Equatable {
     case invalidSource
 }
 
+/// A whole K key being dragged: every action it triggers (base and MOD
+/// layers) plus its title. Shortcuts where it is the MOD button stay put.
+struct KeyDragState: Equatable {
+    let token: String
+    let profileName: String
+    let control: RemoteControl
+    let rawMappings: [MappingKey: Mapping]
+    let title: String?
+}
+
+/// An occupied target key waiting for Swap / Replace (Replace only for copy).
+struct KeyDropProposal: Equatable, Identifiable {
+    let drag: KeyDragState
+    let target: RemoteControl
+    let targetMappings: [MappingKey: Mapping]
+    let targetTitle: String?
+    let isCopy: Bool
+    let canSwap: Bool
+
+    var id: String { drag.token }
+}
+
+enum KeyDropResult: Equatable {
+    case moved
+    case needsChoice(KeyDropProposal)
+    case rejected
+}
+
 /// One line of the key monitor: what was pressed and what happened.
 struct KeyMonitorEvent: Identifiable, Equatable {
     let id: Int
@@ -396,6 +424,7 @@ final class MappingStore {
     /// persisted profile payload or the macOS general pasteboard.
     private(set) var mappingClipboard: MappingClipboardState?
     private(set) var mappingDrag: MappingDragState?
+    private(set) var keyDrag: KeyDragState?
     /// Session-only undo/redo history of the key layout (never persisted).
     private var undoStack: [MappingUndoSnapshot] = []
     private var redoStack: [MappingUndoSnapshot] = []
@@ -2152,6 +2181,126 @@ final class MappingStore {
         return true
     }
 
+    // MARK: Whole-key drag
+
+    /// Actions triggered by a key (any gesture, base or a MOD layer).
+    private func keyOwnedMappings(_ control: RemoteControl) -> [MappingKey: Mapping] {
+        mappings.filter { $0.key.control == control && $0.value != Mapping() }
+    }
+
+    func beginKeyDrag(from control: RemoteControl) -> String? {
+        keyDrag = nil
+        guard activeRealm == .standard, control.isMIDIButton else { return nil }
+        let owned = keyOwnedMappings(control)
+        let title = standardButtonTitles[control]
+        guard !owned.isEmpty || title != nil else { return nil }
+        let drag = KeyDragState(
+            token: "xpd-key-drag:\(UUID().uuidString)",
+            profileName: profileName,
+            control: control,
+            rawMappings: owned,
+            title: title
+        )
+        keyDrag = drag
+        return drag.token
+    }
+
+    func cancelKeyDrag() {
+        keyDrag = nil
+    }
+
+    func dropKey(token: String, onto target: RemoteControl, copy: Bool = false) -> KeyDropResult {
+        guard let drag = keyDrag, drag.token == token else { return .rejected }
+        guard drag.profileName == profileName, activeRealm == .standard,
+              target.isMIDIButton, target != drag.control else { return .rejected }
+        if drag.rawMappings.keys.contains(where: { $0.modifierControls.contains(target) }) {
+            keyDrag = nil
+            lastActionResult = .failure(
+                "\(drag.control.rawValue) has shortcuts that use \(target.rawValue) as MOD, so it cannot move onto \(target.rawValue)."
+            )
+            return .rejected
+        }
+        guard keyOwnedMappings(drag.control) == drag.rawMappings,
+              standardButtonTitles[drag.control] == drag.title else {
+            keyDrag = nil
+            lastActionResult = .failure("The key changed while dragging, so nothing was moved.")
+            return .rejected
+        }
+        let targetMappings = keyOwnedMappings(target)
+        let targetTitle = standardButtonTitles[target]
+        let proposal = KeyDropProposal(
+            drag: drag,
+            target: target,
+            targetMappings: targetMappings,
+            targetTitle: targetTitle,
+            isCopy: copy,
+            canSwap: !copy && !targetMappings.keys.contains(where: { $0.modifierControls.contains(drag.control) })
+        )
+        if targetMappings.isEmpty && targetTitle == nil {
+            return completeKeyDrop(proposal, swap: false) ? .moved : .rejected
+        }
+        return .needsChoice(proposal)
+    }
+
+    @discardableResult
+    func resolveKeyDrop(_ proposal: KeyDropProposal, swap: Bool) -> Bool {
+        guard keyDrag == proposal.drag else {
+            lastActionResult = .failure("The drag is no longer current, so nothing was moved.")
+            return false
+        }
+        guard !swap || proposal.canSwap else { return false }
+        return completeKeyDrop(proposal, swap: swap)
+    }
+
+    private func completeKeyDrop(_ proposal: KeyDropProposal, swap: Bool) -> Bool {
+        let drag = proposal.drag
+        let source = drag.control
+        let target = proposal.target
+        keyDrag = nil
+        guard drag.profileName == profileName, activeRealm == .standard else {
+            lastActionResult = .failure("The profile changed while dragging, so nothing was moved.")
+            return false
+        }
+        guard keyOwnedMappings(source) == drag.rawMappings,
+              standardButtonTitles[source] == drag.title,
+              keyOwnedMappings(target) == proposal.targetMappings,
+              standardButtonTitles[target] == proposal.targetTitle else {
+            lastActionResult = .failure("A key changed while dragging, so nothing was moved.")
+            return false
+        }
+
+        func rekey(_ owned: [MappingKey: Mapping], to control: RemoteControl, disarm: Bool) -> [MappingKey: Mapping] {
+            Dictionary(uniqueKeysWithValues: owned.map { key, mapping in
+                var mapping = mapping
+                if disarm, mapping.action.isProcessBackedAutomation {
+                    mapping.automationEnabled = false
+                }
+                return (MappingKey(control: control, gesture: key.gesture, modifierControls: key.modifierControls), mapping)
+            })
+        }
+
+        cancelPendingButtonGestures()
+        let toTarget = rekey(drag.rawMappings, to: target, disarm: proposal.isCopy)
+        let toSource: [MappingKey: Mapping] = proposal.isCopy
+            ? drag.rawMappings
+            : swap ? rekey(proposal.targetMappings, to: source, disarm: false) : [:]
+        for key in Array(mappings.keys) where key.control == source || key.control == target {
+            mappings.removeValue(forKey: key)
+        }
+        mappings.merge(toTarget) { $1 }
+        mappings.merge(toSource) { $1 }
+
+        let sourceTitle = proposal.isCopy ? drag.title : (swap ? proposal.targetTitle : nil)
+        standardButtonTitles[target] = drag.title
+        standardButtonTitles[source] = sourceTitle
+
+        save()
+        lastActionResult = .success(
+            proposal.isCopy ? "Key copied" : swap ? "Keys swapped" : "Key moved"
+        )
+        return true
+    }
+
     // MARK: Key monitor
 
     /// Remote keys held right now, in remote order (Standard or MIDI).
@@ -2483,6 +2632,7 @@ final class MappingStore {
         closeProfileSelector()
         resetMIDIState(force: true)
         mappingDrag = nil
+        keyDrag = nil
         if let clipboard = mappingClipboard,
            !snapshot.availableProfiles.contains(clipboard.source.profileName) {
             mappingClipboard = nil

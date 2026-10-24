@@ -1422,7 +1422,13 @@ final class HIDCompositeReportTests: XCTestCase {
             gestureSchedule: { delay, action in
                 (scheduler ?? TestScheduler()).schedule(delay: delay, action: action)
             },
-            actionExecutionOverride: actionExecutionOverride
+            actionExecutionOverride: actionExecutionOverride,
+            // Never read the Mac's live keyboard state: a real key or modifier
+            // held during the run (e.g. from the paired remote) made these
+            // timing tests fail intermittently.
+            remoteModifierProvider: { [] },
+            remoteFunctionKeyProvider: { [] },
+            remoteKeyProvider: { _ in [] }
         )
     }
 

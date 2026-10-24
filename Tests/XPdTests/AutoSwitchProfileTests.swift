@@ -137,7 +137,17 @@ final class AutoSwitchProfileTests: XCTestCase {
 
 
     func testSwitchWaitsUntilHeldRemoteButtonIsReleased() async throws {
-        let store = makeStore()
+        // No real gesture timers, no real actions and no live keyboard
+        // state: real timers outlived this test and disturbed later ones.
+        let store = MappingStore(
+            userDefaults: defaults,
+            startHardware: false,
+            gestureSchedule: { _, _ in GestureScheduledAction {} },
+            actionExecutionOverride: { _, completion in completion(.success("")) },
+            remoteModifierProvider: { [] },
+            remoteFunctionKeyProvider: { [] },
+            remoteKeyProvider: { _ in [] }
+        )
         let web = try store.addProfile(named: "Web")
         store.addAutoSwitchApplication(chrome, to: web)
         XCTAssertTrue(store.selectProfile("Global"))
