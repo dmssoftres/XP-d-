@@ -11,6 +11,8 @@ drums, and chords.
 > the hardware this app works with. No XPPen software, firmware or code is
 > included or distributed.
 
+Like XP[d]? [Buy me a beer on Ko-fi](https://ko-fi.com/dmssoftres) 🍺
+
 ## Installation (new users)
 
 XP[d] is not sold through the App Store and is not yet a ready-made download.
@@ -432,6 +434,13 @@ Accessibility and Input Monitoring approval are tied to the app's code signature
 ```
 
 This stops XP[d], resets its Accessibility and Input Monitoring records, opens the Accessibility settings page, and launches the already-built bundle so it can be approved. Approve XP[d] in Accessibility, then use `./script/build_and_run.sh --relaunch` to restart the same bundle without rebuilding or changing its signature. The older `--reset-input-monitoring` mode remains available when only Input Monitoring needs to be reset.
+
+## Buy me a beer 🍺
+
+XP[d] is free for non-commercial use. If it saves you time and you would like
+to say thanks, you can buy me a beer on
+[Ko-fi](https://ko-fi.com/dmssoftres). It is entirely optional and does not
+unlock anything.
 
 ## Licence
 
