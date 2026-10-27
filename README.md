@@ -4,7 +4,7 @@
 
 # XP[d]
 
-A native macOS utility for turning the XPPen/HANWUGEE Shortcut Remote into a programmable controller.
+A native macOS utility for turning the XPPen/HANWUGEE Shortcut Remote (ACK05) into a programmable controller.
 
 XP[d] can also host typed MIDI profiles and publishes two virtual MIDI sources:
 `XP[d] Control` for DAW Remote mappings and `XP[d] Performance` for notes,
