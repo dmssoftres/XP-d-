@@ -2,20 +2,49 @@
   <img src="Resources/AppIcon.png" alt="XP[d] app icon" width="160">
 </p>
 
-# XP[d]
+<h1 align="center">XP[d]</h1>
 
-A native macOS utility for turning the XPPen/HANWUGEE Shortcut Remote (ACK05) into a programmable controller.
+<p align="center">
+  <b>Turn the XPPen / HANWUGEE Shortcut Remote (ACK05) into a fully
+  programmable controller for your Mac.</b><br>
+  Free, native, no XPPen driver needed. Works over Bluetooth and USB.
+</p>
 
-XP[d] can also host typed MIDI profiles and publishes two virtual MIDI sources:
-`XP[d] Control` for DAW Remote mappings and `XP[d] Performance` for notes,
-drums, and chords.
+<p align="center">
+  <a href="https://github.com/dmssoftres/XP-d-/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/dmssoftres/XP-d-?label=download&color=c0392b"></a>
+  <img alt="macOS 14 or later" src="https://img.shields.io/badge/macOS-14%2B-555">
+  <a href="https://github.com/dmssoftres/XP-d-/actions/workflows/tests.yml"><img alt="Tests" src="https://github.com/dmssoftres/XP-d-/actions/workflows/tests.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="Licence: PolyForm Noncommercial" src="https://img.shields.io/badge/licence-PolyForm%20Noncommercial-555"></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/dmssoftres/XP-d-/releases/latest"><b>Download</b></a> ·
+  <a href="#quick-install-ready-made-download"><b>Install guide</b></a> ·
+  <a href="CONTRIBUTING.md"><b>Contribute</b></a> ·
+  <a href="https://ko-fi.com/dmssoftres"><b>Ko-fi ☕</b></a>
+</p>
+
+<p align="center">
+  <img src="docs/images/xpd-main-window.png" alt="The XP[d] window: a picture of the remote on the left, the selected key's actions on the right" width="820">
+</p>
+
+## What it does
+
+| | |
+|---|---|
+| 🎛️ **Every key, your way** | Give each K key a keyboard shortcut, app, link, file, typed text, scroll or window action — with separate **Tap**, **Hold** and **Double** actions. |
+| 🧩 **MOD layers** | Turn any key into a modifier: hold it and the other keys do something else. Ten keys become dozens of actions. |
+| 🔄 **The wheel** | Scroll, zoom or step through anything — and hold a MOD key to give the wheel a different job. |
+| 🗂️ **Profiles per app** | Separate layouts for each app, switched by hand or automatically when you change app (optional). |
+| 🖱️ **Drag and drop editing** | Drag an action, or a whole key, onto another key to move it; hold ⌘ to copy. Full **Undo** (⌘Z). |
+| 👀 **See what you press** | An on-screen key map and a live key monitor show what every key does and what you just pressed. |
+| 📶 **Bluetooth that just works** | Every key and key combination is recognised over Bluetooth, with the battery level shown. |
+| 🎹 **MIDI** | Optional MIDI profiles with two virtual MIDI ports (`XP[d] Control` and `XP[d] Performance`) for DAWs, drums and chords. |
 
 > **Unofficial project.** XP[d] is not made, endorsed or supported by XPPen
 > or Hanvon Ugee. XPPen is a trademark of its owner, used here only to name
 > the hardware this app works with. No XPPen software, firmware or code is
 > included or distributed.
-
-Like XP[d]? [Buy me a liquid noradrenaline-dopamine rush at Ko-fi](https://ko-fi.com/dmssoftres) ☕
 
 ## Installation (new users)
 
