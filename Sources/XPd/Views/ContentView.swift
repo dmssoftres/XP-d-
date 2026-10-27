@@ -64,13 +64,19 @@ struct ContentView: View {
                         .font(.caption2.weight(.medium))
                         .foregroundStyle(.secondary)
                 }
-                Text(deviceStatus)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 4) {
+                    connectionIcon
+                    Text(deviceStatus)
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityElement(children: .combine)
             }
-            runModeButton
-            if store.hid.isConnected {
-                batteryIndicator
+            VStack(spacing: 2) {
+                runModeButton
+                if store.hid.isConnected {
+                    batteryIndicator
+                }
             }
             Spacer(minLength: 24)
             HStack(spacing: 12) {
@@ -173,13 +179,32 @@ struct ContentView: View {
         if !store.hid.hasExclusiveControl { return "Exclusive remote control unavailable" }
         guard store.hid.isConnected else { return "Waiting for Shortcut Remote" }
         switch store.hid.connectionTransport {
-        case .usb: return "Connected via USB cable"
+        case .usb: return "USB cable"
         case .bluetooth:
             return store.hid.isBluetoothDriverModeActive
-                ? "Connected via Bluetooth · driver mode"
-                : "Connected via Bluetooth"
+                ? "Bluetooth · driver mode"
+                : "Bluetooth"
         case .other(let raw): return "Connected via \(raw)"
         case nil: return "Connected"
+        }
+    }
+
+    @ViewBuilder
+    private var connectionIcon: some View {
+        if store.hid.hasInputAccess, store.hid.hasExclusiveControl, store.hid.isConnected {
+            switch store.hid.connectionTransport {
+            case .bluetooth:
+                BluetoothGlyph()
+                    .stroke(style: StrokeStyle(lineWidth: 0.9, lineCap: .round, lineJoin: .round))
+                    .frame(width: 4.2, height: 6.6)
+                    .accessibilityHidden(true)
+            case .usb:
+                Image(systemName: "cable.connector")
+                    .font(.system(size: 6.5))
+                    .accessibilityHidden(true)
+            default:
+                EmptyView()
+            }
         }
     }
 
@@ -766,5 +791,22 @@ private struct KeyMonitorView: View {
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Key monitor")
+    }
+}
+
+/// The Bluetooth rune (SF Symbols has no Bluetooth glyph).
+private struct BluetoothGlyph: Shape {
+    func path(in rect: CGRect) -> Path {
+        func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
+            CGPoint(x: rect.minX + x * rect.width, y: rect.minY + y * rect.height)
+        }
+        var path = Path()
+        path.move(to: point(0, 0.27))
+        path.addLine(to: point(1, 0.73))
+        path.addLine(to: point(0.5, 1))
+        path.addLine(to: point(0.5, 0))
+        path.addLine(to: point(1, 0.27))
+        path.addLine(to: point(0, 0.73))
+        return path
     }
 }

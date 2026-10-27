@@ -7,6 +7,8 @@ final class HIDTransportTests: XCTestCase {
         XCTAssertEqual(HIDService.transport(fromTransportProperty: "USB"), .usb)
         XCTAssertEqual(HIDService.transport(fromTransportProperty: "Bluetooth Low Energy"), .bluetooth)
         XCTAssertEqual(HIDService.transport(fromTransportProperty: "Bluetooth"), .bluetooth)
+        XCTAssertEqual(HIDService.transport(fromTransportProperty: "BluetoothLowEnergy"), .bluetooth)
+        XCTAssertEqual(HIDService.transport(fromTransportProperty: "bluetooth"), .bluetooth)
         XCTAssertNil(HIDService.transport(fromTransportProperty: nil))
         XCTAssertNil(HIDService.transport(fromTransportProperty: ""))
         XCTAssertNil(HIDService.transport(fromTransportProperty: NSNumber(value: 42)))

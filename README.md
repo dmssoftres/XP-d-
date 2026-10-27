@@ -15,9 +15,45 @@ Like XP[d]? [Buy me a liquid noradrenaline-dopamine rush at Ko-fi](https://ko-fi
 
 ## Installation (new users)
 
-XP[d] is not sold through the App Store and is not yet a ready-made download.
-You build it on your own Mac from this source code. It takes about five minutes
-and you only need to copy a few commands into the Terminal app.
+XP[d] is free and is not sold through the App Store. There are two ways to
+install it:
+
+- **Option A — ready-made download (quickest).** Download the app and allow it
+  once in System Settings. See *Quick install* below.
+- **Option B — build it yourself (Steps 1–3).** About five minutes; you copy a
+  few commands into the Terminal app. macOS opens an app you built yourself
+  without any warning.
+
+Then continue with Step 4 either way.
+
+### Quick install (ready-made download)
+
+1. Open this project's **Releases** page (right-hand side of the GitHub page)
+   and download the latest `XPd-….zip`.
+2. Double-click the zip to unzip it, then drag **XP[d].app** into your
+   **Applications** folder.
+3. Double-click XP[d]. macOS will say it cannot check the app for malicious
+   software and refuse to open it. Click **Done** (not *Move to Trash*).
+
+**Why the warning?** Apple only trusts apps whose developer pays for an Apple
+Developer membership and sends every version to Apple for checking
+("notarisation"). XP[d] is a free hobby project and is not notarised. The
+whole source code is on this page, so you can read it, or build it yourself
+with Option B instead.
+
+**Allow XP[d] once (Apple's official way):**
+
+4. Open **Apple menu › System Settings › Privacy & Security**.
+5. Scroll down to the **Security** section. Next to the message about XP[d],
+   click **Open Anyway**. (This button only appears for about an hour after
+   you tried to open the app; if it is missing, double-click XP[d] again.)
+6. Enter your Mac login password and click **OK**, then click **Open**.
+
+macOS remembers this choice: from now on XP[d] opens normally. Each new
+version you download needs this once more.
+
+(Older tips such as Control-click › Open no longer work on current macOS;
+use the steps above.)
 
 ### What you need
 
@@ -79,8 +115,8 @@ Extensions). You can also uninstall it; XP[d] does not need it.
   Bluetooth**.
 - **Or USB:** plug it in with a data cable.
 
-The status in the top-left of the XP[d] window shows *Connected via Bluetooth*
-or *Connected via USB cable* when it is found.
+The status in the top-left of the XP[d] window shows *Bluetooth* (with the
+Bluetooth icon) or *USB cable* when it is found.
 
 ### Step 6 — Give XP[d] its permissions
 

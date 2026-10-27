@@ -513,15 +513,13 @@ final class HIDService {
     }
 
     /// Maps the IOKit `kIOHIDTransportKey` property of the matched device to a
-    /// transport. Non-string or empty values stay unknown; any unrecognized
-    /// string is preserved so an unexpected transport is visible, never
-    /// mislabeled.
+    /// transport. Non-string or empty values stay unknown; any string naming
+    /// Bluetooth (e.g. "Bluetooth Low Energy") is Bluetooth; any other
+    /// unrecognized string is preserved so it is visible, never mislabeled.
     static func transport(fromTransportProperty value: Any?) -> ConnectionTransport? {
         guard let raw = value as? String, !raw.isEmpty else { return nil }
-        switch raw {
-        case "USB": return .usb
-        case "Bluetooth Low Energy", "Bluetooth": return .bluetooth
-        default: return .other(raw)
-        }
+        if raw == "USB" { return .usb }
+        if raw.localizedCaseInsensitiveContains("bluetooth") { return .bluetooth }
+        return .other(raw)
     }
 }
