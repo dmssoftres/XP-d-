@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="Resources/AppIcon.png" alt="XP[d] app icon" width="160">
+</p>
+
 # XP[d]
 
 A native macOS utility for turning the XPPen/HANWUGEE Shortcut Remote into a programmable controller.
